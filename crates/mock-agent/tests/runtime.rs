@@ -306,7 +306,15 @@ async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
         .collect();
     assert_eq!(
         names,
-        ["claude", "codebuddy", "codex", "cursor", "mock", "with"]
+        [
+            "claude",
+            "codebuddy",
+            "codex",
+            "cursor",
+            "gemini",
+            "mock",
+            "with"
+        ]
     );
 }
 

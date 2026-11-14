@@ -1,0 +1,263 @@
+//! Smoke tests against the real Gemini CLI. All tests are ignored by default.
+//! Requires an installed, signed-in Gemini CLI (`gemini` once, or GEMINI_API_KEY); the MCP
+//! test also needs Node.js. These tests spend quota and leave conversations in the CLI's
+//! session history. Install the CLI only with the user's approval; compilation needs no CLI.
+//!
+//! ```text
+//! CROSSAGENTS_SMOKE_GEMINI=<launch command> optional, default gemini
+//! CROSSAGENTS_SMOKE_MODEL=<model>           optional, default auto
+//! CROSSAGENTS_SMOKE_NEXT_MODEL=<model>      optional model-switch target
+//! cargo test -p crossagents-drivers --test gemini_smoke -- --ignored --test-threads=1
+//! ```
+//!
+//! Launch commands are split on whitespace, as in cursor_smoke.rs (no shell quoting).
+//! Compile only: `cargo test -p crossagents-drivers --test gemini_smoke --no-run`.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use chrono::Utc;
+use crossagents_core::{
+    Agent, AgentId, AgentStatus, Driver, DriverSession, McpServerSpec, OutputStream,
+    PermissionPolicy, Role, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+};
+use crossagents_drivers::gemini_native::GeminiNativeDriver;
+use crossagents_drivers::locate::Cli;
+use serde_json::json;
+use tokio::sync::mpsc;
+
+const TURN_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn driver() -> GeminiNativeDriver {
+    let command = std::env::var("CROSSAGENTS_SMOKE_GEMINI")
+        .unwrap_or_else(|_| "gemini".into())
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    GeminiNativeDriver::new("gemini", Cli::at(command), vec![])
+}
+
+fn spec(
+    cwd: &Path,
+    mcp_servers: Vec<McpServerSpec>,
+) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let spec = SessionSpec {
+        agent: Agent {
+            node: None,
+            id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            home: PathBuf::new(),
+            name: "smoke".into(),
+            plugin: "gemini".into(),
+            driver: Some("gemini-native".into()),
+            model: Some(std::env::var("CROSSAGENTS_SMOKE_MODEL").unwrap_or_else(|_| "auto".into())),
+            role: Role::Worker,
+            cwd: cwd.to_path_buf(),
+            config: json!({}),
+            status: AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: Default::default(),
+        },
+        mcp_servers,
+        permission: PermissionPolicy::Bypass,
+        permissions: None,
+        command: None,
+        instructions: Some(
+            "You are a test fixture. Answer as briefly as possible. When asked for the \
+             fixture word, answer BLUEBERRY."
+                .into(),
+        ),
+        env: vec![],
+        events: tx,
+    };
+    (spec, rx)
+}
+
+fn drain(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> (String, Vec<SessionEventKind>) {
+    let mut streamed = String::new();
+    let mut others = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        match event.kind {
+            SessionEventKind::Output {
+                stream: OutputStream::Text,
+                text,
+            } => streamed.push_str(&text),
+            other => others.push(other),
+        }
+    }
+    (streamed, others)
+}
+
+async fn turn(
+    session: &dyn DriverSession,
+    rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    text: &str,
+) -> (TurnOutcome, String, Vec<SessionEventKind>) {
+    let outcome = tokio::time::timeout(TURN_TIMEOUT, session.prompt(text))
+        .await
+        .expect("turn timed out")
+        .expect("turn failed");
+    let (streamed, others) = drain(rx);
+    assert_eq!(
+        outcome.stop_reason,
+        StopReason::EndTurn,
+        "{streamed} {others:?}"
+    );
+    (outcome, streamed, others)
+}
+
+/// A stdio MCP server with one tool, `probe_ping`, that answers with `PROBE_SECRET`.
+fn probe_server(dir: &Path) -> McpServerSpec {
+    let script = dir.join("probe.js");
+    std::fs::write(
+        &script,
+        r#"let buf = '';
+const send = m => process.stdout.write(JSON.stringify(m) + '\n');
+process.stdin.on('data', d => {
+  buf += d; let i;
+  while ((i = buf.indexOf('\n')) >= 0) {
+    const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+    if (!line) continue;
+    const m = JSON.parse(line);
+    if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'probe', version: '0' } } });
+    else if (m.method === 'tools/list') send({ jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'probe_ping', description: 'Returns the probe secret.', inputSchema: { type: 'object', properties: {} } }] } });
+    else if (m.method === 'tools/call') send({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'secret=' + process.env.PROBE_SECRET }] } });
+    else if (m.id != null) send({ jsonrpc: '2.0', id: m.id, result: {} });
+  }
+});
+"#,
+    )
+    .unwrap();
+    McpServerSpec {
+        name: "probe".into(),
+        command: PathBuf::from("node"),
+        args: vec![script.display().to_string()],
+        env: BTreeMap::from([("PROBE_SECRET".to_owned(), "banana77".to_owned())]),
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Gemini CLI"]
+async fn smoke_text_and_opening_instructions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), vec![]);
+    let session = driver().open(spec).await.unwrap();
+    assert!(matches!(
+        rx.try_recv().map(|e| e.kind),
+        Ok(SessionEventKind::Started { session_id }) if session_id == session.session_id()
+    ));
+    let (_, text, _) = turn(&*session, &mut rx, "What is the fixture word?").await;
+    assert!(text.contains("BLUEBERRY"), "{text}");
+    session.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Gemini CLI"]
+async fn smoke_resume_across_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = driver();
+    let (spec_a, mut rx) = spec(dir.path(), vec![]);
+    let session = driver.open(spec_a).await.unwrap();
+    turn(
+        &*session,
+        &mut rx,
+        "Remember the code word OKAPI-31. Reply with exactly: OK",
+    )
+    .await;
+    let id = session.session_id().to_owned();
+    // The turn's process has exited; discard the in-memory session too.
+    drop(session);
+
+    let (mut spec_b, mut rx) = spec(dir.path(), vec![]);
+    spec_b.instructions = None;
+    let resumed = driver.resume(&id, spec_b).await.unwrap();
+    assert_eq!(resumed.session_id(), id);
+    let (_, text, _) = turn(
+        &*resumed,
+        &mut rx,
+        "What was the code word? Reply with it only.",
+    )
+    .await;
+    assert!(text.contains("OKAPI-31"), "{text}");
+    resumed.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Gemini CLI and two available model choices"]
+async fn smoke_model_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), vec![]);
+    let initial = spec.agent.model.as_deref().unwrap();
+    let next = std::env::var("CROSSAGENTS_SMOKE_NEXT_MODEL").unwrap_or_else(|_| {
+        if initial == "auto" {
+            "gemini-2.5-pro"
+        } else {
+            "auto"
+        }
+        .into()
+    });
+    assert!(!next.trim().is_empty(), "switch target must not be empty");
+    assert_ne!(initial, next, "choose a different model for the switch");
+    let session = driver().open(spec).await.unwrap();
+    turn(&*session, &mut rx, "Reply with exactly: READY").await;
+    let id = session.session_id().to_owned();
+    session.set_model(Some(&next), None).await.unwrap();
+    let (_, text, _) = turn(&*session, &mut rx, "What is the fixture word?").await;
+    assert!(text.contains("BLUEBERRY"), "{text}");
+    assert_eq!(session.session_id(), id);
+    session.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Gemini CLI and Node.js"]
+async fn smoke_settings_mcp_env() {
+    let dir = tempfile::tempdir().unwrap();
+    // The driver mounts this server through the session's system settings file.
+    let (spec, mut rx) = spec(dir.path(), vec![probe_server(dir.path())]);
+    let session = driver().open(spec).await.unwrap();
+    let (_, text, events) = turn(
+        &*session,
+        &mut rx,
+        "Call the probe_ping MCP tool and reply with exactly what it returned.",
+    )
+    .await;
+    assert!(text.contains("secret=banana77"), "{text} {events:?}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEventKind::ToolCall { title, .. } if title.contains("probe_ping")
+        )),
+        "probe_ping was not called: {events:?}"
+    );
+    session.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Gemini CLI"]
+async fn smoke_interrupt_kills_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), vec![]);
+    let session: std::sync::Arc<dyn DriverSession> = driver().open(spec).await.unwrap().into();
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .prompt("Count slowly from one to five hundred, one number per line.")
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    session.interrupt().await.unwrap();
+    let outcome = tokio::time::timeout(TURN_TIMEOUT, running)
+        .await
+        .expect("turn did not end after interrupt")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.stop_reason, StopReason::Cancelled);
+    let _ = drain(&mut rx);
+    session.shutdown().await;
+}

@@ -223,7 +223,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/history", get(list_history))
         .route(
             "/v1/runs",
-            get(list_runs).post(create_run).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
+            get(list_runs)
+                .post(create_run)
+                .layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
         )
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))

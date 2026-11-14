@@ -367,7 +367,7 @@ delivered → rejected → running          # 同一 Worker 返工
 
 ## 9. 驱动
 
-体验优先：主力 agent 走原生接口，其余走 ACP。五个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
+体验优先：主力 agent 走原生接口，其余走 ACP。六个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
 
 ### 9.1 驱动一览
 
@@ -378,7 +378,8 @@ delivered → rejected → running          # 同一 Worker 返工
 | `codebuddy-native` | `codebuddy -p`，同一套 stream-json 协议；包装 `claude-native`，补上 CodeBuddy 的模型表、安装检查和会话文件位置 | 一进程一会话 | 同 `claude-native` | CodeBuddy |
 | `with-native` | `with-cli chat -o stream-json --sessionId <id>`（AG-UI 风格事件，见 [实测](research/with-cli.md)）；会话由 With 服务端按 id 保存，MCP 经会话自己的 `-c` 配置挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | With |
 | `cursor-native` | `agent -p --output-format stream-json --stream-partial-output --resume <id>`（NDJSON，见 [记录](research/cursor-cli.md)）；会话由 Cursor 侧按 chat id 保存，MCP 经会话自己的 `--plugin-dir` 临时 plugin 挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | Cursor |
-| `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Gemini CLI、Goose 等长尾（with-cli 的 `acp` 子命令在 v0.31.0 工具调用全部失败，只作备用） |
+| `gemini-native` | `gemini --prompt=<text> -o stream-json --session-id/--resume <id>`（NDJSON，见 [记录](research/gemini-cli.md)）；会话由 Gemini 侧按项目目录保存，MCP 经会话自己的系统级 settings 文件（`GEMINI_CLI_SYSTEM_SETTINGS_PATH`）挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | Gemini CLI |
+| `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Goose 等长尾（with-cli 的 `acp` 子命令在 v0.31.0 工具调用全部失败，只作备用） |
 
 包装型驱动（如 `codebuddy-native`）必须把 trait 的每个方法都转发给内层，包括有默认实现的 `adopt`；漏转发不会编译报错，只会让接管静默失效。
 
@@ -411,8 +412,8 @@ Session（一个会话）
 
 ### 9.3 配置与挂载
 
-- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
-- 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置三家在 `crates/plugins/agents/{claude,codex,codebuddy}.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
+- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "cursor-native" | "gemini-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
+- 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置的在 `crates/plugins/agents/*.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
 - 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
 - 其它 MCP：`config.toml` 的 `[mcp.<name>]`（`command` 是程序加参数，`env` 可选）给每个会话再挂一个 stdio MCP server，排在协作工具之后，重名不覆盖它。第三方能力由此接入，不用碰驱动——例：豆包生图 `integrations/doubao-mcp`。
@@ -504,7 +505,7 @@ efforts = ["low", "medium", "high"]
     └── workers/<name>/              每个 Worker 的固定 worktree
 ```
 
-- 会话不与目录绑定：Claude Code 在别的目录 `--resume` 仍记得对话，Codex 的 `thread/resume`、`turn/start` 都能换 cwd（[实测](research/claude-stream-json.md)、[实测](research/codex-app-server.md)）。所以执行目录跟着任务走，会话的归属跟着工作区走（§4.7）。
+- 会话不与目录绑定：Claude Code 在别的目录 `--resume` 仍记得对话，Codex 的 `thread/resume`、`turn/start` 都能换 cwd（[实测](research/claude-stream-json.md)、[实测](research/codex-app-server.md)）。所以执行目录跟着任务走，会话的归属跟着工作区走（§4.7）。Gemini CLI 例外：会话按项目目录存放，换目录就找不到，驱动的 `move_cwd` 报 false（[记录](research/gemini-cli.md)）。
 - 创建 Worker 目录时复制主目录未提交的本地设置（如 `.claude/settings.local.json`），保证行为一致。
 - 用户当前工作区不被触碰；结果在集成分支上，最终是否合入主分支由人决定。
 
@@ -554,7 +555,7 @@ crossagents events [--follow] | usage [--by ...]
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
 - `core`：新增 `Driver` trait（含 `adopt`）、能力表、统一会话事件、退出原因 `ExitCause`。
-- `drivers`：`codex_native`（见 [N1](tasks/N1.md)）、`claude_native`（见 [N3](tasks/N3.md)）、`codebuddy_native`（包装 `claude_native`）、`cursor_native`（见 [cursor-cli](research/cursor-cli.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
+- `drivers`：`codex_native`（见 [N1](tasks/N1.md)）、`claude_native`（见 [N3](tasks/N3.md)）、`codebuddy_native`（包装 `claude_native`）、`cursor_native`（见 [cursor-cli](research/cursor-cli.md)）、`gemini_native`（见 [gemini-cli](research/gemini-cli.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
   `host` 是运行时宿主（宿主进程本体 `serve`、帧协议 `wire`、Windows Job Object `job`、hub 侧的 `client`：discover / adopt / leave），`launch` 负责脱离 hub 拉起宿主。
 - `hub`：`runtime` 里的 `recover` 负责重启接管；`cli` 多一个隐藏子命令 `crossagents runtime-host`。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。

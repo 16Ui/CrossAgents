@@ -1236,12 +1236,23 @@ fn codex_vendor(found: &Path) -> Option<PathBuf> {
     None
 }
 
-/// The script behind npm's `@tencent-ai/codebuddy-code` shim. Run through `node` directly,
-/// the arguments skip `cmd.exe`'s quoting, which the JSON of `--mcp-config` does not survive.
+/// The script behind an npm shim (`.cmd` on Windows). Run through `node` directly, the
+/// arguments skip `cmd.exe`'s quoting, which a JSON argument or a long prompt does not
+/// survive.
+///
+/// The wrapper names the script it runs (`"%_prog%" "%dp0%\..\@scope\pkg\bin\cli.js" %*`),
+/// which covers every npm package. CodeBuddy's wrapper is the one form that does not, so
+/// its known path stays as the fallback.
 fn npm_script(shim: &Path) -> Option<PathBuf> {
     let is_cmd = shim
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"));
+    if !is_cmd {
+        return None;
+    }
+    if let Some(script) = wrapper_script(shim) {
+        return Some(script);
+    }
     let script = shim
         .parent()?
         .join("node_modules")
@@ -1249,7 +1260,67 @@ fn npm_script(shim: &Path) -> Option<PathBuf> {
         .join("codebuddy-code")
         .join("bin")
         .join("codebuddy");
-    (is_cmd && script.is_file()).then_some(script)
+    script.is_file().then_some(script)
+}
+
+/// The file an npm `.cmd` wrapper runs with node: the quoted `%dp0%\...` path on the line
+/// that starts the program, resolved beside the wrapper. Executables are skipped — the same
+/// wrapper also names `node.exe` itself.
+fn wrapper_script(shim: &Path) -> Option<PathBuf> {
+    let text = String::from_utf8_lossy(&std::fs::read(shim).ok()?).into_owned();
+    let dir = shim.parent()?;
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if !lower.contains("%_prog%") && !lower.contains("%~dp0%") {
+            continue;
+        }
+        for quoted in line.split('"').skip(1).step_by(2) {
+            let Some(rest) = strip_dp0(quoted) else {
+                continue;
+            };
+            let path = normalize(dir.join(rest.replace('\\', std::path::MAIN_SEPARATOR_STR)));
+            let runnable = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    !["exe", "cmd", "bat", "com", "ps1"]
+                        .iter()
+                        .any(|bad| ext.eq_ignore_ascii_case(bad))
+                })
+                .unwrap_or(true);
+            if runnable && path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// What follows `%dp0%\` (or `%~dp0%\`) in a wrapper's quoted path.
+fn strip_dp0(quoted: &str) -> Option<&str> {
+    let lower = quoted.to_ascii_lowercase();
+    for prefix in ["%~dp0%\\", "%~dp0%/", "%dp0%\\", "%dp0%/"] {
+        if lower.starts_with(prefix) {
+            return Some(&quoted[prefix.len()..]);
+        }
+    }
+    None
+}
+
+/// `a\b\..\c` → `a\c`: a wrapper's `%dp0%\..` stays in the path it names.
+fn normalize(path: PathBuf) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// The files `pattern` names: `~`, `%VAR%`, `$VAR` and `*` (one directory level) expanded.
@@ -1689,6 +1760,42 @@ mod tests {
             found.argv,
             [display(&node), display(&bin.join("codebuddy"))]
         );
+    }
+
+    /// The wrapper names the script, so a second npm package needs no code of its own
+    /// (Gemini CLI's `bundle/gemini.js`).
+    #[test]
+    fn any_npm_wrapper_resolves_the_script_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = dir
+            .path()
+            .join("node_modules")
+            .join("@google")
+            .join("gemini-cli")
+            .join("bundle")
+            .join("gemini.js");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        touch(&script);
+        let shim = bin.join("gemini.cmd");
+        std::fs::write(
+            &shim,
+            "@ECHO off\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n)\r\nendLocal & \"%_prog%\"  \"%dp0%\\..\\@google\\gemini-cli\\bundle\\gemini.js\" %*\r\n",
+        )
+        .unwrap();
+        let node = bin.join(if cfg!(windows) { "node.exe" } else { "node" });
+        touch(&node);
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["gemini"]
+            shim = "node-script"
+            "#,
+        )
+        .unwrap();
+        let found = locator.locate_in(&machine(&bin)).unwrap();
+        assert_eq!(found.path, shim);
+        assert_eq!(found.argv, [display(&node), display(&script)]);
     }
 
     #[test]

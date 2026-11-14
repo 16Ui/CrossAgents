@@ -5,6 +5,8 @@
 //! - [`codebuddy_native`]: WorkBuddy's CodeBuddy CLI on the same protocol.
 //! - [`with_native`]: With's `with-cli chat -o stream-json`, one process per turn.
 //! - [`cursor_native`]: Cursor's `agent -p`, one process per turn, resumed by chat id.
+//! - [`gemini_native`]: Gemini CLI's `gemini -p -o stream-json`, one process per turn,
+//!   resumed by its session id.
 //! - [`acp`]: `acp-generic`, any ACP agent, one process per session.
 //! - [`mcp_config`]: what the CLI's own MCP configuration says, beside what the hub passes.
 //! - [`hooks`]: whether a session may run the CLI's own hooks (off unless the agent allows).
@@ -18,6 +20,7 @@ pub mod claude_native;
 pub mod codebuddy_native;
 pub mod codex_native;
 pub mod cursor_native;
+pub mod gemini_native;
 pub mod hooks;
 pub mod host;
 pub mod install;

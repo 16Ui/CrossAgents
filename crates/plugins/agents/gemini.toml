@@ -1,0 +1,43 @@
+# Gemini CLI, the built-in agent (docs/DESIGN.md §9.3, docs/research/gemini-cli.md).
+#
+# `driver = "gemini-native"` is the CLI's headless stream-json mode: one process per turn,
+# resumed by the session id the hub chose. Sign in once with `gemini`, or set
+# GEMINI_API_KEY (headless never opens a browser to log in).
+#
+# The models below are what `gemini --list-models` offered on 0.68.0; the driver asks the
+# installed CLI again at startup and prefers its answer.
+name = "gemini"
+driver = "gemini-native"
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them
+# the CLI still runs, marked unverified.
+verified = ["0.68"]
+
+[models]
+fallback = ["auto", "gemini-2.5-pro", "gemini-3.5-flash", "gemini-3.1-flash-lite"]
+# Gemini has no effort flag: a model's thinking level is its own.
+efforts = []
+
+[locate]
+env = "GEMINI_CLI"
+commands = ["gemini"]
+# npm's `gemini.cmd` runs the bundle through `node`; so do we, which keeps long prompts
+# (and anything that looks like a flag) away from cmd.exe's quoting.
+shim = "node-script"
+version = ["--version"]
+
+[locate.paths]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["/opt/homebrew/bin/gemini", "/usr/local/bin/gemini"]
+
+[install]
+label = "Gemini CLI"
+hint = "npm install -g @google/gemini-cli"
+docs = "https://github.com/google-gemini/gemini-cli"
+login = "then sign in once with `gemini` (or set GEMINI_API_KEY)"
+notes = "Headless runs cannot open a browser, so the sign-in has to happen once in a terminal."
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+run = ["npm", "install", "-g", "@google/gemini-cli"]
+upgrade = ["npm", "install", "-g", "@google/gemini-cli@latest"]

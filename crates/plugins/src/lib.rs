@@ -38,6 +38,7 @@ use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
 use crossagents_drivers::cursor_native::CursorNativeDriver;
+use crossagents_drivers::gemini_native::GeminiNativeDriver;
 use crossagents_drivers::locate::{Cli, Install, Locator};
 use crossagents_drivers::with_native::WithNativeDriver;
 use serde::Deserialize;
@@ -255,6 +256,11 @@ impl Profile {
                 self.config.cli(),
                 self.config.models.clone(),
             )),
+            DriverKind::GeminiNative => Arc::new(GeminiNativeDriver::new(
+                &self.name,
+                self.config.cli(),
+                self.config.models.clone(),
+            )),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -429,7 +435,7 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 5);
+        assert_eq!(builtin::all().len(), 6);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -483,6 +489,7 @@ mod tests {
             ("claude", &["claude"][..]),
             ("codebuddy", &["codebuddy"][..]),
             ("cursor", &["agent", "cursor-agent"][..]),
+            ("gemini", &["gemini"][..]),
             ("with", &["with-cli"][..]),
         ] {
             let locator = builtin::locator(name).unwrap();
@@ -573,7 +580,15 @@ mod tests {
         let registry = PluginRegistry::with_config(&configs);
         assert_eq!(
             registry.names(),
-            ["claude", "codebuddy", "codex", "cursor", "mock", "with"]
+            [
+                "claude",
+                "codebuddy",
+                "codex",
+                "cursor",
+                "gemini",
+                "mock",
+                "with"
+            ]
         );
         assert_eq!(
             registry.get("claude").unwrap().models(),
