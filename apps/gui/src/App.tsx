@@ -12,6 +12,7 @@ import { BrowserHost } from "./browser";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
+import { useSystemNotices } from "./notify";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
 import { BOTTOM, COLLAPSE, SIDEBAR, TOOLS, dragBottom, dragEdge, setBottomHeight, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
@@ -192,6 +193,7 @@ function UnavailablePage({ label, support }: { label: string; support: FeatureSu
 }
 
 export function App() {
+  useSystemNotices();
   const route = useRoute();
   const [section, a, b, c] = route;
   const { state, focus, peek } = useLayout();

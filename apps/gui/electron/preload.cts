@@ -156,6 +156,14 @@ const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {
     },
   },
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
+  notify: (notice) => ipcRenderer.send("notify:show", notice),
+  onNoticeOpen(listener) {
+    const wrapped = (_event: IpcRendererEvent, agentId: string) => listener(agentId);
+    ipcRenderer.on("notify:open", wrapped);
+    return () => {
+      ipcRenderer.removeListener("notify:open", wrapped);
+    };
+  },
   command: (name) => ipcRenderer.send("window:command", name),
   tailscale: {
     status: (): Promise<TailscaleStatus> => ipcRenderer.invoke("tailscale:status"),

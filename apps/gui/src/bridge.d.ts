@@ -185,6 +185,13 @@ export interface CrossAgentsBridge {
   openPath?(scope: string, path: string): Promise<{ copy: boolean }>;
   /** The page's theme changed: the window frame follows it. */
   setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
+  /**
+   * A system notice (a toast). The main process drops it while the window is in front: with
+   * the window focused the page already shows what happened.
+   */
+  notify?(notice: { title: string; body: string; agentId?: string }): void;
+  /** The person clicked a notice: open that conversation. Returns an unsubscribe function. */
+  onNoticeOpen?(listener: (agentId: string) => void): () => void;
   /** The GUI's update, and checking or installing it. `null`: this build does not update itself. */
   updates?: {
     get(): Promise<UpdateState | null>;

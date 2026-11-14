@@ -13,10 +13,12 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
+
 use async_trait::async_trait;
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, CoreError, LoginCommand, ModelInfo, SessionUsage,
-    mask_email,
+    Account, AccountProvider, AccountStatus, CoreError, LoginCommand, ModelInfo, RequestUsage,
+    SessionUsage, TokenTotals, mask_email,
 };
 use crossagents_drivers::gemini_native::wire::parse_models;
 use crossagents_drivers::process::{hide_console, resolve_program};
@@ -208,10 +210,25 @@ impl AccountProvider for GeminiAccounts {
         status
     }
 
-    /// The CLI's per-project session files are not read: they hold the conversation, not a
-    /// token count this account page can add up.
-    async fn sessions(&self, _account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
-        Ok(Vec::new())
+    /// The CLI's per-project session files (`<home>/.gemini/tmp/<project>/chats/`): each
+    /// message of the model carries the token counts the API reported, so a session adds up
+    /// to real numbers. Files that do not parse are skipped: another version may write
+    /// something else, and a wrong sum is worse than none.
+    async fn sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+        let dir = self.config_dir(account).join("tmp");
+        let scanned = tokio::task::spawn_blocking(move || {
+            let mut found = Vec::new();
+            for file in chat_files(&dir) {
+                if let Some(session) = scan_chat(&file) {
+                    found.push(session);
+                }
+            }
+            found.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+            found
+        })
+        .await
+        .map_err(|e| CoreError::Storage(format!("cannot scan Gemini sessions: {e}")))?;
+        Ok(scanned)
     }
 
     async fn models(&self, account: &Account) -> Vec<ModelInfo> {
@@ -275,6 +292,103 @@ impl AccountProvider for GeminiAccounts {
     fn agent_env(&self, account: &Account) -> Vec<(String, String)> {
         self.env_for(account)
     }
+}
+
+/// Every session file under `<home>/.gemini/tmp`: one directory per project, `chats/` inside.
+fn chat_files(tmp: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let Ok(projects) = std::fs::read_dir(tmp) else {
+        return files;
+    };
+    for project in projects.flatten() {
+        let Ok(entries) = std::fs::read_dir(project.path().join("chats")) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let extension = path.extension().and_then(|ext| ext.to_str());
+            if matches!(extension, Some("json" | "jsonl")) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// One session file as usage. Each message of the model carries the token counts the API
+/// reported (`tokens: {input, output, cached, thoughts, tool, total}`); the person's own
+/// messages carry none. A file that does not look like that is skipped, not guessed at.
+fn scan_chat(path: &Path) -> Option<SessionUsage> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let record: Value = serde_json::from_str(&text).ok().or_else(|| {
+        // A JSON-lines file keeps the conversation on a single line.
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|value| value.get("messages").is_some())
+    })?;
+    let messages = record["messages"].as_array()?;
+    let mut requests = Vec::new();
+    let mut totals = TokenTotals::default();
+    for message in messages {
+        if message["type"] != "gemini" {
+            continue;
+        }
+        let tokens = &message["tokens"];
+        if !tokens.is_object() {
+            continue;
+        }
+        let Some(at) = message["timestamp"]
+            .as_str()
+            .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+            .map(|at| at.with_timezone(&Utc))
+        else {
+            continue;
+        };
+        let num = |key: &str| tokens[key].as_u64().unwrap_or(0);
+        let input = num("input");
+        let output = num("output");
+        let usage = TokenTotals {
+            sessions: 0,
+            input_tokens: input,
+            cached_input_tokens: num("cached").min(input),
+            output_tokens: output,
+            reasoning_output_tokens: num("thoughts").min(output),
+            credits: 0.0,
+        };
+        totals.add(&usage);
+        requests.push(RequestUsage {
+            at,
+            model: message["model"].as_str().map(str::to_owned),
+            totals: usage,
+        });
+    }
+    if requests.is_empty() {
+        return None;
+    }
+    let started_at = record["startTime"]
+        .as_str()
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or(requests[0].at);
+    let session_id = record["sessionId"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+        })?;
+    Some(SessionUsage {
+        session_id,
+        started_at,
+        model: requests.last().and_then(|request| request.model.clone()),
+        // Nothing in the file says whether CrossAgents or the terminal started it.
+        originator: None,
+        totals: TokenTotals {
+            sessions: 1,
+            ..totals
+        },
+        requests,
+    })
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -375,6 +489,48 @@ mod tests {
             Some(home.path().display().to_string().as_str())
         );
         assert_eq!(login.env_remove, ["GEMINI_API_KEY"]);
+    }
+
+    #[test]
+    fn a_session_file_adds_up_the_models_messages() {
+        let dir = tempfile::tempdir().unwrap();
+        let chats = dir.path().join("tmp/proj/chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        std::fs::write(
+            chats.join("session-1.json"),
+            r#"{
+              "sessionId": "s-1",
+              "startTime": "2026-11-15T01:00:00.000Z",
+              "messages": [
+                {"type": "user", "timestamp": "2026-11-15T01:00:01.000Z", "content": "hi"},
+                {"type": "gemini", "timestamp": "2026-11-15T01:00:05.000Z", "model": "gemini-2.5-pro",
+                 "tokens": {"input": 100, "output": 20, "cached": 40, "thoughts": 5, "total": 120}},
+                {"type": "gemini", "timestamp": "2026-11-15T01:00:09.000Z", "model": "gemini-2.5-pro",
+                 "tokens": {"input": 50, "output": 10, "cached": 0, "thoughts": 0, "total": 60}}
+              ]
+            }"#,
+        )
+        .unwrap();
+        // A file with nothing to add up (an older CLI, or a session that never answered).
+        std::fs::write(
+            chats.join("session-2.json"),
+            r#"{"sessionId": "s-2", "messages": [{"type": "user", "content": "hi"}]}"#,
+        )
+        .unwrap();
+
+        let files = chat_files(&dir.path().join("tmp"));
+        assert_eq!(files.len(), 2);
+        let usage = files.iter().filter_map(|file| scan_chat(file)).next();
+        let usage = usage.expect("one session with tokens");
+        assert_eq!(usage.session_id, "s-1");
+        assert_eq!(usage.requests.len(), 2);
+        assert_eq!(usage.totals.sessions, 1);
+        assert_eq!(usage.totals.input_tokens, 150);
+        assert_eq!(usage.totals.cached_input_tokens, 40);
+        assert_eq!(usage.totals.output_tokens, 30);
+        assert_eq!(usage.totals.reasoning_output_tokens, 5);
+        assert_eq!(usage.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(usage.started_at.to_rfc3339(), "2026-11-15T01:00:00+00:00");
     }
 
     #[tokio::test]

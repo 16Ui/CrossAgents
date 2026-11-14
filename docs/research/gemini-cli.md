@@ -145,6 +145,12 @@ environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI,
 
 驱动侧的做法（`crossagents gemini-login`，隐藏子命令）：跑 `gemini --acp`，发上面两条请求，等 `authenticate` 返回；hub 把这条命令当普通登录命令启动，然后轮询账号状态，`oauth_creds.json` 出现就收尾。自动这条路失败时（老版本没有 ACP、浏览器被关掉），账号页的提示会退回「在终端运行 gemini 登录一次」。
 
+## 用量
+
+- **逐轮 token**：`stream-json` 的 `result.stats` 带 `input_tokens` / `output_tokens` / `cached` / `total_tokens`，驱动每轮发一条 `agent.usage`，hub 按 agent / run 聚合。这是 `/v1/usage` 里 Gemini 数字的来源。
+- **会话文件**：`<home>/.gemini/tmp/<project>/chats/session-*.json` 里每条 `type: "gemini"` 的消息带 `tokens: {input, output, cached, thoughts, tool, total}` 和 `timestamp`、`model`（bundle 证据：`ChatRecordingService.recordMessageTokens`）。账号页按这个文件汇总「按厂商日志」的会话用量；解析不了的文件直接跳过，不猜。
+- **没有额度**：Gemini 没有 Cursor 那种账单周期接口，也没有 `gemini usage` 子命令，免费/付费额度只在报错里出现。所以账号页不显示 plan、窗口或余额，`credits` 为空。
+
 ## 安装与定位
 
 - npm：`npm i -g @google/gemini-cli`，bin 是 `gemini`；Windows 上是 `node_modules/.bin/gemini.cmd`，里面用 `%dp0%\..` 拼出真正的入口脚本。`crates/drivers/src/locate.rs` 的 `wrapper_script()` 通用地解析这种 npm shim，CodeBuddy 的已知路径只是兜底。

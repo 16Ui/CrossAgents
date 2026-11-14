@@ -9,7 +9,7 @@ import { homedir, hostname, tmpdir } from "node:os";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, session, protocol, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, safeStorage, shell, session, protocol, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { permissionAllowed } from "./permissions.cjs";
@@ -372,6 +372,34 @@ ipcMain.handle("update:get", (event) => (fromApp(event) ? (updates?.state() ?? n
 ipcMain.handle("update:check", async (event) => (fromApp(event) && updates ? updates.check() : null));
 ipcMain.on("update:install", (event) => {
   if (fromApp(event)) updates?.install();
+});
+
+/**
+ * A system notice the page wants said out loud. It is shown only while the window is not in
+ * front — with the window focused the page already shows it, and a toast would be noise.
+ * Clicking brings the window forward and asks the page to open that conversation.
+ */
+const notices = new Set<Notification>();
+ipcMain.on("notify:show", (event, raw: unknown) => {
+  if (!fromApp(event) || !raw || typeof raw !== "object") return;
+  const { title, body, agentId } = raw as { title?: unknown; body?: unknown; agentId?: unknown };
+  if (typeof title !== "string" || typeof body !== "string" || !title || !body) return;
+  const win = BrowserWindow.getAllWindows()[0];
+  if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return;
+  if (!Notification.isSupported()) return;
+  const notification = new Notification({ title, body });
+  notices.add(notification);
+  const drop = () => {
+    notices.delete(notification);
+  };
+  notification.on("close", drop);
+  notification.on("failed", drop);
+  notification.on("click", () => {
+    drop();
+    showWindow();
+    if (typeof agentId === "string" && agentId) broadcast("notify:open", agentId);
+  });
+  notification.show();
 });
 
 /** Swaps the development hub for the shipped one; resolves to an error message or null. */
@@ -832,6 +860,11 @@ function showWindow() {
   win.focus();
 }
 app.on("second-instance", showWindow);
+
+// Windows shows a toast only for an app with an AppUserModelID; the installer's shortcut
+// carries the same one (electron-builder's appId), so a development run and an installed
+// copy both get one.
+if (process.platform === "win32") app.setAppUserModelId("dev.crossagents.gui");
 
 app.whenReady().then(async () => {
   if (!single) return;

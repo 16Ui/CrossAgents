@@ -546,3 +546,11 @@ B 删除 run：
 - [x] 测试：`wire.rs` 六个解析测试；驱动四个 mock-CLI 测试（开/续、deny 不带 yolo、退出 53、打断）；`locate` 新增 npm shim 测试；[crates/drivers/tests/gemini_smoke.rs](../crates/drivers/tests/gemini_smoke.rs) 五个需要真 CLI 的 `#[ignore]` 用例（文本、跨进程续、换模型、MCP env、打断）。
 - [x] 账号页接上 Gemini：`GeminiAccounts`（[crates/plugins/src/gemini_account.rs](../crates/plugins/src/gemini_account.rs)）读 `<home>/.gemini/oauth_creds.json`、`google_accounts.json` 与 `settings.json` 的 `security.auth.selectedType`，显示登录状态、邮箱和 `--list-models` 给出的模型；`GEMINI_CLI_HOME` 做多账号隔离（默认账号不设变量，用本机 `~/.gemini`）。
 - [x] 在 GUI 里登录：Gemini 没有 `login` 子命令，但 ACP 的 `authenticate` 会让 CLI 自己打开浏览器。新增隐藏子命令 `crossagents gemini-login --command <gemini>`（[crates/drivers/src/gemini_native/login.rs](../crates/drivers/src/gemini_native/login.rs)），`LoginCommand` 加 `opens_browser`：hub 不抓链接、不等进程退出，改为轮询账号状态，凭据出现就停掉进程（`serve_login` 的 `page` 改成 `Option`，两种登录共用一套 watching）。自动失败时账号页的提示写明可以退回终端登录。
+- [x] 用量：Gemini 的逐轮 token 一直由驱动的 `result.stats` 上报；账号页再加「按厂商日志」的会话汇总，读 `<home>/.gemini/tmp/<project>/chats/*.json` 里每条 `gemini` 消息的 `tokens`（[crates/plugins/src/gemini_account.rs](../crates/plugins/src/gemini_account.rs) `scan_chat`），解析不了的文件跳过。额度（plan / 窗口 / 余额）没有：Gemini 没有账单接口，也没 `gemini usage` 子命令。
+
+## 三十三、系统通知（2026-11-15）
+
+> 来源：人说「加个系统通知，只要窗口不在前台就发通知，Mac 和 Win 都做一下」。
+
+- [x] 一轮结束时发系统通知：页面把 `agent.turn_completed` 交给主进程（`notify:show`，[apps/gui/src/notify.ts](../apps/gui/src/notify.ts)），主进程**只在窗口不聚焦或不可见时**弹（[apps/gui/electron/main.cts](../apps/gui/electron/main.cts)），聚焦时交给窗口自己的未读标记。取消的那一轮不弹；出错/中断写「这一轮出错了」，其余写「跑完了」。
+- [x] 点通知回到那个会话：主进程 `showWindow()` 后广播 `notify:open`，页面跳到 `#/s/<id>`。Windows 上设 `app.setAppUserModelId("dev.crossagents.gui")`（与 electron-builder 的 appId 一致），否则 toast 不显示；macOS 走系统通知中心。
