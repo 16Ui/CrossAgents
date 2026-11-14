@@ -202,6 +202,13 @@ pub fn protocol_failure(message: &str) -> bool {
         "login",
         "not logged in",
         "api key",
+        "api_key",
+        // Gemini CLI's "Please set an Auth method … GEMINI_API_KEY" is a missing sign-in,
+        // not a protocol break, even though it ends with the CLI crashing.
+        "auth",
+        "credential",
+        "sign in",
+        "sign-in",
         "model",
         "overloaded",
         "503",
@@ -391,6 +398,14 @@ mod tests {
         assert!(!protocol_failure("You have hit your usage limit"));
         assert!(!protocol_failure("the agent was stopped"));
         assert!(!protocol_failure("claude exited"));
+        assert!(!protocol_failure(
+            "Gemini CLI crashed (exit code 41) before the turn ended:\nPlease set an Auth method in \
+             your C:\\Users\\x\\.gemini\\settings.json or specify one of the following environment \
+             variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA"
+        ));
+        assert!(!protocol_failure(
+            "Authentication required: run `gemini` to sign in"
+        ));
     }
 
     #[test]
