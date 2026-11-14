@@ -1091,9 +1091,23 @@ impl Accounts {
             .map_err(|e| CoreError::Agent(format!("cannot start `{display}`: {e}")))?;
         let mut lines_rx = output_lines(&mut child);
         let process = LoginProcess { child, tree };
-        if let Some(page) = login.serves {
+        if let Some(page) = login.serves.clone() {
             return self
-                .serve_login(account, provider.clone(), process, lines_rx, page, display)
+                .serve_login(
+                    account,
+                    provider.clone(),
+                    process,
+                    lines_rx,
+                    Some(page),
+                    display,
+                )
+                .await;
+        }
+        // The tool opened the browser itself: there is no page to hand out, only the
+        // account to watch.
+        if login.opens_browser {
+            return self
+                .serve_login(account, provider.clone(), process, lines_rx, None, display)
                 .await;
         }
         let pid = process.child.id();
@@ -1182,18 +1196,22 @@ impl Accounts {
     /// stops the server once it reports the login, the server stops, or
     /// [`LOGIN_LIMIT`] passes. Logging in again an account that already is logged in
     /// counts as done once a read sees it logged out and then in, else at the limit.
+    ///
+    /// `page` is `None` for a tool that opens the browser itself
+    /// ([`LoginCommand::opens_browser`]): nothing to wait for and nothing to show, so the
+    /// watching starts at once.
     async fn serve_login(
         &self,
         account: Account,
         provider: Arc<dyn AccountProvider>,
         mut login: LoginProcess,
         lines: mpsc::UnboundedReceiver<String>,
-        page: String,
+        page: Option<String>,
         display: String,
     ) -> Result<LoginStarted, CoreError> {
         let id = account.id.clone();
         let tail = keep_tail(lines);
-        let address = page_address(&page);
+        let address = page.as_deref().and_then(page_address);
         let deadline = Instant::now() + SERVE_READY_WAIT;
         loop {
             match &address {
@@ -1229,7 +1247,7 @@ impl Accounts {
         self.bus
             .publish(EventKind::AccountLoginPending {
                 id: id.clone(),
-                url: Some(page.clone()),
+                url: page.clone(),
             })
             .await?;
 
@@ -1274,7 +1292,7 @@ impl Accounts {
             let message = (!ok).then(|| match stopped {
                 Some(exit) => format!("`{shown}` stopped ({exit}){}", tail_text(&tail)),
                 None => format!(
-                    "not logged in after {} minutes; the login page was closed",
+                    "not logged in after {} minutes; the sign-in was stopped",
                     LOGIN_LIMIT.as_secs() / 60
                 ),
             });
@@ -1283,7 +1301,7 @@ impl Accounts {
                 .await;
         });
         Ok(LoginStarted {
-            url: Some(page),
+            url: page,
             command: display,
             manual: None,
         })
@@ -1921,6 +1939,7 @@ mod login_tests {
                 env: BTreeMap::new(),
                 env_remove: Vec::new(),
                 serves: None,
+                opens_browser: false,
             }
         }
         fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
@@ -2022,6 +2041,7 @@ mod login_tests {
     async fn accounts_with_any(
         provider: Arc<dyn AccountProvider>,
     ) -> (Arc<Accounts>, Arc<EventBus>, tempfile::TempDir, Account) {
+        let provider_name = provider.name().to_owned();
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
         let bus = Arc::new(EventBus::new(store.clone()));
@@ -2033,10 +2053,13 @@ mod login_tests {
         let account = Account {
             codebuddy_site: None,
             egress: None,
-            id: "cursor-work".into(),
-            provider: "cursor".into(),
+            id: format!("{provider_name}-work"),
+            provider: provider_name.clone(),
             label: "work".into(),
-            home: dir.path().join("accounts/cursor-work"),
+            home: dir
+                .path()
+                .join("accounts")
+                .join(format!("{provider_name}-work")),
             created_at: Utc::now(),
         };
         store.insert_account(&account).await.unwrap();
@@ -2395,6 +2418,98 @@ mod login_tests {
             wait_for_login(&mut events).await,
             (Some(url.to_owned()), Some(true))
         );
+    }
+
+    /// A tool that opens the browser itself (Gemini's ACP sign-in): there is no page for
+    /// the hub to show, and the account turning logged in is what ends the wait.
+    #[tokio::test]
+    async fn a_login_that_opens_the_browser_is_watched_without_a_page() {
+        let logged_in = Arc::new(AtomicBool::new(false));
+        let provider = BrowserLogin(logged_in.clone());
+        let (accounts, bus, _dir, account) = accounts_with_any(Arc::new(provider)).await;
+        let mut events = bus.subscribe();
+        let started = accounts.login(&account.id).await.unwrap();
+        assert!(started.url.is_none(), "nothing to open: the tool did it");
+        assert!(started.manual.is_none());
+        logged_in.store(true, Ordering::SeqCst);
+
+        let mut saw_pending = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("the login should finish")
+                .expect("the bus should stay up");
+            match event.kind {
+                EventKind::AccountLoginPending { url, .. } => {
+                    assert!(url.is_none());
+                    saw_pending = true;
+                }
+                EventKind::AccountLoginFinished { ok, message, .. } => {
+                    assert!(ok, "{message:?}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_pending, "the person is told the browser is waiting");
+    }
+
+    /// A provider whose login tool stays alive until it is stopped, like a browser login.
+    struct BrowserLogin(Arc<AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl AccountProvider for BrowserLogin {
+        fn name(&self) -> &str {
+            "gemini"
+        }
+        fn default_home(&self) -> Option<PathBuf> {
+            None
+        }
+        async fn status(&self, _account: &Account) -> AccountStatus {
+            AccountStatus {
+                logged_in: self.0.load(Ordering::SeqCst),
+                auth_mode: None,
+                email: None,
+                plan: None,
+                subscription_until: None,
+                rate_limits: Vec::new(),
+                limit_reached: false,
+                credits: None,
+                limits: Vec::new(),
+                reset_credits: Vec::new(),
+                source: Some(DataSource::Live),
+                as_of: Some(Utc::now()),
+                note: None,
+            }
+        }
+        async fn sessions(&self, _account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+            Ok(Vec::new())
+        }
+        async fn models(&self, _account: &Account) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn login_command(&self, _account: &Account) -> LoginCommand {
+            let command = if cfg!(windows) {
+                vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    "ping -n 60 127.0.0.1 >nul".into(),
+                ]
+            } else {
+                vec!["sh".into(), "-c".into(), "sleep 60".into()]
+            };
+            LoginCommand {
+                command,
+                env: BTreeMap::new(),
+                env_remove: Vec::new(),
+                serves: None,
+                opens_browser: true,
+            }
+        }
+        fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
+            Vec::new()
+        }
     }
 
     /// The same tool that ends logged out ends the login as a failure, with what it said.

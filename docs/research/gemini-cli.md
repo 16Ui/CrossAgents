@@ -117,6 +117,34 @@ gemini-2.5-pro (gemini-2.5-pro)
 - 没有 `--system-prompt`，开场说明拼在第一条 prompt 前面（`instructions\n\n<text>`），只拼一次，后续轮次靠会话上下文保留。
 - 附件转成 `@<path>` 引用追加在消息末尾，Gemini CLI 会把 `@path` 当文件读。
 
+## 登录（2026-11-15 实测）
+
+Gemini CLI 没有 `login` 子命令（`--help` 里只有 `mcp / extensions / skills / hooks / gemma / models`），Google 登录在交互式首启的 TUI 里；没有 TTY 时它直接以 41 退出：
+
+```
+Please set an Auth method in <home>\.gemini\settings.json or specify one of the following
+environment variables before running: GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA
+```
+
+**唯一能在 GUI 里完成的办法是 ACP 的 `authenticate`**（实测）：
+
+- `gemini --acp`，先发 `initialize`，回答里有 `authMethods`：`oauth-personal`（Log in with Google）、`gemini-api-key`、`vertex-ai`、`gateway`。
+- 发 `authenticate{"methodId":"oauth-personal"}` 后，**CLI 自己用系统默认浏览器打开 Google 授权页**（Windows 上是 `powershell Start-Process <url>`，所以是新的浏览器窗口），进程留在原地等；`gemini-api-key` 则立刻返回 `{}`（只把 key 记下来）。
+- 授权完成后 `authenticate` 返回 `{}`，凭据写到 `<home>/.gemini/oauth_creds.json`。
+- 实测时机器上没有登录 Google，所以只验证到「浏览器打开了授权页、进程在等」这一步；授权完成后的返回值和文件写入是按代码路径推断的，第一次真正登录时补测。
+
+凭据文件：
+
+| 文件 | 内容 |
+|---|---|
+| `<home>/.gemini/oauth_creds.json` | `access_token`、`refresh_token`、`expiry_date` |
+| `<home>/.gemini/google_accounts.json` | `active`（当前账号邮箱）、`old` |
+| `<home>/.gemini/settings.json` | `security.auth.selectedType`：`oauth-personal` / `gemini-api-key` / `vertex-ai` |
+
+`<home>` 由环境变量 `GEMINI_CLI_HOME` 决定（默认 `os.homedir()`），配置目录是 `<home>/.gemini` —— 多账号隔离靠这一个变量。
+
+驱动侧的做法（`crossagents gemini-login`，隐藏子命令）：跑 `gemini --acp`，发上面两条请求，等 `authenticate` 返回；hub 把这条命令当普通登录命令启动，然后轮询账号状态，`oauth_creds.json` 出现就收尾。自动这条路失败时（老版本没有 ACP、浏览器被关掉），账号页的提示会退回「在终端运行 gemini 登录一次」。
+
 ## 安装与定位
 
 - npm：`npm i -g @google/gemini-cli`，bin 是 `gemini`；Windows 上是 `node_modules/.bin/gemini.cmd`，里面用 `%dp0%\..` 拼出真正的入口脚本。`crates/drivers/src/locate.rs` 的 `wrapper_script()` 通用地解析这种 npm shim，CodeBuddy 的已知路径只是兜底。

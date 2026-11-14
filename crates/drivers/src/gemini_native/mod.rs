@@ -17,6 +17,7 @@
 //! - A message too long for a Windows command line goes on stdin (`--prompt=` plus the
 //!   CLI's own "append stdin" rule) instead of argv.
 
+pub mod login;
 pub mod wire;
 
 use std::path::PathBuf;

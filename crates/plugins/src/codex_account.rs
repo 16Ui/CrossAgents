@@ -719,6 +719,7 @@ impl AccountProvider for CodexAccounts {
             env: BTreeMap::from([("CODEX_HOME".to_owned(), account.home.display().to_string())]),
             env_remove: Vec::new(),
             serves: None,
+            opens_browser: false,
         }
     }
 

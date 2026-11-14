@@ -217,7 +217,7 @@ export function emptyState(): MockState {
     traces: new Map(),
     questions: [],
     notes: [],
-    quota: { accounts: [], providers: ["claude", "codex", "codebuddy", "cursor"] },
+    quota: { accounts: [], providers: ["claude", "codex", "codebuddy", "cursor", "gemini"] },
     usage: {},
     plugins: [],
   };

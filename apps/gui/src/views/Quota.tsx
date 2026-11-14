@@ -256,7 +256,9 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
               ，登录好后这里会自动变成已登录。
             </>
           ) : (
-            <>登录工具已启动（{login.command}），按它的提示完成。</>
+            <span title={login.command}>
+              已在你的浏览器里打开授权页，完成授权后这里会自动变成已登录。
+            </span>
           )}
         </div>
       )}

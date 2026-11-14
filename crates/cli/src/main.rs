@@ -78,6 +78,16 @@ pub enum Command {
     /// Run one agent process so it outlives the hub (started by the hub).
     #[command(hide = true)]
     RuntimeHost(RuntimeHostArgs),
+    /// Sign in to Gemini CLI through its ACP channel (started by the hub).
+    #[command(hide = true)]
+    GeminiLogin(GeminiLoginArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct GeminiLoginArgs {
+    /// The Gemini command to run, program first (`--command node /path/to/gemini.js`).
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, required = true)]
+    pub command: Vec<String>,
 }
 
 #[derive(Debug, clap::Args)]

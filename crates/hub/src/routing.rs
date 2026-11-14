@@ -623,6 +623,7 @@ mod tests {
                 env: Default::default(),
                 env_remove: Vec::new(),
                 serves: None,
+                opens_browser: false,
             }
         }
         fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {

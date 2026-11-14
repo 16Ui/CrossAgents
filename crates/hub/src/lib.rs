@@ -67,6 +67,7 @@ use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
 use crossagents_plugins::cursor_account::CursorAccounts;
+use crossagents_plugins::gemini_account::GeminiAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -167,6 +168,22 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 Arc::new(ClaudeAccounts::default()),
                 Arc::new(CodebuddyAccounts::default()),
                 Arc::new(CursorAccounts::default()),
+                Arc::new(GeminiAccounts::new(
+                    crossagents_plugins::builtin::cli("gemini").and_then(|cli| cli.command()),
+                    // The stable copy of this executable when hosts run from one, so the
+                    // login helper survives a rebuild the way they do.
+                    config
+                        .runtime_host
+                        .as_ref()
+                        .and_then(|command| command.first())
+                        .map(|exe| vec![exe.clone(), "gemini-login".into()])
+                        .or_else(|| {
+                            std::env::current_exe()
+                                .ok()
+                                .map(|exe| vec![exe.display().to_string(), "gemini-login".into()])
+                        }),
+                    Vec::new(),
+                )),
             ],
             paths.accounts(),
         )

@@ -382,6 +382,7 @@ impl AccountProvider for ClaudeAccounts {
                 .collect::<BTreeMap<_, _>>(),
             env_remove: Vec::new(),
             serves: None,
+            opens_browser: false,
         }
     }
 

@@ -642,6 +642,7 @@ impl AccountProvider for CursorAccounts {
             env: env.into_iter().collect(),
             env_remove,
             serves: None,
+            opens_browser: false,
         }
     }
 

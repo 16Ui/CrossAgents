@@ -322,6 +322,11 @@ pub struct LoginCommand {
     /// the account and stops the server once the login is done.
     #[serde(default)]
     pub serves: Option<String>,
+    /// The tool opens the sign-in page itself, in the person's browser, and stays alive
+    /// until the login is done. There is no page for the hub to show: it watches the
+    /// account instead, and stops the tool once the account reports signed in.
+    #[serde(default)]
+    pub opens_browser: bool,
 }
 
 /// One vendor's accounts (docs/tasks/M5.md §3).

@@ -33,6 +33,11 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
             .map_err(anyhow::Error::msg);
     }
+    if let Command::GeminiLogin(args) = cli.command {
+        return crossagents_drivers::gemini_native::login::login(&args.command)
+            .await
+            .map_err(anyhow::Error::msg);
+    }
     let paths = Paths::from_env()?;
     let ctx = Context {
         paths,
@@ -55,7 +60,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Device(cmd) => device::run(&ctx, cmd).await,
         Command::Link(cmd) => link::run(&ctx, cmd).await,
         Command::Setup(args) => setup::run(&ctx, args).await,
-        Command::Mcp | Command::RuntimeHost(_) | Command::Exec(_) => {
+        Command::Mcp | Command::RuntimeHost(_) | Command::GeminiLogin(_) | Command::Exec(_) => {
             unreachable!("handled in main")
         }
     }

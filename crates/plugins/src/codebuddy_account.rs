@@ -584,6 +584,7 @@ impl AccountProvider for CodebuddyAccounts {
             env: env.into_iter().collect(),
             env_remove,
             serves: Some(format!("http://localhost:{port}/")),
+            opens_browser: false,
         }
     }
 
