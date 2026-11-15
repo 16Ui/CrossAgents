@@ -20,6 +20,8 @@ const WITH_MODELS = [
 export const plugins = (): PluginInfo[] => [
   {
     name: "claude",
+    provider: "claude",
+    site: null,
     models: ["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
     all_models: ["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
     shown: null,
@@ -53,6 +55,8 @@ export const plugins = (): PluginInfo[] => [
   // no models are offered and the row says why (multica §2.9).
   {
     name: "codex",
+    provider: "codex",
+    site: null,
     models: [],
     all_models: [],
     shown: null,
@@ -85,6 +89,8 @@ export const plugins = (): PluginInfo[] => [
   // Not installed: no models on offer, and the command that installs it.
   {
     name: "codebuddy",
+    provider: "codebuddy",
+    site: null,
     models: [],
     all_models: [],
     shown: null,
@@ -111,6 +117,8 @@ export const plugins = (): PluginInfo[] => [
   // A gateway with dozens of models from many families: the settings page groups them.
   {
     name: "with",
+    provider: "with",
+    site: null,
     models: ["glm-5.3-flash", "gpt-6-sol", "claude-sonnet-5.5"],
     all_models: WITH_MODELS,
     shown: ["claude-sonnet-5.5", "gpt-6-sol", "glm-5.3-flash"],
@@ -149,6 +157,8 @@ export const plugins = (): PluginInfo[] => [
   },
   {
     name: "mock",
+    provider: "mock",
+    site: null,
     models: ["mock-haiku", "mock-opus"],
     all_models: ["mock-haiku", "mock-opus"],
     shown: null,

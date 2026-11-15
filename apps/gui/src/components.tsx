@@ -697,7 +697,9 @@ export function vendorOf(plugin: string): Vendor {
   const p = plugin.toLowerCase();
   if (p.startsWith("claude")) return "claude";
   if (p.startsWith("codex")) return "codex";
-  if (p.startsWith("codebuddy")) return "codebuddy";
+  // WorkBuddy is the CodeBuddy CLI under its own name, and a description may list one CLI
+  // twice (workbuddy-cn / workbuddy-intl): the mark follows the vendor, not the entry.
+  if (p.startsWith("codebuddy") || p.startsWith("workbuddy")) return "codebuddy";
   return "other";
 }
 

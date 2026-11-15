@@ -312,8 +312,23 @@ function VendorClis() {
             <div className="setting-line cli-line" key={p.name}>
               <div className="model-name">
                 <div className="setting-label">
-                  <VendorMark plugin={p.name} size={16} />
-                  {vendorLabel(p.name)}
+                  <VendorMark plugin={p.provider} size={16} />
+                  {/* The vendor is the provider, not the entry's name: one CLI can be listed
+                      twice (workbuddy-cn / workbuddy-intl), and then the site is what tells
+                      the two rows apart. */}
+                  {vendorLabel(p.provider)}
+                  {p.site && (
+                    <span
+                      className="chip small"
+                      title={
+                        p.site === "internal"
+                          ? "固定走国内站（workbuddy.cn）；账号也必须是国内站登录"
+                          : "固定走国际站（codebuddy.ai）；账号也必须是国际站登录"
+                      }
+                    >
+                      {p.site === "internal" ? "国内站" : p.site === "external" ? "国际站" : p.site}
+                    </span>
+                  )}
                 </div>
                 <div className="setting-hint" title={cli.path ?? undefined}>
                   {cli.installed
