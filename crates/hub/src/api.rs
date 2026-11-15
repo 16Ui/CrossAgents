@@ -1851,14 +1851,12 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         models_pinned: registry.models_pinned(name),
         driver: d.kind(),
         capabilities: d.capabilities(),
-        // The ACP driver does not pass an effort on, so none is offered there.
-        efforts: match d.kind() {
-            DriverKind::AcpGeneric => Vec::new(),
-            _ => registry
-                .config(name)
-                .map(|c| c.efforts.clone())
-                .unwrap_or_default(),
-        },
+        // The ACP driver selects the session's `thought_level` option when the agent offers
+        // one, so a plugin's list is worth showing; agents that offer none ignore it.
+        efforts: registry
+            .config(name)
+            .map(|c| c.efforts.clone())
+            .unwrap_or_default(),
         // What the CLI says each model takes, when it says it at all (`with-cli` does): the
         // profile's list above is then only the fallback for models it did not name.
         efforts_by_model: match d.kind() {

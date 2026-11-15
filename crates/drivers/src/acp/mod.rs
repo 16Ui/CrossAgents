@@ -89,11 +89,18 @@ impl Driver for AcpDriver {
             launch.env.push((var.clone(), model.clone()));
         }
         launch.env.extend(spec.env);
+        let effort = spec
+            .agent
+            .config
+            .get("effort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let session = AcpSession::start(AcpOptions {
             launch,
             mcp_servers: spec.mcp_servers,
             permission: spec.permission,
             model: spec.agent.model,
+            effort,
             instructions: spec.instructions,
             events: spec.events,
         })
@@ -132,6 +139,9 @@ pub struct AcpOptions {
     pub permission: PermissionPolicy,
     /// Model to select through the session's `model` config option.
     pub model: Option<String>,
+    /// Reasoning effort to select through the session's `thought_level` config option
+    /// (`config.effort`). Agents that do not offer one keep their own default.
+    pub effort: Option<String>,
     /// Sent ahead of the first prompt.
     pub instructions: Option<String>,
     pub events: mpsc::UnboundedSender<SessionEvent>,
@@ -162,6 +172,7 @@ impl AcpSession {
             mcp_servers,
             permission,
             model,
+            effort,
             instructions,
             events,
         } = opts;
@@ -279,7 +290,8 @@ impl AcpSession {
             },
             agent_info: init.agent_info,
         };
-        this.configure(&session, permission, model.as_deref()).await;
+        this.configure(&session, permission, model.as_deref(), effort.as_deref())
+            .await;
         Ok(this)
     }
 
@@ -288,6 +300,7 @@ impl AcpSession {
         session: &NewSessionResponse,
         permission: PermissionPolicy,
         model: Option<&str>,
+        effort: Option<&str>,
     ) {
         let warn = |message: String| emit(&self.events, SessionEventKind::Warning { message });
 
@@ -324,20 +337,56 @@ impl AcpSession {
             }
         }
 
-        let Some(wanted) = model else { return };
+        if let Some(wanted) = model {
+            self.select_option(
+                session,
+                |id, category| category == Some("model") || id == "model",
+                wanted,
+                "model",
+                &warn,
+            )
+            .await;
+        }
+        // Reasoning effort is the ACP `thought_level` option. Agents that never offer one
+        // (most CLIs) keep their own default; dsh (词元工坊) offers off/low/high/max.
+        if let Some(wanted) = effort {
+            self.select_option(
+                session,
+                |id, category| {
+                    category == Some("thought_level")
+                        || id == "thought_level"
+                        || id == "reasoning_effort"
+                        || id == "effort"
+                },
+                wanted,
+                "reasoning effort",
+                &warn,
+            )
+            .await;
+        }
+    }
+
+    /// Selects `wanted` on the first session config option `accepts` matches, warning (never
+    /// failing) when the agent offers no such option or does not know the value.
+    async fn select_option(
+        &self,
+        session: &NewSessionResponse,
+        accepts: impl Fn(&str, Option<&str>) -> bool,
+        wanted: &str,
+        what: &str,
+        warn: &impl Fn(String),
+    ) {
         let options = session.config_options.as_deref().unwrap_or_default();
-        let Some(option) =
-            find_select_option(options, |id, cat| cat == Some("model") || id == "model")
-        else {
+        let Some(option) = find_select_option(options, accepts) else {
             warn(format!(
-                "agent offers no model option; relying on its default instead of {wanted:?}"
+                "agent offers no {what} option; relying on its default instead of {wanted:?}"
             ));
             return;
         };
         let Some(value) = option.resolve(wanted) else {
             let available: Vec<_> = option.values.iter().map(|v| v.value.as_str()).collect();
             warn(format!(
-                "model {wanted:?} not offered (available: {})",
+                "{what} {wanted:?} not offered (available: {})",
                 available.join(", ")
             ));
             return;
@@ -355,7 +404,7 @@ impl AcpSession {
             .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
             .await
         {
-            warn(format!("cannot select model {}: {err}", value.value));
+            warn(format!("cannot select {what} {}: {err}", value.value));
         }
     }
 }
