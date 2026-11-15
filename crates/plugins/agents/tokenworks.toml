@@ -1,14 +1,15 @@
-# 词元工坊 (Token Workshop) — the DeepSeek `dsh` runtime as the desktop app keeps it.
+# 词元工坊 (Token Workshop) — the DeepSeek `dsh` harness, on the desktop app's own home.
 #
 # `dsh --profile acp` serves the Agent Client Protocol over stdio, so this description needs
 # no driver code: `acp-generic` speaks the protocol and the runtime answers with its own model
 # and reasoning-effort options (`configOptions` on `session/new`) — which is how the model and
 # effort below reach it.
 #
-# This entry deliberately does **not** set `DSH_HOME`: it reads the same `~/.dsh` the 词元工坊
-# app writes, so the logins, profiles and session history you already have there are the ones
-# the agents use. `deepseek-harness` is the same runtime with a home of its own — pick this one
-# to carry on what the desktop app was doing, that one to keep CrossAgents' work separate.
+# The binary is the npm CLI: the copy inside the 词元工坊 app lives in its `app.asar` and
+# cannot be launched on its own. What makes this the app's entry is the state: it deliberately
+# does **not** set `DSH_HOME`, so it reads the same `~/.dsh` the app writes — the logins,
+# profiles and session history you already have there are the ones the agents use.
+# `deepseek-harness` is the same runtime on a home of its own.
 
 name = "tokenworks"
 protocol = "acp"

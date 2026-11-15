@@ -895,7 +895,29 @@ async fn create_agent(
     let mut profile = req.profile.normalized()?;
     crate::avatars::assign_new(&state.home, state.store(), &mut profile).await?;
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
-        state.accounts.check_binding(&req.plugin, account).await?;
+        // By vendor, not by the entry's name: `workbuddy-cn` runs `codebuddy` accounts.
+        state
+            .accounts
+            .check_binding(crossagents_plugins::provider_of(&req.plugin), account)
+            .await?;
+        // An entry fixed to one site cannot take an account of the other: the account's own
+        // variables win, so the agent would run on the site it was not created for.
+        if let Some(pinned) = state
+            .runtime
+            .plugins()
+            .config(&req.plugin)
+            .and_then(|config| config.pinned_site())
+            && let Some(site) = state.accounts.site_of(account).await?
+            && site != pinned
+        {
+            return Err(AppError::bad_request(format!(
+                "account {account:?} signs in to the {} site, but plugin {:?} is fixed to the \
+                 {} site: use the entry for that site, or an account without a fixed site",
+                site.label(),
+                req.plugin,
+                pinned.label(),
+            )));
+        }
     }
     let id = AgentId::new();
     // No directory: a chat outside any project gets its own under the hub home (by id: the

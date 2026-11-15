@@ -61,6 +61,14 @@ impl CodebuddySite {
             Self::International => "external",
         }
     }
+
+    /// How a message names this site, so a mismatch says which two sites collided.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::China => "China (workbuddy.cn)",
+            Self::International => "international (codebuddy.ai)",
+        }
+    }
 }
 
 impl Account {

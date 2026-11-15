@@ -118,7 +118,7 @@ pub async fn route(
     let current = accounts.account_for(&template).await;
     let mut weighed = Vec::new();
     for account in store.list_accounts().await? {
-        if account.provider != template.plugin {
+        if account.provider != crossagents_plugins::provider_of(&template.plugin) {
             continue;
         }
         weighed.push(Weighed {

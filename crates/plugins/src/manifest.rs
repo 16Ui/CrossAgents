@@ -52,6 +52,11 @@ struct Manifest {
     name: String,
     #[serde(default = "default_protocol")]
     protocol: String,
+    /// The vendor this entry signs in to, when it is not the entry's own name: two entries
+    /// over one CLI (`workbuddy-cn`, `workbuddy-intl`) both run `codebuddy` accounts, and
+    /// pairing an agent with an account goes by this, not by the name it is listed under.
+    #[serde(default)]
+    provider: Option<String>,
     #[serde(default)]
     command: Vec<String>,
     /// The model list: `models = [...]`, or the `[models]` section below.
@@ -189,10 +194,11 @@ fn parse_in(
     }
     tracing::debug!(origin, name = manifest.name, "agent description");
     Ok((
-        manifest.name,
+        manifest.name.clone(),
         PluginConfig {
             command,
             models,
+            provider: Some(manifest.provider.unwrap_or_else(|| manifest.name.clone())),
             model_env: manifest.model_env,
             driver: manifest.driver,
             native_command,

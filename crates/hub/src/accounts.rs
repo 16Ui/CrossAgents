@@ -14,9 +14,9 @@ use crossagents_api_types::{
     EgressFingerprint, LoginStarted, UsageSeriesGroup, UsageSeriesResponse,
 };
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError,
-    DataSource, EGRESS_ENV, EgressPolicy, Event, EventBus, EventKind, RateLimits, Role, RunId,
-    Store, TokenTotals, validate_slug,
+    Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CodebuddySite,
+    CoreError, DataSource, EGRESS_ENV, EgressPolicy, Event, EventBus, EventKind, RateLimits, Role,
+    RunId, Store, TokenTotals, validate_slug,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
@@ -900,7 +900,8 @@ impl Accounts {
             return Vec::new();
         };
         let mut models: Vec<String> = Vec::new();
-        for account in accounts.iter().filter(|a| a.provider == plugin) {
+        let vendor = crossagents_plugins::provider_of(plugin);
+        for account in accounts.iter().filter(|a| a.provider == vendor) {
             for model in provider.models(account).await {
                 if !models.contains(&model.id) {
                     models.push(model.id);
@@ -941,6 +942,13 @@ impl Accounts {
             )));
         }
         Ok(())
+    }
+
+    /// The CodeBuddy site an account signs in to, when it pinned one. Two entries can run the
+    /// same CLI on different sites; pairing one with an account of the other site would let
+    /// the account's environment override the pin.
+    pub async fn site_of(&self, id: &str) -> Result<Option<CodebuddySite>, CoreError> {
+        Ok(self.store().get_account(id).await?.codebuddy_site)
     }
 
     pub async fn usage(

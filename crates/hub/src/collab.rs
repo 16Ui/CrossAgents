@@ -453,7 +453,7 @@ impl AgentHost for HubHost {
             .list_accounts()
             .await?
             .into_iter()
-            .filter(|a| a.provider == plugin)
+            .filter(|a| a.provider == crossagents_plugins::provider_of(plugin))
             .collect();
         if accounts.is_empty() {
             return Ok(Vec::new());

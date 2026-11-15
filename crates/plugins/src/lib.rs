@@ -25,6 +25,7 @@ pub mod claude_account;
 pub mod codebuddy_account;
 pub mod codex_account;
 pub mod cursor_account;
+pub mod env_driver;
 pub mod gemini_account;
 pub mod manifest;
 pub mod version;
@@ -49,10 +50,24 @@ use serde::Deserialize;
 pub const BUILT_IN_ORIGIN: &str = "built-in";
 pub const CONFIG_ORIGIN: &str = "config.toml";
 
+/// The vendor a plugin runs on, by name alone: `workbuddy-cn` and `workbuddy-intl` are both
+/// `codebuddy`. Account pairing, routing and model lookup compare a vendor against an
+/// account's `provider`, so they ask this rather than the entry's name.
+pub fn provider_of(plugin: &str) -> &str {
+    builtin::config(plugin)
+        .and_then(|config| config.provider.as_deref())
+        .unwrap_or(plugin)
+}
+
 /// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch commands
 /// and the default driver; otherwise it defines a new plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct PluginConfig {
+    /// The vendor whose accounts and sign-in this entry uses, when that is not the entry's
+    /// own name. `workbuddy-cn` and `workbuddy-intl` are both `codebuddy`, so an agent on
+    /// either can be paired with a `codebuddy` account.
+    #[serde(default)]
+    pub provider: Option<String>,
     /// ACP launch command (`acp-generic`).
     #[serde(default)]
     pub command: Vec<String>,
@@ -106,6 +121,26 @@ pub struct PluginConfig {
 impl PluginConfig {
     pub fn default_driver(&self) -> DriverKind {
         self.driver.unwrap_or_default()
+    }
+
+    /// The vendor this entry belongs to: its `provider`, else its own name.
+    pub fn vendor<'a>(&'a self, name: &'a str) -> &'a str {
+        self.provider.as_deref().unwrap_or(name)
+    }
+
+    /// The CodeBuddy site this entry pins, from the environment it sets. `None` when it does
+    /// not pin one (the generic `codebuddy` entry follows the machine's own login).
+    pub fn pinned_site(&self) -> Option<crossagents_core::CodebuddySite> {
+        let value = self
+            .env
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("CODEBUDDY_INTERNET_ENVIRONMENT"))
+            .map(|(_, value)| value.as_str())?;
+        match value.to_ascii_lowercase().as_str() {
+            "internal" => Some(crossagents_core::CodebuddySite::China),
+            "external" => Some(crossagents_core::CodebuddySite::International),
+            _ => None,
+        }
     }
 
     /// Whether the CLI that reported `version` is older than `min_version`. `false` when
@@ -317,6 +352,10 @@ impl Profile {
                 self.config.models.clone(),
             )),
         };
+        // Every session this plugin starts goes through these variables — opened, resumed,
+        // adopted, the self-check probe, and one served by a remote node — because the
+        // wrapper sits on the driver every caller gets, not on one call site.
+        let driver = env_driver::EnvDriver::wrap(driver, self.config.env_expanded());
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
     }

@@ -12,6 +12,7 @@
 # for its own agents, which is what keeps two logins apart.
 
 name = "workbuddy-intl"
+provider = "codebuddy"
 driver = "codebuddy-native"
 native_command = ["codebuddy"]
 verified = ["2.173"]
