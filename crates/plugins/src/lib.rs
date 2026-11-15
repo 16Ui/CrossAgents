@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use crossagents_core::{CoreError, Driver, DriverKind};
 use crossagents_drivers::acp::AcpDriver;
+use crossagents_drivers::antigravity_native::AntigravityDriver;
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
@@ -262,6 +263,11 @@ impl Profile {
                 self.config.cli(),
                 self.config.models.clone(),
             )),
+            DriverKind::AntigravityNative => Arc::new(AntigravityDriver::new(
+                &self.name,
+                self.config.cli(),
+                self.config.models.clone(),
+            )),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -436,7 +442,7 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 6);
+        assert_eq!(builtin::all().len(), 7);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -582,6 +588,7 @@ mod tests {
         assert_eq!(
             registry.names(),
             [
+                "antigravity",
                 "claude",
                 "codebuddy",
                 "codex",

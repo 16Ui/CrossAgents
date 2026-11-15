@@ -16,6 +16,7 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         ("with", include_str!("../agents/with.toml")),
         ("cursor", include_str!("../agents/cursor.toml")),
         ("gemini", include_str!("../agents/gemini.toml")),
+        ("antigravity", include_str!("../agents/antigravity.toml")),
     ]
     .into_iter()
     .map(|(name, text)| {
@@ -57,7 +58,15 @@ mod tests {
         let names: Vec<&str> = all().iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
             names,
-            ["claude", "codex", "codebuddy", "with", "cursor", "gemini"]
+            [
+                "claude",
+                "codex",
+                "codebuddy",
+                "with",
+                "cursor",
+                "gemini",
+                "antigravity"
+            ]
         );
         for (name, config) in all() {
             assert!(config.driver.is_some(), "{name} needs a driver");

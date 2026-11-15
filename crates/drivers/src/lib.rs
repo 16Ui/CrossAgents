@@ -7,6 +7,8 @@
 //! - [`cursor_native`]: Cursor's `agent -p`, one process per turn, resumed by chat id.
 //! - [`gemini_native`]: Gemini CLI's `gemini -p -o stream-json`, one process per turn,
 //!   resumed by its session id.
+//! - [`antigravity_native`]: Antigravity CLI's `agy` stream-json, one process per session,
+//!   resumed by its conversation id.
 //! - [`acp`]: `acp-generic`, any ACP agent, one process per session.
 //! - [`mcp_config`]: what the CLI's own MCP configuration says, beside what the hub passes.
 //! - [`hooks`]: whether a session may run the CLI's own hooks (off unless the agent allows).
@@ -15,6 +17,7 @@
 //! (docs/PROCESS-SUPERVISION.md).
 
 pub mod acp;
+pub mod antigravity_native;
 mod argv;
 pub mod claude_native;
 pub mod codebuddy_native;

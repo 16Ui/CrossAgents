@@ -1,0 +1,50 @@
+# Antigravity CLI, Google's agent CLI for personal Gemini accounts
+# (docs/DESIGN.md §9.3, docs/research/antigravity-cli.md).
+#
+# `driver = "antigravity-native"` is `agy`'s headless stream-json mode: one process per
+# session that takes one message per turn on stdin, so a conversation carries on inside the
+# process and, once it is gone, by `--conversation <id>`.
+#
+# It replaced Gemini CLI for personal accounts (free, Google AI Pro and Ultra) in June 2026;
+# the `gemini` plugin above stays for enterprise Code Assist and pay-as-you-go API keys.
+name = "antigravity"
+driver = "antigravity-native"
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them the
+# CLI still runs, marked unverified.
+verified = ["1.5"]
+
+[models]
+# `agy models` is the authority and needs a sign-in; these are the slugs the docs name.
+fallback = ["gemini-3.8-flash", "gemini-3.1-pro"]
+# `agy --effort` takes one of these, per model.
+efforts = ["low", "medium", "high", "xhigh", "max"]
+
+[locate]
+env = "ANTIGRAVITY_CLI"
+commands = ["agy"]
+version = ["--version"]
+
+[locate.paths]
+# The installer puts the binary under the user's own programs.
+windows = ["~/AppData/Local/agy/bin/agy.exe", "~/.local/bin/agy.exe"]
+linux = ["~/.local/bin/agy"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["~/.local/bin/agy", "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]
+
+[install]
+label = "Antigravity CLI"
+hint = "irm https://antigravity.google/cli/install.ps1 | iex"
+docs = "https://antigravity.google/docs/getting-started?tab=cli"
+login = "then run `agy` once and sign in with your Google account"
+
+[[install.methods]]
+id = "native"
+os = ["windows"]
+run = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://antigravity.google/cli/install.ps1 | iex"]
+upgrade = ["agy", "update"]
+
+[[install.methods]]
+id = "native"
+os = ["macos", "linux"]
+run = ["bash", "-c", "curl -fsSL https://antigravity.google/cli/install.sh | bash"]
+upgrade = ["agy", "update"]

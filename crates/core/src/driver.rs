@@ -43,6 +43,9 @@ pub enum DriverKind {
     /// Gemini CLI's `gemini -p -o stream-json`: one process per turn, resumed by its
     /// own session id.
     GeminiNative,
+    /// Google Antigravity CLI's `agy --input-format stream-json --output-format
+    /// stream-json`: one process per session, resumed by its conversation id.
+    AntigravityNative,
     /// Any ACP agent; the fallback for everything else. The default, so configurations
     /// written before drivers existed keep their behaviour.
     #[default]
@@ -50,13 +53,14 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
-    pub const ALL: [DriverKind; 7] = [
+    pub const ALL: [DriverKind; 8] = [
         Self::CodexNative,
         Self::ClaudeNative,
         Self::CodebuddyNative,
         Self::WithNative,
         Self::CursorNative,
         Self::GeminiNative,
+        Self::AntigravityNative,
         Self::AcpGeneric,
     ];
 
@@ -68,6 +72,7 @@ impl DriverKind {
             Self::WithNative => "with-native",
             Self::CursorNative => "cursor-native",
             Self::GeminiNative => "gemini-native",
+            Self::AntigravityNative => "antigravity-native",
             Self::AcpGeneric => "acp-generic",
         }
     }
@@ -88,7 +93,7 @@ impl FromStr for DriverKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 CoreError::Unsupported(format!(
-                    "driver {s:?} (known: codex-native, claude-native, codebuddy-native, with-native, cursor-native, gemini-native, acp-generic)"
+                    "driver {s:?} (known: codex-native, claude-native, codebuddy-native, with-native, cursor-native, gemini-native, antigravity-native, acp-generic)"
                 ))
             })
     }

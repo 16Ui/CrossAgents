@@ -554,3 +554,14 @@ B 删除 run：
 
 - [x] 一轮结束时发系统通知：页面把 `agent.turn_completed` 交给主进程（`notify:show`，[apps/gui/src/notify.ts](../apps/gui/src/notify.ts)），主进程**只在窗口不聚焦或不可见时**弹（[apps/gui/electron/main.cts](../apps/gui/electron/main.cts)），聚焦时交给窗口自己的未读标记。取消的那一轮不弹；出错/中断写「这一轮出错了」，其余写「跑完了」。
 - [x] 点通知回到那个会话：主进程 `showWindow()` 后广播 `notify:open`，页面跳到 `#/s/<id>`。Windows 上设 `app.setAppUserModelId("dev.crossagents.gui")`（与 electron-builder 的 appId 一致），否则 toast 不显示；macOS 走系统通知中心。
+
+## 三十四、Antigravity CLI 接入（2026-11-16）
+
+> 来源：人说「我的账号是 Pro 会员，Antigravity 这个 CLI 没有吗」，随后「做一个 Antigravity 的 native 插件」。协议见 [research/antigravity-cli.md](research/antigravity-cli.md)。
+
+- [x] 新驱动 `antigravity-native`（[crates/drivers/src/antigravity_native](../crates/drivers/src/antigravity_native/mod.rs)）：`agy --input-format stream-json --output-format stream-json`，**一进程一会话**，一轮一条 `{"event":"user",…}` 写进 stdin；解析 `init` / `step_update`（`agent_response` 的 `text_delta`、`tool` 的 `tool_info`）/ `result`；会话 id 由 CLI 给，进程没了就用 `--conversation <id>` 重开。
+- [x] 能力：`streaming` / `interrupt` / `resume` / `set_model` / `usage`；`move_cwd` 与 `mcp` 为 false。权限映射：bypass → `--dangerously-skip-permissions`，guard → `--mode accept-edits`，deny → 默认模式（headless 把要批准的工具 soft-deny，这一轮继续）。
+- [x] 模型：`agy models`（需要登录）优先，解析不出就用描述文件的 fallback；`--effort` 透传。插件描述 [crates/plugins/agents/antigravity.toml](../crates/plugins/agents/antigravity.toml)（官方安装脚本、`agy update`、`~/AppData/Local/agy/bin/agy.exe` 等路径）。
+- [x] 注册：`DriverKind::AntigravityNative`（`antigravity-native`）、plugins 内置表、终端恢复命令（`agy --conversation <id>`）、`bindings/DriverKind.ts`、GUI mock 的 `CAPS`。
+- [x] 测试：`wire.rs` 九个解析测试；驱动六个 mock-CLI 测试（流式回答+工具+用量、deny/guard 的参数、resume、ERROR 结果、打断）；[crates/drivers/tests/antigravity_smoke.rs](../crates/drivers/tests/antigravity_smoke.rs) 五个需要真 CLI 的 `#[ignore]` 用例。
+- [x] 本机装了 `agy 1.5.9`（`%LOCALAPPDATA%\agy\bin\agy.exe`，sha512 与官方 manifest 一致）用于核对 `--help`、`models`、`mcp` 的行为。**没跑通一轮对话**：这台机器还没登录 Google，`agy models` 直接说 `Please sign in`。MCP 的结论（无法按会话挂载）是实测 `--settings` 拒绝 `mcpServers` 加官方配置路径得出的。
