@@ -501,6 +501,11 @@ impl Accounts {
             return Err(CoreError::Conflict("a CodeBuddy site requires a new, independent CodeBuddy login; it cannot import the machine login".into()));
         }
         let provider = self.provider(&req.provider)?;
+        if req.provider == "antigravity" && (!req.import_default || req.home.is_some()) {
+            return Err(CoreError::Conflict(
+                "Antigravity uses the machine keyring login; use import_default without a custom home".into(),
+            ));
+        }
         let home = match (req.home, req.import_default) {
             (Some(home), _) => PathBuf::from(home),
             (None, true) => provider.default_home().ok_or_else(|| {
@@ -2719,6 +2724,21 @@ fn group_applies(
     model: Option<&str>,
     provider: &str,
 ) -> bool {
+    if provider == "antigravity"
+        && let Some(model) = model.filter(|m| !matches!(*m, "" | "auto" | "default"))
+    {
+        // The CLI groups multiple families under one shared quota. Unknown labels
+        // cannot safely be treated as a global limit on every model.
+        let name = group
+            .name
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let model = model.to_ascii_lowercase();
+        return ["gemini", "claude", "gpt"]
+            .iter()
+            .any(|family| name.contains(family) && model.starts_with(family));
+    }
     let scoped = group.model.as_deref().or_else(|| {
         ((provider == "claude" || provider == "codebuddy") && group.id != "all")
             .then_some(group.id.as_str())
@@ -2800,6 +2820,12 @@ fn judge_for_model_with_top(
         };
     }
     // Credits are account-wide, including when the last update belongs to another model.
+    // Antigravity's AI credits are optional overage, not the subscription's baseline.
+    let credits = if provider == "antigravity" {
+        None
+    } else {
+        credits
+    };
     let mut result = judge(&[], None, credits);
     if matches!(result, Health::Exhausted(_)) {
         return result;
@@ -2851,6 +2877,59 @@ mod health_tests {
             remaining: None,
             total: None,
         }
+    }
+
+    #[test]
+    fn antigravity_groups_and_optional_overage_do_not_exhaust_other_models() {
+        let groups = vec![
+            crossagents_core::LimitGroup {
+                id: "antigravity-0".into(),
+                name: Some("Gemini models".into()),
+                model: None,
+                windows: vec![window("Weekly", 100.0)],
+                reached: true,
+            },
+            crossagents_core::LimitGroup {
+                id: "antigravity-1".into(),
+                name: Some("Claude and GPT models".into()),
+                model: None,
+                windows: vec![window("Weekly", 10.0)],
+                reached: false,
+            },
+        ];
+        let credits = Credits {
+            has_credits: false,
+            unlimited: false,
+            balance: Some("0".into()),
+        };
+        for model in ["claude-opus-5-5-high", "gpt-oss-120b-medium"] {
+            assert_eq!(
+                judge_for_model_with_top(
+                    &groups[0].windows,
+                    &groups,
+                    Some(model),
+                    None,
+                    Some(&credits),
+                    Some("antigravity-0"),
+                    None,
+                    "antigravity"
+                ),
+                Health::Ok
+            );
+        }
+        assert!(matches!(
+            judge_for_model_with_top(
+                &groups[0].windows,
+                &groups,
+                Some("gemini-3.8-flash-high"),
+                None,
+                Some(&credits),
+                Some("antigravity-0"),
+                None,
+                "antigravity"
+            ),
+            Health::Exhausted(_)
+        ));
     }
 
     #[test]

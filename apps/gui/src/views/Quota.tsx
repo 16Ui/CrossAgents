@@ -154,7 +154,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
               );
             })
           ) : (
-            <span className="muted small">暂无额度数据</span>
+            <span className="muted small" title={status.note ?? undefined}>{account.provider === "antigravity" && status.note ? "额度查询失败" : "暂无额度数据"}</span>
           )}
         </div>
         {/* Always a cell, so the actions keep their column when there is no quota data. */}
@@ -531,13 +531,15 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
   const [provider, setProvider] = useState("");
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
-  const [source, setSource] = useState<"local" | "new" | "copy">("new");
+  const [selectedSource, setSource] = useState<"local" | "new" | "copy">("new");
   const [site, setSite] = useState<"china" | "international">("china");
   const [candidates, setCandidates] = useState<ImportableAccount[]>();
   const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const chosen = provider || providers[0] || "";
+  const sharedLogin = chosen === "antigravity";
+  const source = sharedLogin ? "local" : selectedSource;
   const candidate = candidates?.find((c) => c.provider === chosen);
 
   // The logins this machine has are only needed once copying is picked.
@@ -613,16 +615,17 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
         </Field>
       </div>
       <div className="choice">
-        <label>
+        {!sharedLogin && <label>
           <input type="radio" checked={source === "new"} onChange={() => setSource("new")} /> 新的独立登录（会打开浏览器登录）
-        </label>
+        </label>}
         <label>
           <input type="radio" checked={source === "local"} onChange={() => setSource("local")} /> 使用本机已有的登录（与本机共用）
         </label>
-        <label>
+        {!sharedLogin && <label>
           <input type="radio" checked={source === "copy"} onChange={() => setSource("copy")} /> 从本机登录复制一份到独立目录
-        </label>
+        </label>}
       </div>
+      {sharedLogin && <p className="muted small">Antigravity 的登录保存在系统钥匙串中，与本机 CLI 共用。添加后可点击「登录」或「重新登录」；重新登录会同时切换本机 CLI 使用的账号。</p>}
       {source === "copy" && (
         <div className="choice">
           {!candidates ? (

@@ -146,6 +146,26 @@ hub 的登录命令拿到的是**关闭的 stdin**，所以码没处可写。补
   续没有实测，驱动的 `move_cwd` 保守报 false。
 - 进程常驻时不需要 `--conversation`：会话就在这个进程里。
 
+## 账号额度与套餐（2026-11-16 补充）
+
+- 官方 [headless 文档](https://antigravity.google/docs/cli/headless/) 支持把 CLI 自己处理的
+  `/usage` 作为单独的 `--print` 查询；不能塞进常驻 stream-json 会话。
+  账号提供器分别运行 `agy -p /usage --output-format json` 和
+  `agy -p /credits --output-format json`，一分钟内缓存结果，不读取钥匙串凭据。
+- 安装的 1.5.9 二进制中 printmode JSON 类型可确认的字段：quota 的 `groups`，group 的
+  `name` / `buckets`，bucket 的 `name` / `window` / `disabled` /
+  `remaining_fraction` / `remaining_amount` / `reset_time`；credits 的
+  `remaining_credits` / `plan_name`。剩余比例转为已用比例；缺失、非法或仅有剩余数量的
+  桶不伪造百分比。套餐来自 credits 的 `plan_name`，邮箱仍无可靠查询入口。
+- 成功查询的真实额度**尚未验证**：这台机器的 `models` 能列出模型，但 `/usage` 被上游以
+  `Eligibility check failed: ... not currently available in your location` 拒绝。提供器保留
+  已登录状态，把错误放在账号备注，不将其显示为零额度；成功报告结构用固定样例回归测试。
+- [额度文档](https://antigravity.google/docs/cli/commands/usage) 说明 Gemini 与 Claude/GPT
+  有各自共享的模型组；模型组的显示名用于识别适用模型家族，未知组不当作所有模型的全局限额。
+  [AI credits](https://antigravity.google/docs/cli/credits) 是基线额度用尽后的可选超额消费，
+  余额为零不表示订阅基线已耗尽。
+- UI 与账号 API 只允许登记本机共用登录，避免把不同目录误当成独立的 Antigravity 账号。
+
 ## 模型（实测 + 文档）
 
 - `agy models` 需要登录：未登录打印 `Please sign in to view available models. Launch the CLI
