@@ -63,6 +63,19 @@ pub fn provider_of(plugin: &str) -> &str {
 /// and the default driver; otherwise it defines a new plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct PluginConfig {
+    /// How the entry is written on screen, in any script (`词元工坊`, `WorkBuddy 国内版`).
+    /// The name stays an ASCII slug because it is an id: it appears in URLs, in an agent's
+    /// record and in account pairing.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The description this one starts from (`extends = "codebuddy"`), already applied by
+    /// the time a registry holds it; kept for diagnostics.
+    #[serde(default)]
+    pub extends: Option<String>,
+    /// A base other entries are written from: resolvable, but not listed as an agent of its
+    /// own. Agents already on it keep working.
+    #[serde(default)]
+    pub hidden: bool,
     /// The vendor whose accounts and sign-in this entry uses, when that is not the entry's
     /// own name. `workbuddy-cn` and `workbuddy-intl` are both `codebuddy`, so an agent on
     /// either can be paired with a `codebuddy` account.
@@ -188,7 +201,7 @@ impl PluginConfig {
 
     /// A built-in adjusted by its `config.toml` entry: launch commands, driver, models and
     /// effort levels.
-    fn overlay(mut self, over: &PluginConfig) -> Self {
+    pub fn overlay(mut self, over: &PluginConfig) -> Self {
         if !over.command.is_empty() {
             self.command = over.command.clone();
             // An ACP command alone means the entry is about ACP, as before drivers existed.
@@ -226,6 +239,21 @@ impl PluginConfig {
         for (key, value) in &over.env {
             self.env.insert(key.clone(), value.clone());
         }
+        if over.label.is_some() {
+            self.label = over.label.clone();
+        }
+        if over.provider.is_some() {
+            self.provider = over.provider.clone();
+        }
+        if over.model_env.is_some() {
+            self.model_env = over.model_env.clone();
+        }
+        if over.extends.is_some() {
+            self.extends = over.extends.clone();
+        }
+        // Not inherited: it says whether *this* entry is listed, and a base being a base is
+        // exactly what the entries written from it are not.
+        self.hidden = over.hidden;
         self
     }
 }
@@ -510,10 +538,12 @@ impl PluginRegistry {
     }
 
     /// Every plugin's default driver, in name order (plugins whose driver cannot be built
-    /// are skipped).
+    /// are skipped). A description another entry is written from (`hidden`) is left out: it
+    /// is not an agent of its own, though agents already on it keep working.
     pub fn defaults(&self) -> Vec<Arc<dyn Driver>> {
         self.profiles
             .values()
+            .filter(|p| !p.config.hidden)
             .filter_map(|p| self.serve(p, p.config.default_driver()).ok())
             .map(|r| r.driver)
             .collect()

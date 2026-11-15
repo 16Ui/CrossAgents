@@ -32,21 +32,23 @@ pub async fn run(ctx: &Context, cmd: PluginCommand) -> Result<()> {
                     } else {
                         p.efforts.join(", ")
                     };
-                    // Two entries can run one CLI; say which site one is fixed to, so the
-                    // row is not just a name that looks like its neighbour.
-                    let plugin = match &p.site {
-                        Some(site) => {
-                            // `internal`/`external` are the wire values; say what they mean.
-                            let label = match site.as_str() {
-                                "internal" => "国内站",
-                                "external" => "国际站",
-                                other => other,
-                            };
-                            format!("{} [{}]", p.name, label)
-                        }
-                        None if p.provider != p.name => format!("{} [{}]", p.name, p.provider),
-                        None => p.name.clone(),
+                    // What the description calls itself, in its own script; the name stays a
+                    // slug, shown beside a label that differs from it. Two entries can run one
+                    // CLI, so a fixed site is said too.
+                    let mut plugin = if p.label == p.name {
+                        p.name.clone()
+                    } else {
+                        format!("{} ({})", p.label, p.name)
                     };
+                    if let Some(site) = p.site.as_deref() {
+                        // `internal`/`external` are the wire values; say what they mean.
+                        let site = match site {
+                            "internal" => "国内站",
+                            "external" => "国际站",
+                            other => other,
+                        };
+                        plugin.push_str(&format!(" [{site}]"));
+                    }
                     vec![plugin, models, efforts]
                 })
                 .collect();

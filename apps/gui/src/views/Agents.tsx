@@ -314,9 +314,10 @@ function VendorClis() {
                 <div className="setting-label">
                   <VendorMark plugin={p.provider} size={16} />
                   {/* The vendor is the provider, not the entry's name: one CLI can be listed
-                      twice (workbuddy-cn / workbuddy-intl), and then the site is what tells
-                      the two rows apart. */}
-                  {vendorLabel(p.provider)}
+                      twice (workbuddy-cn / workbuddy-intl). The text is what the description
+                      calls itself — `词元工坊`, `WorkBuddy 国内版` — and the chip says which
+                      site the entry is fixed to. */}
+                  {p.label}
                   {p.site && (
                     <span
                       className="chip small"

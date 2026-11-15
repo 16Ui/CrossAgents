@@ -21,6 +21,7 @@ export const plugins = (): PluginInfo[] => [
   {
     name: "claude",
     provider: "claude",
+    label: "claude",
     site: null,
     models: ["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
     all_models: ["claude-opus-4-1", "claude-sonnet-4-5", "claude-haiku-4-5"],
@@ -56,6 +57,7 @@ export const plugins = (): PluginInfo[] => [
   {
     name: "codex",
     provider: "codex",
+    label: "codex",
     site: null,
     models: [],
     all_models: [],
@@ -90,6 +92,7 @@ export const plugins = (): PluginInfo[] => [
   {
     name: "codebuddy",
     provider: "codebuddy",
+    label: "codebuddy",
     site: null,
     models: [],
     all_models: [],
@@ -118,6 +121,7 @@ export const plugins = (): PluginInfo[] => [
   {
     name: "with",
     provider: "with",
+    label: "with",
     site: null,
     models: ["glm-5.3-flash", "gpt-6-sol", "claude-sonnet-5.5"],
     all_models: WITH_MODELS,
@@ -158,6 +162,7 @@ export const plugins = (): PluginInfo[] => [
   {
     name: "mock",
     provider: "mock",
+    label: "mock",
     site: null,
     models: ["mock-haiku", "mock-opus"],
     all_models: ["mock-haiku", "mock-opus"],

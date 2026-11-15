@@ -7,29 +7,49 @@ use crossagents_drivers::locate::Cli;
 
 use crate::{PluginConfig, manifest};
 
-/// In the order `GET /v1/plugins` lists them.
+/// The descriptions, in the order `GET /v1/plugins` lists them, with `extends` resolved.
+///
+/// A description may start from another (`extends = "codebuddy"`) and change only what
+/// differs: two entries over one CLI say that instead of copying the models, the locate
+/// rules and the install commands. Bases come first here, so one pass resolves them.
 static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
-    [
+    let sources = [
         ("claude", include_str!("../agents/claude.toml")),
         ("codex", include_str!("../agents/codex.toml")),
         ("codebuddy", include_str!("../agents/codebuddy.toml")),
+        ("workbuddy-cn", include_str!("../agents/workbuddy-cn.toml")),
+        (
+            "workbuddy-intl",
+            include_str!("../agents/workbuddy-intl.toml"),
+        ),
         ("with", include_str!("../agents/with.toml")),
         ("cursor", include_str!("../agents/cursor.toml")),
         ("gemini", include_str!("../agents/gemini.toml")),
-        ("workbuddy-cn", include_str!("../agents/workbuddy-cn.toml")),
-        ("workbuddy-intl", include_str!("../agents/workbuddy-intl.toml")),
         ("tokenworks", include_str!("../agents/tokenworks.toml")),
         (
             "deepseek-harness",
             include_str!("../agents/deepseek-harness.toml"),
         ),
-    ]
-    .into_iter()
-    .map(|(name, text)| {
-        manifest::parse(text, name)
-            .unwrap_or_else(|err| panic!("built-in agent description {name}.toml: {err}"))
-    })
-    .collect()
+    ];
+    let mut out: Vec<(String, PluginConfig)> = Vec::with_capacity(sources.len());
+    for (name, text) in sources {
+        let (name, config) = manifest::parse(text, name)
+            .unwrap_or_else(|err| panic!("built-in agent description {name}.toml: {err}"));
+        let config = match config.extends.clone() {
+            None => config,
+            Some(base) => {
+                let Some((_, base)) = out.iter().find(|(declared, _)| *declared == base) else {
+                    panic!(
+                        "built-in agent description {name}.toml extends {base:?}, which is \
+                         declared after it (a base must come first)"
+                    );
+                };
+                base.clone().overlay(&config)
+            }
+        };
+        out.push((name, config));
+    }
+    out
 });
 
 /// Every built-in description, in the order the API lists them.
@@ -68,11 +88,11 @@ mod tests {
                 "claude",
                 "codex",
                 "codebuddy",
+                "workbuddy-cn",
+                "workbuddy-intl",
                 "with",
                 "cursor",
                 "gemini",
-                "workbuddy-cn",
-                "workbuddy-intl",
                 "tokenworks",
                 "deepseek-harness"
             ]
@@ -88,5 +108,22 @@ mod tests {
                 "{name} should say where its CLI is"
             );
         }
+    }
+
+    #[test]
+    fn an_extension_inherits_its_base() {
+        let base = config("codebuddy").expect("base");
+        let cn = config("workbuddy-cn").expect("derived");
+        let intl = config("workbuddy-intl").expect("derived");
+        // Everything but the site, the label and the name comes from the base.
+        assert_eq!(cn.command, base.command);
+        assert_eq!(cn.models, base.models);
+        assert_eq!(cn.efforts, base.efforts);
+        assert_eq!(cn.native_command, base.native_command);
+        assert_eq!(cn.locate, base.locate);
+        // And each entry is its own site.
+        assert_ne!(cn.env, intl.env);
+        assert_eq!(cn.provider.as_deref(), Some("codebuddy"));
+        assert!(base.hidden, "the base is not an entry of its own");
     }
 }

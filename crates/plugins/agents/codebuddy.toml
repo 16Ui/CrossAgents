@@ -10,6 +10,11 @@
 # credentials from the WorkBuddy app that launches it, so on its own it waits forever.
 
 name = "codebuddy"
+# The base the two WorkBuddy entries are written from (`extends = "codebuddy"`): its models,
+# locate rules and install commands are theirs too, and only the site differs. It is not
+# listed as an agent of its own — an agent needs a site, and each entry below names one.
+hidden = true
+label = "CodeBuddy"
 driver = "codebuddy-native"
 # The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them the
 # CLI still runs, marked unverified. No `min_version`: the standalone CLI has always spoken

@@ -50,6 +50,17 @@ pub const MANIFEST: &str = "plugin.toml";
 #[derive(Debug, Deserialize)]
 struct Manifest {
     name: String,
+    /// Start from another description and change only what differs: the models, the way the
+    /// CLI is found and installed come from the base. Two entries over one CLI
+    /// (`workbuddy-cn` / `workbuddy-intl`) then say so instead of copying it.
+    #[serde(default)]
+    extends: Option<String>,
+    /// Written on screen in any script; the name stays a slug because it is an id.
+    #[serde(default)]
+    label: Option<String>,
+    /// A base other entries are written from: resolvable, never listed on its own.
+    #[serde(default)]
+    hidden: bool,
     #[serde(default = "default_protocol")]
     protocol: String,
     /// The vendor this entry signs in to, when it is not the entry's own name: two entries
@@ -164,7 +175,7 @@ fn parse_in(
         return Err(format!("invalid plugin name {:?}", manifest.name));
     }
     let driver = manifest.driver.unwrap_or_default();
-    if driver == DriverKind::AcpGeneric && manifest.command.is_empty() {
+    if driver == DriverKind::AcpGeneric && manifest.command.is_empty() && manifest.extends.is_none() {
         return Err("command is empty".into());
     }
     let (models, efforts) = match manifest.models {
@@ -198,6 +209,9 @@ fn parse_in(
         PluginConfig {
             command,
             models,
+            label: manifest.label,
+            extends: manifest.extends,
+            hidden: manifest.hidden,
             provider: Some(manifest.provider.unwrap_or_else(|| manifest.name.clone())),
             model_env: manifest.model_env,
             driver: manifest.driver,

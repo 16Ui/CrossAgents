@@ -866,6 +866,37 @@ async fn create_agent(
             state.runtime.plugins().names().join(", ")
         )));
     }
+    // A base other entries are written from is not an entry of its own: an agent has to name
+    // the site it runs on. Agents already on it keep running (it still resolves).
+    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+        && let Some(config) = state.runtime.plugins().config(&req.plugin)
+        && config.hidden
+    {
+        let alternatives: Vec<String> = state
+            .runtime
+            .plugins()
+            .defaults()
+            .into_iter()
+            .filter(|driver| {
+                state
+                    .runtime
+                    .plugins()
+                    .config(driver.name())
+                    .is_some_and(|other| other.vendor(driver.name()) == config.vendor(&req.plugin))
+            })
+            .map(|driver| driver.name().to_owned())
+            .collect();
+        return Err(AppError::bad_request(format!(
+            "plugin {:?} is the base the others are written from, not an agent of its own; \
+             use {} instead",
+            req.plugin,
+            if alternatives.is_empty() {
+                "a plugin that names a site".to_owned()
+            } else {
+                alternatives.join(" or ")
+            },
+        )));
+    }
     // A CLI older than the description's minimum does not register an agent
     // (docs/research/multica.md §2.9). A CLI that has not answered its version yet is
     // started as before: unknown is not too old.
@@ -1884,6 +1915,9 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     });
     PluginInfo {
         name: name.to_owned(),
+        label: config
+            .and_then(|config| config.label.clone())
+            .unwrap_or_else(|| name.to_owned()),
         provider: config
             .map(|config| config.vendor(name).to_owned())
             .unwrap_or_else(|| name.to_owned()),

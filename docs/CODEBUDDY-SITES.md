@@ -36,3 +36,21 @@ CLI 启动的 shell 工具也会看到这个独立资料目录，原用户目录
 2026-11-02 补充真实请求回归：使用已登录的国际站独立账号与 `deepseek-v4.1-flash`，经修复后的 CrossAgents 驱动启动会话，在传入空认证覆盖标记的情况下成功收到 `PONG`。该测试实际调用模型、会消耗少量额度，默认忽略；显式设置 `CROSSAGENTS_SMOKE_CODEBUDDY_HOME`、`CROSSAGENTS_SMOKE_CODEBUDDY` 和 `CROSSAGENTS_SMOKE_MODEL` 后，运行 `cargo test -p crossagents-drivers --test codebuddy_smoke smoke_international_profile_with_empty_auth_overrides -- --ignored --exact`。
 
 官方参考：[CLI 安装与配置目录](https://www.codebuddy.cn/docs/cli/installation)、[登录方式](https://www.codebuddy.ai/docs/cli/quickstart)。配置目录与凭据位置的区别依据本机 CLI 实现核对，不能仅从配置目录文档推断。
+
+## 插件条目与账号的分工
+
+「设置 → 智能体」里有两条 CodeBuddy 条目，各固定一个站点：
+
+| 条目 | 固定站点 | 说明 |
+|---|---|---|
+| `workbuddy-cn`（WorkBuddy 国内版） | 国内站 `workbuddy.cn` | `CODEBUDDY_INTERNET_ENVIRONMENT=internal` |
+| `workbuddy-intl`（WorkBuddy 国际版） | 国际站 `codebuddy.ai` | `CODEBUDDY_INTERNET_ENVIRONMENT=external` |
+
+两条都由 `codebuddy` 派生（`extends = "codebuddy"`）：模型、CLI 定位与安装方式继承自那里，
+只有站点、显示名和文档不同。`codebuddy` 本身是基座，不再单独列出，也不能用来新建 agent
+（会提示改用上面两条）；已经在它上面的 agent 继续可用。
+
+**条目管站点，账号管凭据**，两者必须配套：给 `workbuddy-cn` 配一个国际站账号会被拒绝，
+因为账号自己的环境变量会覆盖固定值。不绑账号时，条目跟随本机默认登录，此时两个站点并不
+隔离——只有 `--codebuddy-site` 的账号才有独立的 profile 目录。
+

@@ -10,6 +10,7 @@ import { modelPickValue, parseModelPick, pluginBlock, reasoningWorkerRequest, wo
 const plugin = (name: string, models: string[]): PluginInfo => ({
   name,
   provider: name,
+  label: name,
   site: null,
   models,
   all_models: models,

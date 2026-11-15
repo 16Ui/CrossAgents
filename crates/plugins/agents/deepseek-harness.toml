@@ -10,6 +10,7 @@
 # prompts — the same way it does for any fresh machine.
 
 name = "deepseek-harness"
+label = "DeepSeek Harness"
 protocol = "acp"
 command = ["dsh", "--profile", "acp"]
 verified = ["0.2.2"]

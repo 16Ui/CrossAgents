@@ -5,6 +5,11 @@ import type { DriverKind } from "./DriverKind";
 
 export type PluginInfo = { name: string, 
 /**
+ * What to write on screen, in any script (`词元工坊`, `WorkBuddy 国内版`); `name` when the
+ * description does not say. The name stays a slug because it is an id.
+ */
+label: string, 
+/**
  * The vendor whose accounts and sign-in this entry uses, when that is not `name`: two
  * entries over one CLI (`workbuddy-cn`, `workbuddy-intl`) both run `codebuddy` accounts.
  * A client pairs an agent with an account by this, and groups entries that share it.

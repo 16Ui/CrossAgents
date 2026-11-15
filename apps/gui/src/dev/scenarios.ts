@@ -286,6 +286,7 @@ export const SCENARIOS: Scenario[] = [
     const kimi: PluginInfo = {
       name: "kimi",
       provider: "kimi",
+      label: "kimi",
       site: null,
       models: ["kimi-k3", "kimi-k2.7-code"],
       all_models: ["kimi-k3", "kimi-k2.7-code"],
