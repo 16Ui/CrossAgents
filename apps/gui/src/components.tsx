@@ -742,35 +742,56 @@ function BrandImage({ icon, size, className = "" }: { icon: BrandIcon; size: num
 }
 
 /** The vendor's official mark, or a ring for a plugin we have none for. */
-export function VendorMark({ plugin, entry, size = 12, tile = false }: { plugin: string; entry?: string; size?: number; tile?: boolean }) {
+export function VendorMark({
+  plugin,
+  entry,
+  size = 12,
+  tile = false,
+}: {
+  plugin: string;
+  entry?: string;
+  size?: number;
+  tile?: boolean;
+}) {
   const vendor = vendorOf(plugin);
   const icon = VENDOR_ICONS[vendor];
   // `entry` is the description's own name, which `plugin` may not be: the settings list
   // passes the vendor here so two entries of one CLI draw the same logo, and the entry so
   // the accent still tells them apart.
   const accent = pluginAccent(entry ?? plugin);
-  const className = ["vendor-mark", vendor, tile && "tiled", accent && `accent-${accent}`]
+  const markClass = ["vendor-mark", vendor].filter(Boolean).join(" ");
+  const boxClass = ["vendor-mark-box", tile && "tiled", accent && `accent-${accent}`]
     .filter(Boolean)
     .join(" ");
-  if (icon) return <BrandImage icon={icon} size={size} className={className} />;
-  // No official mark: a letter on a tint says which plugin this is, where the old empty ring
-  // said only "something we have no logo for".
-  const initial = (entry ?? plugin).trim().charAt(0).toUpperCase();
-  if (initial) {
-    return (
+  // A tile pads the mark inside it; the corner dot then sits on the tile's edge.
+  const inner = tile ? size - 5 : size;
+
+  let mark;
+  if (icon) {
+    mark = <BrandImage icon={icon} size={inner} className={markClass} />;
+  } else {
+    // No official mark: a letter says which plugin this is, where an empty ring said only
+    // "something we have no logo for".
+    const initial = (entry ?? plugin).trim().charAt(0).toUpperCase();
+    mark = initial ? (
       <span
-        className={`${className} initial`}
-        style={{ width: size, height: size, fontSize: Math.round(size * 0.62) }}
+        className={`${markClass} initial`}
+        style={{ width: inner, height: inner, fontSize: Math.round(inner * 0.66) }}
         aria-hidden="true"
       >
         {initial}
       </span>
+    ) : (
+      <svg className={markClass} width={inner} height={inner} viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
     );
   }
+  if (!tile && !accent) return mark;
   return (
-    <svg className={className} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
+    <span className={boxClass} style={{ width: size, height: size }} aria-hidden="true">
+      {mark}
+    </span>
   );
 }
 

@@ -716,27 +716,39 @@ a.button.primary:hover { background: var(--accent-hover); }
   box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 28%, transparent);
 }
 
-/* Every entry sits on the same tile, so the column reads as one list; an entry that shares
-   its vendor's mark with another gets a colour of its own on that tile. The row still says
-   the site in words — the colour is a second cue, never the only one. */
-.vendor-mark.tiled {
-  padding: 2px;
+/* Every entry sits on the same tile, so the column reads as one list. Entries that share a
+   vendor's mark carry a corner dot of their own: two WorkBuddy sites, and the harness's two
+   homes. A dot rather than a tinted tile because the logo covers the tile — and it is a
+   second cue only: the row still says the site in words. */
+.vendor-mark-box {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.vendor-mark-box.tiled {
   border-radius: 5px;
   background: color-mix(in srgb, currentColor 8%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 18%, transparent);
 }
-.vendor-mark.accent-cn { --accent: #d94f45; }
-.vendor-mark.accent-intl { --accent: #3f6fd8; }
-.vendor-mark.accent-tokenworks { --accent: #12907f; }
-.vendor-mark.accent-harness { --accent: #7757d6; }
-.vendor-mark.accent-cn,
-.vendor-mark.accent-intl,
-.vendor-mark.accent-tokenworks,
-.vendor-mark.accent-harness {
-  padding: 2px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+.vendor-mark-box.accent-cn { --accent: #d94f45; }
+.vendor-mark-box.accent-intl { --accent: #3f6fd8; }
+.vendor-mark-box.accent-tokenworks { --accent: #12907f; }
+.vendor-mark-box.accent-harness { --accent: #7757d6; }
+.vendor-mark-box.accent-cn::after,
+.vendor-mark-box.accent-intl::after,
+.vendor-mark-box.accent-tokenworks::after,
+.vendor-mark-box.accent-harness::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--surface, #fff);
 }
 .vendor .model { color: var(--text-2); }
 .vendor .sep { color: var(--muted); }
