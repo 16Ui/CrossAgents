@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
 
 use self::wire::{method, *};
+use crate::locate::Cli;
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
 use crate::process::resolve_program;
 
@@ -33,6 +34,10 @@ pub struct AcpDriver {
     models: Vec<String>,
     /// Environment variable that receives the session's model, e.g. `ANTHROPIC_MODEL`.
     model_env: Option<String>,
+    /// Where the description says its CLI is. `None` for a description that only names a
+    /// launch command (`command = ["npx", "-y", ...]`): there is nothing to look for, and
+    /// the plugin row then shows no install state.
+    cli: Option<Cli>,
 }
 
 impl AcpDriver {
@@ -47,7 +52,16 @@ impl AcpDriver {
             command,
             models,
             model_env,
+            cli: None,
         }
+    }
+
+    /// Reports where the CLI was found and its version, so the plugin list can say whether
+    /// it is installed: an ACP description that says where to look (docs/DESIGN.md §9.3) is
+    /// as inspectable as a native one.
+    pub fn with_cli(mut self, cli: Cli) -> Self {
+        self.cli = Some(cli);
+        self
     }
 
     pub fn command(&self) -> &[String] {
@@ -80,6 +94,39 @@ impl Driver for AcpDriver {
 
     fn models(&self) -> Vec<String> {
         self.models.clone()
+    }
+
+    fn installed(&self) -> bool {
+        match &self.cli {
+            Some(cli) => cli.installed(),
+            None => true,
+        }
+    }
+
+    async fn cli_status(&self) -> Option<crossagents_core::CliStatus> {
+        match &self.cli {
+            Some(cli) => Some(cli.status().await),
+            None => None,
+        }
+    }
+
+    async fn probe_cli(&self) {
+        if let Some(cli) = &self.cli {
+            let _ = cli.version().await;
+        }
+    }
+
+    fn refresh_cli(&self) {
+        if let Some(cli) = &self.cli {
+            cli.forget();
+        }
+    }
+
+    fn cli_places(&self) -> Vec<String> {
+        match &self.cli {
+            Some(cli) => cli.searched(),
+            None => Vec::new(),
+        }
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {

@@ -1054,6 +1054,14 @@ impl Runtime {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
 
+        // What the plugin itself pins (its site, its config directory), ahead of the
+        // agent's own environment and its account's.
+        let plugin_env = self
+            .plugins
+            .config(&agent.plugin)
+            .map(|config| config.env_expanded())
+            .unwrap_or_default();
+
         let spec = |events: &mpsc::UnboundedSender<SessionEvent>| SessionSpec {
             agent: agent.clone(),
             mcp_servers: extras.mcp_servers.clone(),
@@ -1061,7 +1069,16 @@ impl Runtime {
             permissions: extras.permissions.clone(),
             command: command_of(&agent),
             instructions: extras.instructions.clone(),
-            env: extras.env.clone(),
+            env: {
+                let mut env = plugin_env.clone();
+                for (key, value) in &extras.env {
+                    match env.iter_mut().find(|(k, _)| k == key) {
+                        Some(slot) => slot.1 = value.clone(),
+                        None => env.push((key.clone(), value.clone())),
+                    }
+                }
+                env
+            },
             events: events.clone(),
         };
         // Carry on the agent's last conversation when the driver can, unless it is known

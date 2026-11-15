@@ -1,0 +1,46 @@
+# DeepSeek Harness — the `dsh` runtime on a home of its own.
+#
+# The same binary and the same ACP profile as `tokenworks`, kept apart on purpose: `DSH_HOME`
+# points at `~/.dsh-harness`, so the sessions, profiles and logins CrossAgents creates here do
+# not mix with the ones the 词元工坊 desktop app keeps in `~/.dsh`. Use `tokenworks` when an
+# agent should carry on the desktop app's work; use this one for work that should start clean.
+#
+# Signing in happens once for this home: `dsh web` (or a CrossAgents `account login`) with
+# `DSH_HOME` pointing here. Until then the runtime answers `authMethods: []` and refuses
+# prompts — the same way it does for any fresh machine.
+
+name = "deepseek-harness"
+protocol = "acp"
+command = ["dsh", "--profile", "acp"]
+verified = ["0.2.2"]
+
+[models]
+fallback = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "deepseek-v4-flash"]
+efforts = ["off", "low", "high", "max"]
+
+[locate]
+env = "DSH_CLI"
+commands = ["dsh"]
+shim = "node-script"
+version = ["--version"]
+
+[locate.paths]
+windows = ["%APPDATA%/npm/dsh.cmd", "%APPDATA%/npm/dsh"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["/opt/homebrew/bin/dsh", "/usr/local/bin/dsh"]
+
+[install]
+label = "DeepSeek Harness"
+hint = "npm install -g @deepseek-ai/dsh@0.2.2-rc.2"
+login = "run `dsh web` once with this home to sign in (`DSH_HOME=%USERPROFILE%\\.dsh-harness`)"
+notes = "Separate home (~/.dsh-harness): nothing is shared with the 词元工坊 app, including logins."
+docs = "https://github.com/deepseek-ai/dsh"
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+run = ["npm", "install", "-g", "@deepseek-ai/dsh@0.2.2-rc.2"]
+upgrade = ["npm", "install", "-g", "@deepseek-ai/dsh@next"]
+
+[env]
+DSH_HOME = "%USERPROFILE%\\.dsh-harness"

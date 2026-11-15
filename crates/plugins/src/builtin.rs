@@ -16,7 +16,13 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         ("with", include_str!("../agents/with.toml")),
         ("cursor", include_str!("../agents/cursor.toml")),
         ("gemini", include_str!("../agents/gemini.toml")),
+        ("workbuddy-cn", include_str!("../agents/workbuddy-cn.toml")),
+        ("workbuddy-intl", include_str!("../agents/workbuddy-intl.toml")),
         ("tokenworks", include_str!("../agents/tokenworks.toml")),
+        (
+            "deepseek-harness",
+            include_str!("../agents/deepseek-harness.toml"),
+        ),
     ]
     .into_iter()
     .map(|(name, text)| {
@@ -65,7 +71,10 @@ mod tests {
                 "with",
                 "cursor",
                 "gemini",
-                "tokenworks"
+                "workbuddy-cn",
+                "workbuddy-intl",
+                "tokenworks",
+                "deepseek-harness"
             ]
         );
         for (name, config) in all() {

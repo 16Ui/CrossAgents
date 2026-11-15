@@ -79,6 +79,11 @@ pub struct PluginConfig {
     /// What installing it takes; shown, never run.
     #[serde(default)]
     pub install: Install,
+    /// Environment every agent of this plugin gets, ahead of the agent's own and its
+    /// account's. This is how two entries backed by one CLI stay different: a site
+    /// (`CODEBUDDY_INTERNET_ENVIRONMENT`) or a config directory (`DSH_HOME`).
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
     /// The oldest CLI this description accepts (docs/research/multica.md §2.9). A machine
     /// whose CLI is older does not register the agent: no models, and the GUI says the
     /// version is too low.
@@ -137,6 +142,15 @@ impl PluginConfig {
         .with_description(self.described_by.clone())
     }
 
+    /// The environment this plugin pins, with `%VAR%` and a leading `~` expanded, so a
+    /// description can say `%USERPROFILE%\.dsh-harness` without knowing the user.
+    pub fn env_expanded(&self) -> Vec<(String, String)> {
+        self.env
+            .iter()
+            .map(|(key, value)| (key.clone(), expand_path_vars(value)))
+            .collect()
+    }
+
     /// A built-in adjusted by its `config.toml` entry: launch commands, driver, models and
     /// effort levels.
     fn overlay(mut self, over: &PluginConfig) -> Self {
@@ -174,8 +188,41 @@ impl PluginConfig {
         if !over.verified.is_empty() {
             self.verified = over.verified.clone();
         }
+        for (key, value) in &over.env {
+            self.env.insert(key.clone(), value.clone());
+        }
         self
     }
+}
+
+/// Expands `%VAR%` and a leading `~` in a description's environment value. Anything that
+/// does not resolve is left as written, so a missing variable shows up in the agent's own
+/// error rather than becoming an empty path.
+fn expand_path_vars(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else { break };
+        let name = &after[..end];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(found) if !name.is_empty() => out.push_str(&found),
+            _ => {
+                out.push('%');
+                out.push_str(name);
+                out.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    if let Some(tail) = out.strip_prefix("~/").or_else(|| out.strip_prefix("~\\")) {
+        if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+            return std::path::Path::new(&home).join(tail).display().to_string();
+        }
+    }
+    out
 }
 
 /// A driver for an agent, with a note when it is not the one asked for.
@@ -226,12 +273,19 @@ impl Profile {
                         self.name
                     )));
                 }
-                Arc::new(AcpDriver::new(
+                let mut driver = AcpDriver::new(
                     &self.name,
                     self.config.command.clone(),
                     self.config.models.clone(),
                     self.config.model_env.clone(),
-                ))
+                );
+                // A description that says where its CLI is gets the same install and version
+                // reporting a native one has; one that only names a command (`npx ...`) has
+                // nothing to look for.
+                if !self.config.locate.is_empty() {
+                    driver = driver.with_cli(self.config.cli());
+                }
+                Arc::new(driver)
             }
             DriverKind::CodexNative => Arc::new(CodexNativeDriver::new(
                 &self.name,

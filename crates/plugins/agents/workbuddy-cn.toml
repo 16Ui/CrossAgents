@@ -1,0 +1,56 @@
+# WorkBuddy 国内版 — the CodeBuddy CLI pinned to the mainland site (codebuddy.cn).
+#
+# Same CLI as `codebuddy` (docs/CODEBUDDY-SITES.md), but this entry does not follow whatever
+# login the machine happens to have: it always asks for the mainland origin, so an agent
+# created from it reads the 国内站 account and never the international one. The two entries
+# exist so the same machine can run both sites side by side; pick the other one when you
+# mean codebuddy.ai.
+#
+# Sign in once per site: `codebuddy` then `/login`, on that site's page. An account added
+# with `crossagents account add ... --codebuddy-site china` overrides these variables for
+# its own agents, which is what keeps two logins apart.
+
+name = "workbuddy-cn"
+driver = "codebuddy-native"
+native_command = ["codebuddy"]
+verified = ["2.173"]
+
+[models]
+fallback = [
+    "default-model",
+    "hy4-preview",
+    "hy3",
+    "deepseek-v4.1-flash",
+    "glm-5.3",
+    "kimi-k3-1",
+]
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+[locate]
+env = "CODEBUDDY_CLI"
+commands = ["codebuddy"]
+# npm's `codebuddy.cmd` runs the CLI through `node`; so do we, which keeps the JSON of
+# `--mcp-config` away from cmd.exe's quoting.
+shim = "node-script"
+version = ["--version"]
+
+[locate.paths]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["/opt/homebrew/bin/codebuddy", "/usr/local/bin/codebuddy"]
+
+[install]
+label = "WorkBuddy 国内版"
+hint = "npm install -g @tencent-ai/codebuddy-code"
+login = "then sign in once with `codebuddy` and `/login`, choosing the 国内站 page (or set CODEBUDDY_API_KEY)"
+notes = "Fixed to the mainland site (www.workbuddy.cn). The copy inside the WorkBuddy app cannot run outside it."
+docs = "https://www.codebuddy.cn/docs/cli/installation"
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+run = ["npm", "install", "-g", "@tencent-ai/codebuddy-code"]
+upgrade = ["npm", "install", "-g", "@tencent-ai/codebuddy-code@latest"]
+
+[env]
+CODEBUDDY_INTERNET_ENVIRONMENT = "internal"
+CODEBUDDY_COPILOT_INTERNET_ENVIRONMENT = "internal"

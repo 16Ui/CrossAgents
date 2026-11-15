@@ -1,14 +1,14 @@
-# 词元工坊 (Token Workshop) — DeepSeek's `dsh` harness, the built-in agent
-# (docs/DESIGN.md §9.3).
+# 词元工坊 (Token Workshop) — the DeepSeek `dsh` runtime as the desktop app keeps it.
 #
 # `dsh --profile acp` serves the Agent Client Protocol over stdio, so this description needs
-# no driver code: `acp-generic` speaks the protocol and the runtime answers with its own
-# model and reasoning-effort options (`configOptions` on `session/new`) — which is how the
-# model and effort below reach it.
+# no driver code: `acp-generic` speaks the protocol and the runtime answers with its own model
+# and reasoning-effort options (`configOptions` on `session/new`) — which is how the model and
+# effort below reach it.
 #
-# The desktop app (词元工坊.exe) carries its own copy of the runtime under
-# `resources/runtime` and does not put it on PATH; the standalone CLI is the supported entry
-# point, and it reads the same `~/.dsh` profiles and logins the desktop app created.
+# This entry deliberately does **not** set `DSH_HOME`: it reads the same `~/.dsh` the 词元工坊
+# app writes, so the logins, profiles and session history you already have there are the ones
+# the agents use. `deepseek-harness` is the same runtime with a home of its own — pick this one
+# to carry on what the desktop app was doing, that one to keep CrossAgents' work separate.
 
 name = "tokenworks"
 protocol = "acp"
@@ -41,8 +41,8 @@ macos = ["/opt/homebrew/bin/dsh", "/usr/local/bin/dsh"]
 label = "词元工坊 (dsh)"
 # Every published version is a prerelease, so `@*`/`@latest` do not resolve; pin the series.
 hint = "npm install -g @deepseek-ai/dsh@0.2.2-rc.2"
-login = "sign in once in the 词元工坊 app or with `dsh web`; the CLI reuses ~/.dsh"
-notes = "The runtime inside the 词元工坊 desktop app is not on PATH and cannot be launched on its own."
+login = "sign in once in the 词元工坊 app or with `dsh web`; this entry reuses ~/.dsh"
+notes = "Shares ~/.dsh with the 词元工坊 desktop app. The runtime inside the app is not on PATH and cannot be launched on its own."
 docs = "https://github.com/deepseek-ai/dsh"
 
 [[install.methods]]

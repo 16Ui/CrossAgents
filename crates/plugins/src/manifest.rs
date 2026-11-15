@@ -76,6 +76,10 @@ struct Manifest {
     locate: Locator,
     #[serde(default)]
     install: Install,
+    /// Environment every agent of this plugin gets, before the agent's own and its
+    /// account's: how two entries for one CLI differ (a site, a config directory).
+    #[serde(default)]
+    env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +201,7 @@ fn parse_in(
             verified: manifest.verified,
             locate: manifest.locate,
             install: manifest.install,
+            env: manifest.env,
             move_cwd: None,
             described_by: None,
         },
