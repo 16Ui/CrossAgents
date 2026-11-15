@@ -39,6 +39,10 @@ pub struct AddArgs {
     /// Model, e.g. `opus` or `haiku`.
     #[arg(long)]
     pub model: Option<String>,
+    /// Reasoning effort, e.g. `high`; `crossagents plugin ls` lists what this plugin takes.
+    /// Stored as the agent's `config.effort`, which the driver sends at session start.
+    #[arg(long)]
+    pub effort: Option<String>,
     /// Deprecated: a label kept on the record for old clients (absent: worker); it decides
     /// nothing.
     #[arg(long, value_enum)]
@@ -100,9 +104,19 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 model: args.model,
                 role: args.role.map(Into::into),
                 cwd: cwd.display().to_string(),
-                config: match &args.account {
-                    Some(account) => serde_json::json!({ "account": account }),
-                    None => serde_json::Value::Null,
+                config: {
+                    let mut config = serde_json::Map::new();
+                    if let Some(account) = &args.account {
+                        config.insert("account".into(), serde_json::json!(account));
+                    }
+                    if let Some(effort) = &args.effort {
+                        config.insert("effort".into(), serde_json::json!(effort));
+                    }
+                    if config.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::Object(config)
+                    }
                 },
                 profile: AgentProfile {
                     display_name: args.display_name,

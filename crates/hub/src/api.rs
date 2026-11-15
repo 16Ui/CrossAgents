@@ -889,6 +889,23 @@ async fn create_agent(
             )));
         }
     }
+    // An effort the plugin does not list is refused here rather than at the first turn: the
+    // CLI would ignore it or fail the turn, and either way the agent looks broken.
+    if let Some(effort) = req.config.get("effort").and_then(|v| v.as_str())
+        && let Some(config) = state.runtime.plugins().config(&req.plugin)
+        && !config.efforts.is_empty()
+        && !config
+            .efforts
+            .iter()
+            .any(|listed| listed.eq_ignore_ascii_case(effort))
+    {
+        return Err(AppError::bad_request(format!(
+            "plugin {:?} takes reasoning efforts {}; {:?} is not one of them",
+            req.plugin,
+            config.efforts.join(", "),
+            effort
+        )));
+    }
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
@@ -1867,6 +1884,12 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     });
     PluginInfo {
         name: name.to_owned(),
+        provider: config
+            .map(|config| config.vendor(name).to_owned())
+            .unwrap_or_else(|| name.to_owned()),
+        site: config
+            .and_then(|config| config.pinned_site())
+            .map(|site| site.environment().to_owned()),
         models,
         all_models: all.clone(),
         shown: state.models.shown(name),

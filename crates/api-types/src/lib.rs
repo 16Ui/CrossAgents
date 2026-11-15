@@ -767,6 +767,15 @@ pub struct TranscriptUsage {
 #[ts(export)]
 pub struct PluginInfo {
     pub name: String,
+    /// The vendor whose accounts and sign-in this entry uses, when that is not `name`: two
+    /// entries over one CLI (`workbuddy-cn`, `workbuddy-intl`) both run `codebuddy` accounts.
+    /// A client pairs an agent with an account by this, and groups entries that share it.
+    #[serde(default)]
+    pub provider: String,
+    /// The CodeBuddy site this entry is fixed to, if any (`china` or `international`): what
+    /// keeps two entries over one CLI apart, and what a client shows beside the name.
+    #[serde(default)]
+    pub site: Option<String>,
     /// The models offered: [`Self::all_models`] narrowed to those picked on the settings
     /// page (all of them when none are).
     pub models: Vec<String>,

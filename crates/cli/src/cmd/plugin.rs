@@ -32,7 +32,22 @@ pub async fn run(ctx: &Context, cmd: PluginCommand) -> Result<()> {
                     } else {
                         p.efforts.join(", ")
                     };
-                    vec![p.name.clone(), models, efforts]
+                    // Two entries can run one CLI; say which site one is fixed to, so the
+                    // row is not just a name that looks like its neighbour.
+                    let plugin = match &p.site {
+                        Some(site) => {
+                            // `internal`/`external` are the wire values; say what they mean.
+                            let label = match site.as_str() {
+                                "internal" => "国内站",
+                                "external" => "国际站",
+                                other => other,
+                            };
+                            format!("{} [{}]", p.name, label)
+                        }
+                        None if p.provider != p.name => format!("{} [{}]", p.name, p.provider),
+                        None => p.name.clone(),
+                    };
+                    vec![plugin, models, efforts]
                 })
                 .collect();
             print_table(&["PLUGIN", "MODELS", "EFFORTS"], &rows);
