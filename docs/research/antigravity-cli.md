@@ -23,7 +23,7 @@ Gemini CLI（免费、Google AI Pro、Ultra）；企业 Gemini Code Assist 和�
   驱动的能力表因此报 `mcp: false`。
 - 凭据在系统钥匙串（Windows 凭据管理器 / macOS Keychain / Linux secret-service），不在
   `~/.gemini` 里；换 `HOME` 不会换账号。`agy models` 未登录时打印
-  `Please sign in to view available models.` 并以 0 退出（实测）。
+  `Please sign in to view available models.` 并以 1 退出（实测）。
 
 ## 命令行（`agy --help`，实测）
 
@@ -105,8 +105,39 @@ Or, paste the authorization code here and press Enter:
 `{"event":"result","result":{"status":"ERROR","error":"authentication failed or timed out",…}}`。
 
 两个结论：驱动在没有登录时会卡住一轮（约 60 秒）再报错，这是 CLI 的行为，不是驱动加的；
-另外 headless 其实可以收授权码，所以「在 GUI 里登录」这条路是通的（读 stderr 的链接、把码
-写回 stdin），只是这一版没做。
+另外 headless 也能收授权码，登录另有专门入口（见下一节）。
+
+## 登录（实测）
+
+`agy acp --login` 是 CLI 自带的非交互登录（`agy help acp` 里的「Log in with Google
+interactively, then exit (ACP terminal auth)」）。实测：
+
+1. stdout 打印授权链接（**stdout**，不是 stderr）：
+
+   ```
+   Open this link in a browser to log in with Google:
+
+     https://accounts.google.com/o/oauth2/auth?…redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback…
+
+   Then paste the authorization code, or the full URL of the page you land on, and press Enter:
+   ```
+
+2. 然后在 stdin 上等一行：授权码，或者登录后落地页的完整地址都收。
+3. **没有自己的超时**：stdin 开着就一直等（实测 200 秒仍在等）；stdin 关了才以
+   `login cancelled: no authorization code was entered` 退出，退出码 0。
+4. 码不对时打印 `couldn't log in: token exchange failed: oauth2: "invalid_grant" …`，退出码 1，
+   进程结束；要重试得重开一个进程（链接也会换新的）。
+5. 登录成功后退出码 0，凭据进钥匙串。
+
+hub 的登录命令拿到的是**关闭的 stdin**，所以码没处可写。补上的一半是
+`crossagents agy-login --port <n> --command <agy>`（`crates/drivers/src/antigravity_native/login.rs`）：
+起 `agy acp --login`，读它的链接，在 `127.0.0.1:<n>` 上起一个单字段页面（链接 + 粘贴框），
+把粘进来的内容写回 CLI 的 stdin；账号页把这个页面地址当登录页给 GUI（`LoginCommand::serves`，
+和 CodeBuddy 的 Web UI 同一条路）。码被拒时页面显示 CLI 的原话并换上新链接。
+
+`agy acp`（JSON-RPC）的 `initialize` 也列了 `oauth-personal` 等四个 `authMethods`，但
+`authenticate` 既不开浏览器也不打印链接，90 秒内无任何回应——所以没走 ACP，走了 `--login`。
+
 
 ## 会话与恢复
 

@@ -18,6 +18,7 @@
 //!   `~/.gemini/config/` only (`agy mcp add` writes there, for every session), and
 //!   `--settings` rejects `mcpServers`. The session says so rather than pretending.
 
+pub mod login;
 pub mod wire;
 
 use std::collections::HashSet;

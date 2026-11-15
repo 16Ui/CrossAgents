@@ -20,6 +20,7 @@
 //!
 //! An agent can pick another driver than its plugin's default through its own `driver` field.
 
+pub mod antigravity_account;
 pub mod builtin;
 pub mod claude_account;
 pub mod codebuddy_account;

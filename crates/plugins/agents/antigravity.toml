@@ -35,7 +35,7 @@ macos = ["~/.local/bin/agy", "/opt/homebrew/bin/agy", "/usr/local/bin/agy"]
 label = "Antigravity CLI"
 hint = "irm https://antigravity.google/cli/install.ps1 | iex"
 docs = "https://antigravity.google/docs/getting-started?tab=cli"
-login = "then run `agy` once and sign in with your Google account"
+login = "then sign in from the account page (or run `agy` once and sign in there)"
 
 [[install.methods]]
 id = "native"

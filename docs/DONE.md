@@ -565,3 +565,13 @@ B 删除 run：
 - [x] 注册：`DriverKind::AntigravityNative`（`antigravity-native`）、plugins 内置表、终端恢复命令（`agy --conversation <id>`）、`bindings/DriverKind.ts`、GUI mock 的 `CAPS`。
 - [x] 测试：`wire.rs` 九个解析测试；驱动六个 mock-CLI 测试（流式回答+工具+用量、deny/guard 的参数、resume、ERROR 结果、打断）；[crates/drivers/tests/antigravity_smoke.rs](../crates/drivers/tests/antigravity_smoke.rs) 五个需要真 CLI 的 `#[ignore]` 用例。
 - [x] 本机装了 `agy 1.5.9`（`%LOCALAPPDATA%\agy\bin\agy.exe`，sha512 与官方 manifest 一致）用于核对 `--help`、`models`、`mcp` 的行为。**没跑通一轮对话**：这台机器还没登录 Google，`agy models` 直接说 `Please sign in`。MCP 的结论（无法按会话挂载）是实测 `--settings` 拒绝 `mcpServers` 加官方配置路径得出的。
+
+## 三十五、Antigravity 的交互式登录（2026-11-16）
+
+> 来源：人说「为啥不学其他 native 级的 provider 做交互式登录吗」。上一版只写了「在终端 `agy` 登录一次」，账号页对这个 provider 是空的。
+
+- [x] `AntigravityAccounts`（[crates/plugins/src/antigravity_account.rs](../crates/plugins/src/antigravity_account.rs)）：`status` 跑 `agy models`，CLI 说 `Please sign in` 就是没登录，否则算已登录并把列出的模型缓存 60 秒；`models` 用这份缓存，CLI 答不出时退回描述文件的 fallback。没有 email / 套餐 / 额度可读（凭据在系统钥匙串，CLI 不落盘也不打印），`sessions` 为空（CLI 不写 token 数，用量由驱动的 `result.usage` 给）。
+- [x] 登录命令：`<crossagents> agy-login --port <n> --command <agy>`，`serves: http://127.0.0.1:<n>/`。和 CodeBuddy 的 Web UI 走同一条 `LoginCommand::serves` 路：账号页把地址当登录页给出，hub 轮询账号状态直到已登录。
+- [x] 登录助手（[crates/drivers/src/antigravity_native/login.rs](../crates/drivers/src/antigravity_native/login.rs)）：`agy acp --login` 在 stdout 打印 Google 链接、在 stdin 等一行授权码（或落地页完整地址），**自己不超时**（实测 200 秒仍在等）。助手读链接、起一个单字段页面（链接 + 粘贴框），把粘进来的内容写回 CLI 的 stdin；退出码 0 就收尾，非 0 时页面显示 CLI 的原话（`token exchange failed: …`）并换上新进程的新链接。实测过页面与失败重试，成功那一步要真人登录。
+- [x] 隐藏子命令 `agy-login`（[crates/cli/src/main.rs](../crates/cli/src/main.rs)）；hub 注册 provider（[crates/hub/src/lib.rs](../crates/hub/src/lib.rs)），登录助手和 gemini 的一样优先用 runtime host 那份可执行文件。
+- [x] 测试：助手 5 个（好码收尾、坏码报错并换链接、整页地址透传、链接提取、表单解码），provider 5 个（未登录、列模型、未安装退回 fallback、登录命令形状、默认 home）。ACP 那条路（`initialize` 的 `authMethods` 有 `oauth-personal`，但 `authenticate` 90 秒无回应）也测过，没采用，记在 [research/antigravity-cli.md](research/antigravity-cli.md)。
