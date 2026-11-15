@@ -74,6 +74,12 @@ const CODEBUDDY_KEPT_ENV: [&str; 3] = [
     "CODEBUDDY_INTERNET_ENVIRONMENT",
 ];
 
+/// How a WorkBuddy session tells its own daemon which port and host to bind, spelled without
+/// the `CODEBUDDY_` prefix. Inherited by a hub started inside WorkBuddy, they make the CLI
+/// bind the port WorkBuddy already holds (`listen EADDRINUSE 127.0.0.1:<port>`) instead of
+/// picking a free one, so a session started from that shell cannot open at all.
+const WORKBUDDY_SERVER_ENV: [&str; 2] = ["SERVER__PORT", "SERVER__HOST"];
+
 impl Flavor {
     /// The CLI's name, for messages.
     pub fn program(self) -> &'static str {
@@ -90,8 +96,16 @@ impl Flavor {
     /// everything but the sign-in is dropped. An agent's own `env` is applied after this
     /// and can set any of them again.
     pub fn withholds(self, key: &str) -> bool {
-        self == Self::Codebuddy
-            && key.to_ascii_uppercase().starts_with("CODEBUDDY_")
+        if self != Self::Codebuddy {
+            return false;
+        }
+        if WORKBUDDY_SERVER_ENV
+            .iter()
+            .any(|held| held.eq_ignore_ascii_case(key))
+        {
+            return true;
+        }
+        key.to_ascii_uppercase().starts_with("CODEBUDDY_")
             && !CODEBUDDY_KEPT_ENV
                 .iter()
                 .any(|kept| kept.eq_ignore_ascii_case(key))
