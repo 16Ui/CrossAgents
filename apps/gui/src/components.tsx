@@ -690,7 +690,7 @@ export function colorOf(agent: Agent): string {
   return hueOf(agent.name);
 }
 
-type Vendor = "claude" | "codex" | "codebuddy" | "other";
+type Vendor = "claude" | "codex" | "codebuddy" | "deepseek" | "other";
 
 /** Which vendor runs a plugin (or account provider). */
 export function vendorOf(plugin: string): Vendor {
@@ -700,7 +700,30 @@ export function vendorOf(plugin: string): Vendor {
   // WorkBuddy is the CodeBuddy CLI under its own name, and a description may list one CLI
   // twice (workbuddy-cn / workbuddy-intl): the mark follows the vendor, not the entry.
   if (p.startsWith("codebuddy") || p.startsWith("workbuddy")) return "codebuddy";
+  // 词元工坊 and the standalone harness are the same DeepSeek runtime.
+  if (p.startsWith("tokenworks") || p.startsWith("deepseek")) return "deepseek";
   return "other";
+}
+
+/**
+ * The accent that tells apart two entries sharing one vendor's mark: `workbuddy-cn` and
+ * `workbuddy-intl` draw the same logo, as do `tokenworks` and `deepseek-harness`. A colour is
+ * never the only difference — the row says the site in words — but it makes the pair
+ * scannable at a glance, including where only the mark is drawn.
+ */
+export function pluginAccent(plugin: string): string | undefined {
+  switch (plugin) {
+    case "workbuddy-cn":
+      return "cn";
+    case "workbuddy-intl":
+      return "intl";
+    case "tokenworks":
+      return "tokenworks";
+    case "deepseek-harness":
+      return "harness";
+    default:
+      return undefined;
+  }
 }
 
 /** "Claude", "Codex", "CodeBuddy", or the plugin's own name. */
@@ -719,12 +742,33 @@ function BrandImage({ icon, size, className = "" }: { icon: BrandIcon; size: num
 }
 
 /** The vendor's official mark, or a ring for a plugin we have none for. */
-export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: number }) {
+export function VendorMark({ plugin, entry, size = 12, tile = false }: { plugin: string; entry?: string; size?: number; tile?: boolean }) {
   const vendor = vendorOf(plugin);
   const icon = VENDOR_ICONS[vendor];
-  if (icon) return <BrandImage icon={icon} size={size} className={`vendor-mark ${vendor}`} />;
+  // `entry` is the description's own name, which `plugin` may not be: the settings list
+  // passes the vendor here so two entries of one CLI draw the same logo, and the entry so
+  // the accent still tells them apart.
+  const accent = pluginAccent(entry ?? plugin);
+  const className = ["vendor-mark", vendor, tile && "tiled", accent && `accent-${accent}`]
+    .filter(Boolean)
+    .join(" ");
+  if (icon) return <BrandImage icon={icon} size={size} className={className} />;
+  // No official mark: a letter on a tint says which plugin this is, where the old empty ring
+  // said only "something we have no logo for".
+  const initial = (entry ?? plugin).trim().charAt(0).toUpperCase();
+  if (initial) {
+    return (
+      <span
+        className={`${className} initial`}
+        style={{ width: size, height: size, fontSize: Math.round(size * 0.62) }}
+        aria-hidden="true"
+      >
+        {initial}
+      </span>
+    );
+  }
   return (
-    <svg className="vendor-mark other" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+    <svg className={className} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
       <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   );

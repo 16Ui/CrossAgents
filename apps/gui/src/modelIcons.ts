@@ -1,6 +1,7 @@
 // The official marks, from @lobehub/icons-static-svg. Only the ones named here reach the bundle.
 import claude from "@lobehub/icons-static-svg/icons/claude-color.svg";
 import codebuddy from "@lobehub/icons-static-svg/icons/codebuddy-color.svg";
+import cursor from "@lobehub/icons-static-svg/icons/cursor.svg";
 import codex from "@lobehub/icons-static-svg/icons/codex-color.svg";
 import deepseek from "@lobehub/icons-static-svg/icons/deepseek-color.svg";
 import gemini from "@lobehub/icons-static-svg/icons/gemini-color.svg";
@@ -58,4 +59,9 @@ export const VENDOR_ICONS: Record<string, BrandIcon> = {
   claude: { src: claude },
   codex: { src: codex },
   codebuddy: { src: codebuddy },
+  cursor: { src: cursor, mono: true },
+  gemini: { src: gemini },
+  // The DeepSeek harness (词元工坊 and the standalone `dsh`): same runtime, same maker, so
+  // the same mark — what tells the two entries apart is the accent on the row.
+  deepseek: { src: deepseek },
 };

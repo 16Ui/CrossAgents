@@ -312,7 +312,7 @@ function VendorClis() {
             <div className="setting-line cli-line" key={p.name}>
               <div className="model-name">
                 <div className="setting-label">
-                  <VendorMark plugin={p.provider} size={16} />
+                  <VendorMark plugin={p.provider} entry={p.name} size={18} tile />
                   {/* The vendor is the provider, not the entry's name: one CLI can be listed
                       twice (workbuddy-cn / workbuddy-intl). The text is what the description
                       calls itself — `词元工坊`, `WorkBuddy 国内版` — and the chip says which
