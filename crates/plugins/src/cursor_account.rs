@@ -32,7 +32,7 @@ use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, DataSource, LimitGroup, LoginCommand,
     ModelInfo, RateWindow, SessionUsage, mask_email,
 };
-use crossagents_drivers::locate::os_name;
+use crossagents_drivers::locate::{Cli, os_name};
 use crossagents_drivers::process::{hide_console, resolve_program, system_proxy_env};
 use serde_json::Value;
 
@@ -54,23 +54,40 @@ const NOT_INSTALLED: &str =
 /// A status read, with when and the models listed alongside.
 type LiveEntry = (Instant, AccountStatus, Vec<ModelInfo>);
 
+enum CliLookup {
+    /// Look up the CLI on demand so an install while the hub runs is picked up.
+    Live(Option<Cli>),
+    /// A fixed command (or `None` to simulate an uninstalled CLI) for tests.
+    Fixed(Option<Vec<String>>),
+}
+
 pub struct CursorAccounts {
-    /// How to run the CLI; `None` when it is not installed.
-    command: Option<Vec<String>>,
+    /// How to run the CLI.
+    command: CliLookup,
     live: Mutex<HashMap<PathBuf, LiveEntry>>,
 }
 
 impl Default for CursorAccounts {
     fn default() -> Self {
-        Self::new(crate::builtin::cli("cursor").and_then(|cli| cli.command()))
+        Self {
+            command: CliLookup::Live(crate::builtin::cli("cursor")),
+            live: Mutex::default(),
+        }
     }
 }
 
 impl CursorAccounts {
     pub fn new(command: Option<Vec<String>>) -> Self {
         Self {
-            command,
+            command: CliLookup::Fixed(command),
             live: Mutex::default(),
+        }
+    }
+
+    fn command(&self) -> Option<Vec<String>> {
+        match &self.command {
+            CliLookup::Live(cli) => cli.as_ref().and_then(Cli::command),
+            CliLookup::Fixed(command) => command.clone(),
         }
     }
 
@@ -92,7 +109,7 @@ impl CursorAccounts {
     /// The CLI's answer to `args`, as text. An empty-value env entry means "do not let the
     /// child see this variable".
     async fn output(&self, account: &Account, args: &[&str]) -> Result<String, String> {
-        let Some(command) = &self.command else {
+        let Some(command) = self.command() else {
             return Err(NOT_INSTALLED.into());
         };
         let (program, rest) = command
@@ -617,7 +634,7 @@ impl AccountProvider for CursorAccounts {
     /// `agent login`, told not to open the browser: it prints the page on stdout and waits
     /// until it is done, so the hub can hand the link to the GUI.
     fn login_command(&self, account: &Account) -> LoginCommand {
-        let mut command = self.command.clone().unwrap_or_else(|| vec!["agent".into()]);
+        let mut command = self.command().unwrap_or_else(|| vec!["agent".into()]);
         command.push("login".into());
         let mut env: Vec<_> = system_proxy_env()
             .into_iter()

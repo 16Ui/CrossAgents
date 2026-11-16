@@ -24,6 +24,7 @@ use crossagents_core::{
     LoginCommand, ModelInfo, RateWindow, SessionUsage,
 };
 use crossagents_drivers::antigravity_native::wire::parse_models;
+use crossagents_drivers::locate::Cli;
 use crossagents_drivers::process::{hide_console, resolve_program};
 use serde_json::Value;
 
@@ -38,9 +39,16 @@ const NOT_INSTALLED: &str =
 const SIGN_IN_NOTE: &str =
     "还没有登录：点「登录」会打开一个本地页面，里面有 Google 授权链接，把授权码粘进去就完成";
 
+enum CliLookup {
+    /// Look up the CLI on demand so an install while the hub runs is picked up.
+    Live(Option<Cli>),
+    /// A fixed command (or `None` to simulate an uninstalled CLI) for tests.
+    Fixed(Option<Vec<String>>),
+}
+
 pub struct AntigravityAccounts {
-    /// How to run the CLI; `None` when it is not installed.
-    cli: Option<Vec<String>>,
+    /// How to run the CLI.
+    cli: CliLookup,
     /// How to start the login helper (`<crossagents> agy-login`), when the hub has one.
     login: Option<Vec<String>>,
     /// The description's model list, for when the CLI cannot be asked.
@@ -50,28 +58,44 @@ pub struct AntigravityAccounts {
 
 impl Default for AntigravityAccounts {
     fn default() -> Self {
-        Self::new(
-            crate::builtin::cli("antigravity").and_then(|cli| cli.command()),
-            None,
-            Vec::new(),
-        )
+        Self::with_login(None)
     }
 }
 
 impl AntigravityAccounts {
     pub fn new(cli: Option<Vec<String>>, login: Option<Vec<String>>, models: Vec<String>) -> Self {
         Self {
-            cli,
+            cli: CliLookup::Fixed(cli),
             login,
             models,
             live: Mutex::default(),
         }
     }
 
+    /// Uses the built-in Antigravity description, resolving the CLI on demand so a CLI
+    /// installed after the hub started is found without restarting the hub.
+    pub fn with_login(login: Option<Vec<String>>) -> Self {
+        Self {
+            cli: CliLookup::Live(crate::builtin::cli("antigravity")),
+            login,
+            models: crate::builtin::config("antigravity")
+                .map(|config| config.models.clone())
+                .unwrap_or_default(),
+            live: Mutex::default(),
+        }
+    }
+
+    fn command(&self) -> Option<Vec<String>> {
+        match &self.cli {
+            CliLookup::Live(cli) => cli.as_ref().and_then(Cli::command),
+            CliLookup::Fixed(cli) => cli.clone(),
+        }
+    }
+
     /// Captures a bounded CLI query. `models` may exit 1 when signed out; headless
     /// reports may return a structured error envelope on a non-zero exit.
     async fn run(&self, args: &[&str]) -> Result<(String, String), String> {
-        let Some(command) = &self.cli else {
+        let Some(command) = self.command() else {
             return Err(NOT_INSTALLED.into());
         };
         let (program, rest) = command
@@ -176,6 +200,7 @@ impl AccountProvider for AntigravityAccounts {
     async fn status(&self, _account: &Account) -> AccountStatus {
         if let Some((at, status, _)) = self.live.lock().unwrap().as_ref()
             && at.elapsed() < LIVE_TTL
+            && !(status.note.as_deref() == Some(NOT_INSTALLED) && self.command().is_some())
         {
             return status.clone();
         }
@@ -261,8 +286,8 @@ impl AccountProvider for AntigravityAccounts {
         command.push("--port".into());
         command.push(port.to_string());
         command.push("--command".into());
-        match &self.cli {
-            Some(cli) => command.extend(cli.iter().cloned()),
+        match self.command() {
+            Some(cli) => command.extend(cli),
             None => command.push("agy".into()),
         }
         LoginCommand {
@@ -568,5 +593,55 @@ else { console.log(JSON.stringify({status:'ERROR',error:'Eligibility check faile
         assert_eq!(status.rate_limits[0].window_seconds, None);
         assert!(apply_credits(&mut status, &serde_json::json!({})).is_err());
         assert!(status.credits.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cli_installed_after_start_is_picked_up_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = if cfg!(windows) {
+            dir.path().join("agy-late.cmd")
+        } else {
+            dir.path().join("agy-late")
+        };
+        let toml = format!(
+            "[ paths ]\n{} = [{:?}]\n",
+            crossagents_drivers::locate::os_name(),
+            bin.display().to_string()
+        );
+        let locator: crossagents_drivers::locate::Locator = toml::from_str(&toml).unwrap();
+        let cli = Cli::new(Vec::new(), locator, Default::default());
+        let accounts = AntigravityAccounts {
+            cli: CliLookup::Live(Some(cli)),
+            login: Some(vec!["crossagents".into(), "agy-login".into()]),
+            models: Vec::new(),
+            live: Mutex::default(),
+        };
+
+        // Before the CLI is installed, status reports NOT_INSTALLED.
+        let status = accounts.status(&account(dir.path())).await;
+        assert_eq!(status.note.as_deref(), Some(NOT_INSTALLED));
+
+        // Once installed while the hub is running, login_command and status find it at once.
+        #[cfg(windows)]
+        std::fs::write(
+            &bin,
+            "@echo off\r\necho Error: Please sign in to view available models.\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(
+                &bin,
+                "#!/bin/sh\necho 'Error: Please sign in to view available models.'\nexit 1\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let login = accounts.login_command(&account(dir.path()));
+        assert_eq!(login.command[4..], ["--command", &bin.display().to_string()]);
+        let status = accounts.status(&account(dir.path())).await;
+        assert_eq!(status.note.as_deref(), Some(SIGN_IN_NOTE));
     }
 }

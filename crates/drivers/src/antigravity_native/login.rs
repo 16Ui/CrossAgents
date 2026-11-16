@@ -110,7 +110,7 @@ impl SignIn {
         let (program, args) = command
             .split_first()
             .ok_or_else(|| CoreError::Agent("empty Antigravity command".into()))?;
-        let mut cmd = Command::new(resolve_program(program));
+        let mut cmd = Command::new(resolve_agy(program));
         cmd.args(args)
             .arg("acp")
             .arg("--login")
@@ -179,6 +179,32 @@ impl SignIn {
             .map(|line| line.trim().to_owned())
             .unwrap_or_else(|| "the Antigravity CLI did not say why".into())
     }
+}
+
+/// Resolves `program` on `PATH` (including the Windows registry `PATH`), and for a bare
+/// `agy` also checks the vendor installer's user-local paths when `PATH` has not picked it
+/// up yet.
+fn resolve_agy(program: &str) -> std::path::PathBuf {
+    let resolved = resolve_program(program);
+    if resolved.is_file() || !program.eq_ignore_ascii_case("agy") {
+        return resolved;
+    }
+    let machine = crate::locate::Machine::default();
+    let patterns: &[&str] = if cfg!(windows) {
+        &["~/AppData/Local/agy/bin/agy.exe", "~/.local/bin/agy.exe"]
+    } else if cfg!(target_os = "macos") {
+        &[
+            "~/.local/bin/agy",
+            "/opt/homebrew/bin/agy",
+            "/usr/local/bin/agy",
+        ]
+    } else {
+        &["~/.local/bin/agy"]
+    };
+    patterns
+        .iter()
+        .find_map(|pattern| crate::locate::first_file(pattern, &machine))
+        .unwrap_or(resolved)
 }
 
 async fn wait_for_url(

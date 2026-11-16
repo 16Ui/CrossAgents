@@ -184,18 +184,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 Arc::new(ClaudeAccounts::default()),
                 Arc::new(CodebuddyAccounts::default()),
                 Arc::new(CursorAccounts::default()),
-                Arc::new(GeminiAccounts::new(
-                    crossagents_plugins::builtin::cli("gemini").and_then(|cli| cli.command()),
-                    login_helper("gemini-login"),
-                    Vec::new(),
-                )),
-                Arc::new(AntigravityAccounts::new(
-                    crossagents_plugins::builtin::cli("antigravity").and_then(|cli| cli.command()),
-                    login_helper("agy-login"),
-                    crossagents_plugins::builtin::config("antigravity")
-                        .map(|config| config.models.clone())
-                        .unwrap_or_default(),
-                )),
+                Arc::new(GeminiAccounts::with_login(login_helper("gemini-login"))),
+                Arc::new(AntigravityAccounts::with_login(login_helper("agy-login"))),
             ],
             paths.accounts(),
         )

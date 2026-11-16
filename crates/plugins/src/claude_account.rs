@@ -30,8 +30,9 @@ type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 type LiveEntry = (Instant, AccountStatus, Vec<ModelInfo>);
 
 pub struct ClaudeAccounts {
-    /// The Claude Code program, resolved where the description says to look for it.
-    program: PathBuf,
+    /// The Claude Code program name or path, resolved on demand where the description says
+    /// to look for it.
+    program: String,
     live: Mutex<HashMap<PathBuf, LiveEntry>>,
     scanned: Mutex<HashMap<PathBuf, ScanEntry>>,
 }
@@ -44,15 +45,17 @@ impl Default for ClaudeAccounts {
 
 impl ClaudeAccounts {
     pub fn new(program: impl Into<String>) -> Self {
-        let program = program.into();
-        let program = crate::builtin::locator("claude")
-            .map(|locator| locator.locate_program(&program))
-            .unwrap_or_else(|| PathBuf::from(&program));
         Self {
-            program,
+            program: program.into(),
             live: Mutex::default(),
             scanned: Mutex::default(),
         }
+    }
+
+    fn program(&self) -> PathBuf {
+        crate::builtin::locator("claude")
+            .map(|locator| locator.locate_program(&self.program))
+            .unwrap_or_else(|| PathBuf::from(&self.program))
     }
 
     /// `CLAUDE_CONFIG_DIR` for an account, except for the default directory: Claude Code
@@ -87,7 +90,8 @@ impl ClaudeAccounts {
             note: None,
         };
         let env = self.env_for(account);
-        let Some(auth) = claude_native::auth_status(&self.program, &env).await else {
+        let program = self.program();
+        let Some(auth) = claude_native::auth_status(&program, &env).await else {
             status.note = Some("cannot run claude (install Claude Code or the Claude app)".into());
             return (status, Vec::new());
         };
@@ -102,7 +106,7 @@ impl ClaudeAccounts {
             status.note = Some("not logged in".into());
             return (status, Vec::new());
         }
-        match claude_native::probe_account(&self.program, &env).await {
+        match claude_native::probe_account(&program, &env).await {
             Ok((init, usage)) => {
                 if let Some(limits) = wire::usage_limits(&usage) {
                     status.rate_limits = limits.windows;
@@ -372,7 +376,7 @@ impl AccountProvider for ClaudeAccounts {
     fn login_command(&self, account: &Account) -> LoginCommand {
         LoginCommand {
             command: vec![
-                self.program.display().to_string(),
+                self.program().display().to_string(),
                 "auth".into(),
                 "login".into(),
             ],
@@ -384,6 +388,10 @@ impl AccountProvider for ClaudeAccounts {
             serves: None,
             opens_browser: false,
         }
+    }
+
+    fn forget_status(&self, account: &Account) {
+        self.live.lock().unwrap().remove(&account.home);
     }
 
     fn agent_env(&self, account: &Account) -> Vec<(String, String)> {

@@ -21,6 +21,7 @@ use crossagents_core::{
     SessionUsage, TokenTotals, mask_email,
 };
 use crossagents_drivers::gemini_native::wire::parse_models;
+use crossagents_drivers::locate::Cli;
 use crossagents_drivers::process::{hide_console, resolve_program};
 use serde_json::Value;
 
@@ -33,9 +34,16 @@ const CONFIG_DIR: &str = ".gemini";
 
 const NOT_INSTALLED: &str = "the Gemini CLI is not installed (npm install -g @google/gemini-cli)";
 
+enum CliLookup {
+    /// Look up the CLI on demand so an install while the hub runs is picked up.
+    Live(Option<Cli>),
+    /// A fixed command (or `None` to simulate an uninstalled CLI) for tests.
+    Fixed(Option<Vec<String>>),
+}
+
 pub struct GeminiAccounts {
-    /// How to run the CLI; `None` when it is not installed.
-    cli: Option<Vec<String>>,
+    /// How to run the CLI.
+    cli: CliLookup,
     /// How to start the login helper (`<crossagents> gemini-login`), when the hub has one.
     login: Option<Vec<String>>,
     /// The description's model list, for when the CLI cannot be asked.
@@ -45,21 +53,35 @@ pub struct GeminiAccounts {
 
 impl Default for GeminiAccounts {
     fn default() -> Self {
-        Self::new(
-            crate::builtin::cli("gemini").and_then(|cli| cli.command()),
-            None,
-            Vec::new(),
-        )
+        Self::with_login(None)
     }
 }
 
 impl GeminiAccounts {
     pub fn new(cli: Option<Vec<String>>, login: Option<Vec<String>>, models: Vec<String>) -> Self {
         Self {
-            cli,
+            cli: CliLookup::Fixed(cli),
             login,
             models,
             live: Mutex::default(),
+        }
+    }
+
+    /// Uses the built-in Gemini description, resolving the CLI on demand so a CLI installed
+    /// after the hub started is found without restarting the hub.
+    pub fn with_login(login: Option<Vec<String>>) -> Self {
+        Self {
+            cli: CliLookup::Live(crate::builtin::cli("gemini")),
+            login,
+            models: Vec::new(),
+            live: Mutex::default(),
+        }
+    }
+
+    fn command(&self) -> Option<Vec<String>> {
+        match &self.cli {
+            CliLookup::Live(cli) => cli.as_ref().and_then(Cli::command),
+            CliLookup::Fixed(cli) => cli.clone(),
         }
     }
 
@@ -123,7 +145,7 @@ impl GeminiAccounts {
 
     /// The CLI's answer to `args`, as text.
     async fn output(&self, account: &Account, args: &[&str]) -> Result<String, String> {
-        let Some(command) = &self.cli else {
+        let Some(command) = self.command() else {
             return Err(NOT_INSTALLED.into());
         };
         let (program, rest) = command
@@ -175,13 +197,15 @@ impl AccountProvider for GeminiAccounts {
     }
 
     async fn status(&self, account: &Account) -> AccountStatus {
+        let installed = self.command().is_some();
         if let Some((at, status)) = self.live.lock().unwrap().as_ref()
             && at.elapsed() < LIVE_TTL
+            && !(status.note.as_deref() == Some(NOT_INSTALLED) && installed)
         {
             return status.clone();
         }
         let (logged_in, auth_mode, email) = self.standing(account);
-        let note = if self.cli.is_none() {
+        let note = if !installed {
             Some(NOT_INSTALLED.to_owned())
         } else if !logged_in {
             Some(
@@ -265,8 +289,8 @@ impl AccountProvider for GeminiAccounts {
             ]
         });
         command.push("--command".into());
-        match &self.cli {
-            Some(cli) => command.extend(cli.iter().cloned()),
+        match self.command() {
+            Some(cli) => command.extend(cli),
             None => command.push("gemini".into()),
         }
         let mut env: Vec<(String, String)> = self.env_for(account);

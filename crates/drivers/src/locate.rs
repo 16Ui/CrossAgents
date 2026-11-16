@@ -344,7 +344,7 @@ impl Machine {
     /// environment, which this process never sees again), so the registry is read as well.
     /// Only the lookup is affected: the hub's own environment is left alone, and sessions
     /// start the program by the absolute path that was found.
-    fn path_dirs(&self) -> Vec<PathBuf> {
+    pub(crate) fn path_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = match &self.path {
             Some(dirs) => dirs.clone(),
             None => std::env::var_os("PATH")
@@ -1384,7 +1384,7 @@ fn windows_candidates(path: PathBuf) -> Vec<PathBuf> {
     }
 }
 
-fn first_file(pattern: &str, machine: &Machine) -> Option<PathBuf> {
+pub(crate) fn first_file(pattern: &str, machine: &Machine) -> Option<PathBuf> {
     expand(pattern, machine)
         .into_iter()
         .find(|path| path.is_file())

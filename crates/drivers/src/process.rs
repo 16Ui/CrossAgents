@@ -54,22 +54,27 @@ impl StderrTail {
     }
 }
 
-/// On Windows a bare program name does not find `npx.cmd` and friends; search `PATH`.
+/// On Windows a bare program name does not find `npx.cmd` and friends; search `PATH`
+/// (and the registry `PATH`, for CLIs installed after the hub started).
 pub fn resolve_program(program: &str) -> PathBuf {
     let path = PathBuf::from(program);
     if !cfg!(windows) || path.extension().is_some() || path.components().count() > 1 {
         return path;
     }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
-    };
-    for dir in std::env::split_paths(&dirs) {
-        for ext in ["exe", "cmd", "bat"] {
-            let candidate = dir.join(program).with_extension(ext);
-            if candidate.is_file() {
-                return candidate;
+    if let Some(dirs) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&dirs) {
+            for ext in ["exe", "cmd", "bat"] {
+                let candidate = dir.join(program).with_extension(ext);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
+    }
+    let dirs = crate::locate::Machine::default().path_dirs();
+    let candidate = find_in_path_in(program, Some(&dirs));
+    if candidate.is_file() {
+        return candidate;
     }
     path
 }

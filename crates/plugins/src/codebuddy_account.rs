@@ -24,6 +24,7 @@ use crossagents_core::{
     ModelInfo, RateWindow, RequestUsage, SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
+use crossagents_drivers::locate::Cli;
 use crossagents_drivers::process::system_proxy_env;
 use serde_json::Value;
 
@@ -41,25 +42,43 @@ type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 /// A status read, with when and the models listed alongside.
 type LiveEntry = (Instant, AccountStatus, Vec<ModelInfo>);
 
+enum CliLookup {
+    /// Look up the CLI on demand so an install while the hub runs is picked up.
+    Live(Option<Cli>),
+    /// A fixed command (or `None` to simulate an uninstalled CLI) for tests.
+    Fixed(Option<Vec<String>>),
+}
+
 pub struct CodebuddyAccounts {
-    /// How to run the CLI; `None` when it is not installed.
-    command: Option<Vec<String>>,
+    /// How to run the CLI.
+    command: CliLookup,
     live: Mutex<HashMap<PathBuf, LiveEntry>>,
     scanned: Mutex<HashMap<PathBuf, ScanEntry>>,
 }
 
 impl Default for CodebuddyAccounts {
     fn default() -> Self {
-        Self::new(crate::builtin::cli("codebuddy").and_then(|cli| cli.command()))
+        Self {
+            command: CliLookup::Live(crate::builtin::cli("codebuddy")),
+            live: Mutex::default(),
+            scanned: Mutex::default(),
+        }
     }
 }
 
 impl CodebuddyAccounts {
     pub fn new(command: Option<Vec<String>>) -> Self {
         Self {
-            command,
+            command: CliLookup::Fixed(command),
             live: Mutex::default(),
             scanned: Mutex::default(),
+        }
+    }
+
+    fn command(&self) -> Option<Vec<String>> {
+        match &self.command {
+            CliLookup::Live(cli) => cli.as_ref().and_then(Cli::command),
+            CliLookup::Fixed(command) => command.clone(),
         }
     }
 
@@ -134,14 +153,14 @@ impl CodebuddyAccounts {
             as_of: None,
             note: None,
         };
-        let Some(command) = &self.command else {
+        let Some(command) = self.command() else {
             status.note = Some(
                 "the CodeBuddy CLI is not installed (npm install -g @tencent-ai/codebuddy-code)"
                     .into(),
             );
             return (status, Vec::new());
         };
-        let init = match codebuddy_native::probe(command, &self.env_for(account)).await {
+        let init = match codebuddy_native::probe(&command, &self.env_for(account)).await {
             Ok(init) => init,
             Err(err) => {
                 status.note = Some(format!("cannot ask codebuddy: {err}"));
@@ -569,10 +588,7 @@ impl AccountProvider for CodebuddyAccounts {
     /// hub stops the server once the account reports the login.
     fn login_command(&self, account: &Account) -> LoginCommand {
         let port = free_port().unwrap_or(8322);
-        let mut command = self
-            .command
-            .clone()
-            .unwrap_or_else(|| vec!["codebuddy".into()]);
+        let mut command = self.command().unwrap_or_else(|| vec!["codebuddy".into()]);
         command.extend(codebuddy_native::serve_args(port));
         let mut env: Vec<_> = system_proxy_env()
             .into_iter()

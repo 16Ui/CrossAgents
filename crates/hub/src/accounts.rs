@@ -1347,13 +1347,28 @@ impl Accounts {
     }
 
     async fn on_event(&self, event: &Event) {
-        if let EventKind::AgentRateLimits { id, limits } = &event.kind
-            && let Some(account) = self.observe(*id, limits).await
-        {
-            let _ = self
-                .bus
-                .publish(EventKind::AccountQuotaUpdated { id: account })
-                .await;
+        match &event.kind {
+            EventKind::AgentRateLimits { id, limits } => {
+                if let Some(account) = self.observe(*id, limits).await {
+                    let _ = self
+                        .bus
+                        .publish(EventKind::AccountQuotaUpdated { id: account })
+                        .await;
+                }
+            }
+            EventKind::PluginChanged { name } => {
+                let Ok(provider) = self.provider(name).cloned() else {
+                    return;
+                };
+                let Ok(accounts) = self.store().list_accounts().await else {
+                    return;
+                };
+                for account in accounts.into_iter().filter(|a| a.provider == *name) {
+                    provider.forget_status(&account);
+                    self.refresh_status(account, provider.clone());
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -1724,22 +1739,7 @@ fn find_url(line: &str) -> Option<String> {
 
 /// On Windows a bare program name does not find `npx.cmd`; search `PATH`.
 fn resolve_program(program: &str) -> PathBuf {
-    let path = PathBuf::from(program);
-    if !cfg!(windows) || path.extension().is_some() || path.components().count() > 1 {
-        return path;
-    }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
-    };
-    for dir in std::env::split_paths(&dirs) {
-        for ext in ["exe", "cmd", "bat"] {
-            let candidate: &Path = &dir.join(program).with_extension(ext);
-            if candidate.is_file() {
-                return candidate.to_path_buf();
-            }
-        }
-    }
-    path
+    crossagents_drivers::process::resolve_program(program)
 }
 
 #[cfg(test)]
