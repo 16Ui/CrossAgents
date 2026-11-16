@@ -1044,6 +1044,13 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/usage$/)))
         return json(200, s.accountUsage ?? { by: url.searchParams.get("by") ?? "day", rows: [], total: { sessions: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }, total_cache_hit_rate: 0 });
+      if (p === "/v1/egress/candidates")
+        return json(200, {
+          candidates: [
+            { value: "direct", label: "直连 (Direct)", source: "direct", ip: "192.0.2.44", country: "HK", asn: "AS45090", latency_ms: 42 },
+            { value: "http://127.0.0.1:7890", label: "本机 :7890", source: "local", ip: "203.0.113.9", country: "US", asn: "AS13335", latency_ms: 85 },
+          ],
+        });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
       if (p === "/v1/session-candidates") {
         // The policy the sessions would be assigned under: the run named by `?run=`, else the
@@ -1159,13 +1166,17 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
         const config = { ...((a.config as Record<string, unknown>) ?? {}) };
-        const { setting_sources: sources, allow_hooks: hooks, permission } = body as AgentSettingsRequest;
+        const { setting_sources: sources, allow_hooks: hooks, permission, proxy } = body as AgentSettingsRequest;
         // Absent leaves the agent's own choice alone; null clears it (follow the run / default).
         if (permission !== undefined) {
           if (this.state.windows !== false && a.plugin === "cursor" && permission === "guard")
             return json(400, { error: { code: "bad_request", message: CURSOR_GUARD_REFUSED } });
           if (permission === null) delete config.permission;
           else config.permission = permission;
+        }
+        if (proxy !== undefined) {
+          if (proxy === null || !proxy.trim()) delete config.proxy;
+          else config.proxy = proxy.trim();
         }
         if (sources === null) delete config.setting_sources;
         else config.setting_sources = sources;
@@ -1327,6 +1338,25 @@ export class MockBridge implements CrossAgentsBridge {
         return json(m[2] === "answer" ? 200 : 204, q);
       }
       if (p === "/v1/repos/init") return json(200, body);
+      if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/egress$/))) {
+        const id = decodeURIComponent(m[1]);
+        const row = s.quota.accounts.find((a) => a.account.id === id);
+        if (!row) return notFound("account");
+        const req = body as { proxy?: string | null };
+        if (req.proxy !== undefined) {
+          row.account.proxy = req.proxy ?? undefined;
+        }
+        this.emit({ type: "account.quota_updated", data: { id } });
+        return json(200, row.account);
+      }
+      if (p === "/v1/egress/proxies") {
+        return json(200, {
+          candidates: [
+            { value: "direct", label: "直连 (Direct)", source: "direct", ip: "192.0.2.44", country: "HK", asn: "AS45090", latency_ms: 42 },
+            { value: "http://127.0.0.1:7890", label: "本机 :7890", source: "local", ip: "203.0.113.9", country: "US", asn: "AS13335", latency_ms: 85 },
+          ],
+        });
+      }
       if (p === "/v1/plugins/refresh") return this.refreshClis();
       if (p === "/v1/accounts/import") {
         const req = body as ImportAccountRequest;

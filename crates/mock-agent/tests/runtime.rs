@@ -307,6 +307,7 @@ async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
     assert_eq!(
         names,
         [
+            "antigravity",
             "claude",
             "codebuddy",
             "codex",

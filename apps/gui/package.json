@@ -1,7 +1,7 @@
 {
   "name": "crossagents-gui",
   "private": true,
-  "version": "0.2.33",
+  "version": "0.2.38",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -80,8 +80,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "L1nkkkk",
-        "repo": "CrossAgents-releases",
+        "owner": "16Ui",
+        "repo": "CrossAgents",
         "releaseType": "release"
       }
     ],

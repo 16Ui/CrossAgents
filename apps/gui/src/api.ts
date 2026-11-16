@@ -34,6 +34,9 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
+import type { EgressCandidatesResponse } from "@bindings/EgressCandidatesResponse";
+import type { SaveEgressProxyRequest } from "@bindings/SaveEgressProxyRequest";
+import type { SetAccountEgressRequest } from "@bindings/SetAccountEgressRequest";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
@@ -567,6 +570,11 @@ export const api = {
   accountUsage: (id: string, by: AccountUsageGroup) =>
     request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),
   login: (id: string) => request<LoginStarted>("POST", `/v1/accounts/${enc(id)}/login`),
+  setAccountEgress: (id: string, req: SetAccountEgressRequest) =>
+    request<Account>("POST", `/v1/accounts/${enc(id)}/egress`, req),
+  egressCandidates: () => request<EgressCandidatesResponse>("GET", "/v1/egress/candidates"),
+  saveEgressProxy: (req: SaveEgressProxyRequest) =>
+    request<EgressCandidatesResponse>("POST", "/v1/egress/proxies", req),
 
   /** One directory of the scope's root, lazily; `all` lists gitignored entries too. */
   filesTree,

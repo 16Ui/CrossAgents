@@ -25,12 +25,15 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         ("with", include_str!("../agents/with.toml")),
         ("cursor", include_str!("../agents/cursor.toml")),
         ("gemini", include_str!("../agents/gemini.toml")),
+        ("antigravity", include_str!("../agents/antigravity.toml")),
         ("tokenworks", include_str!("../agents/tokenworks.toml")),
         (
             "deepseek-harness",
             include_str!("../agents/deepseek-harness.toml"),
         ),
     ];
+    // Two passes, not a map: a description may extend another (`extends = "codebuddy"`), so
+    // each entry is resolved against the bases declared before it.
     let mut out: Vec<(String, PluginConfig)> = Vec::with_capacity(sources.len());
     for (name, text) in sources {
         let (name, config) = manifest::parse(text, name)
@@ -50,7 +53,6 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         out.push((name, config));
     }
     out
-});
 
 /// Every built-in description, in the order the API lists them.
 pub fn all() -> &'static [(String, PluginConfig)] {
@@ -93,6 +95,7 @@ mod tests {
                 "with",
                 "cursor",
                 "gemini",
+                "antigravity",
                 "tokenworks",
                 "deepseek-harness"
             ]

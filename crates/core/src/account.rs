@@ -36,6 +36,12 @@ pub struct Account {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub egress: Option<EgressPolicy>,
+    /// Optional proxy override for this account: `"direct"` for a direct connection without
+    /// proxy, or a proxy URL (e.g. `"http://127.0.0.1:7890"`). `None` follows the system or
+    /// hub environment proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub proxy: Option<String>,
     /// Unique, same rules as agent names (e.g. `codex-main`).
     pub id: String,
     /// The provider that manages it, e.g. `codex`.

@@ -690,7 +690,15 @@ export function colorOf(agent: Agent): string {
   return hueOf(agent.name);
 }
 
-type Vendor = "claude" | "codex" | "codebuddy" | "deepseek" | "other";
+type Vendor =
+  | "claude"
+  | "codex"
+  | "codebuddy"
+  | "deepseek"
+  | "antigravity"
+  | "cursor"
+  | "gemini"
+  | "other";
 
 /** Which vendor runs a plugin (or account provider). */
 export function vendorOf(plugin: string): Vendor {
@@ -702,6 +710,9 @@ export function vendorOf(plugin: string): Vendor {
   if (p.startsWith("codebuddy") || p.startsWith("workbuddy")) return "codebuddy";
   // 词元工坊 and the standalone harness are the same DeepSeek runtime.
   if (p.startsWith("tokenworks") || p.startsWith("deepseek")) return "deepseek";
+  if (p.startsWith("antigravity")) return "antigravity";
+  if (p.startsWith("cursor")) return "cursor";
+  if (p.startsWith("gemini")) return "gemini";
   return "other";
 }
 
@@ -729,7 +740,7 @@ export function pluginAccent(plugin: string): string | undefined {
 /** "Claude", "Codex", "CodeBuddy", or the plugin's own name. */
 export function vendorName(plugin: string): string {
   const v = vendorOf(plugin);
-  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : plugin;
+  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : v === "antigravity" ? "Antigravity" : v === "cursor" ? "Cursor" : v === "gemini" ? "Gemini" : plugin;
 }
 
 /** An official mark: as an image, or as a mask over the text colour when it is one-colour. */

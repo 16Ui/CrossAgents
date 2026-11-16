@@ -143,7 +143,7 @@ if (!changed.includes("Cargo.lock")) {
 
 step(`提交并打 tag ${tag}`);
 runLoud("git add Cargo.toml Cargo.lock apps/gui/package.json apps/gui/package-lock.json");
-const message = `chore: 发布 ${version}\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\n`;
+const message = `chore: 发布 ${version}\n`;
 execFileSync("git", ["commit", "-F", "-"], { cwd: ROOT, input: message, stdio: ["pipe", "inherit", "inherit"] });
 runLoud(`git tag ${tag}`);
 

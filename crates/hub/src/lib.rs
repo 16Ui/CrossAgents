@@ -16,6 +16,7 @@ pub mod builtin_node;
 pub mod cli_runs;
 pub mod collab;
 pub mod devices;
+pub mod egress;
 pub mod event_log;
 pub mod extensions;
 pub mod guard;
@@ -63,6 +64,7 @@ use crossagents_store_sqlite::SqliteStore;
 
 use crate::accounts::Accounts;
 use crate::collab::{AgentTokens, CollabSetup, HubHost};
+use crossagents_plugins::antigravity_account::AntigravityAccounts;
 use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
@@ -160,6 +162,21 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         Some(url) => CodexAccounts::with_usage_url(url.clone()),
         None => CodexAccounts::default(),
     };
+    // A login is a process the hub starts and watches: the helper is this executable's
+    // hidden subcommand. The stable copy of it when hosts run from one, so the helper
+    // survives a rebuild the way they do.
+    let login_helper = |command: &str| -> Option<Vec<String>> {
+        config
+            .runtime_host
+            .as_ref()
+            .and_then(|runtime| runtime.first())
+            .map(|exe| vec![exe.clone(), command.to_owned()])
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .map(|exe| vec![exe.display().to_string(), command.to_owned()])
+            })
+    };
     let accounts = Arc::new(
         Accounts::new(
             bus.clone(),
@@ -168,22 +185,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 Arc::new(ClaudeAccounts::default()),
                 Arc::new(CodebuddyAccounts::default()),
                 Arc::new(CursorAccounts::default()),
-                Arc::new(GeminiAccounts::new(
-                    crossagents_plugins::builtin::cli("gemini").and_then(|cli| cli.command()),
-                    // The stable copy of this executable when hosts run from one, so the
-                    // login helper survives a rebuild the way they do.
-                    config
-                        .runtime_host
-                        .as_ref()
-                        .and_then(|command| command.first())
-                        .map(|exe| vec![exe.clone(), "gemini-login".into()])
-                        .or_else(|| {
-                            std::env::current_exe()
-                                .ok()
-                                .map(|exe| vec![exe.display().to_string(), "gemini-login".into()])
-                        }),
-                    Vec::new(),
-                )),
+                Arc::new(GeminiAccounts::with_login(login_helper("gemini-login"))),
+                Arc::new(AntigravityAccounts::with_login(login_helper("agy-login"))),
             ],
             paths.accounts(),
         )

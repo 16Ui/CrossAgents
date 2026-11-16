@@ -54,22 +54,27 @@ impl StderrTail {
     }
 }
 
-/// On Windows a bare program name does not find `npx.cmd` and friends; search `PATH`.
+/// On Windows a bare program name does not find `npx.cmd` and friends; search `PATH`
+/// (and the registry `PATH`, for CLIs installed after the hub started).
 pub fn resolve_program(program: &str) -> PathBuf {
     let path = PathBuf::from(program);
     if !cfg!(windows) || path.extension().is_some() || path.components().count() > 1 {
         return path;
     }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
-    };
-    for dir in std::env::split_paths(&dirs) {
-        for ext in ["exe", "cmd", "bat"] {
-            let candidate = dir.join(program).with_extension(ext);
-            if candidate.is_file() {
-                return candidate;
+    if let Some(dirs) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&dirs) {
+            for ext in ["exe", "cmd", "bat"] {
+                let candidate = dir.join(program).with_extension(ext);
+                if candidate.is_file() {
+                    return candidate;
+                }
             }
         }
+    }
+    let dirs = crate::locate::Machine::default().path_dirs();
+    let candidate = find_in_path_in(program, Some(&dirs));
+    if candidate.is_file() {
+        return candidate;
     }
     path
 }
@@ -184,6 +189,94 @@ pub fn system_proxy_env() -> Vec<(String, String)> {
     ];
     env.extend(no_proxy_env());
     env
+}
+
+/// The Windows system proxy URL when enabled, or `None`.
+pub fn system_proxy_url() -> Option<String> {
+    system_proxy()
+}
+
+/// Validates and normalizes a proxy setting: `"direct"` stays `"direct"`, and a host:port
+/// or proxy URL becomes `<scheme>://<host>:<port>`.
+pub fn normalize_proxy_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case("direct") {
+        return Some("direct".to_owned());
+    }
+    let parsed = ProxyUrl::parse(trimmed)?;
+    if !matches!(
+        parsed.scheme.as_str(),
+        "http" | "https" | "socks" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return None;
+    }
+    Some(if parsed.url.contains("://") {
+        parsed.url
+    } else {
+        format!("{}://{}:{}", parsed.scheme, parsed.host, parsed.port)
+    })
+}
+
+/// Proxy environment variables for an explicit proxy choice (`"direct"` or a proxy URL);
+/// empty when `proxy` is `None` (follow default). Empty values on proxy keys mark variables
+/// to remove from the child environment when `"direct"` is selected.
+pub fn explicit_proxy_env(proxy: Option<&str>) -> Vec<(String, String)> {
+    let Some(raw) = proxy.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    if raw.eq_ignore_ascii_case("direct") {
+        return vec![
+            ("HTTPS_PROXY".into(), String::new()),
+            ("HTTP_PROXY".into(), String::new()),
+            ("ALL_PROXY".into(), String::new()),
+            ("https_proxy".into(), String::new()),
+            ("http_proxy".into(), String::new()),
+            ("all_proxy".into(), String::new()),
+            ("NO_PROXY".into(), "*".into()),
+        ];
+    }
+    let Some(url) = normalize_proxy_url(raw) else {
+        return Vec::new();
+    };
+    let mut env = vec![
+        ("HTTPS_PROXY".into(), url.clone()),
+        ("HTTP_PROXY".into(), url.clone()),
+        ("ALL_PROXY".into(), url),
+    ];
+    env.extend(no_proxy_env());
+    env
+}
+
+/// Proxy environment variables for a child process: [`explicit_proxy_env`] when `proxy` is
+/// set, else [`system_proxy_env`].
+pub fn proxy_env_for(proxy: Option<&str>) -> Vec<(String, String)> {
+    match proxy.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => explicit_proxy_env(Some(raw)),
+        None => system_proxy_env(),
+    }
+}
+
+/// Applies [`proxy_env_for`] to a `tokio::process::Command`, turning empty-value markers
+/// into `env_remove`.
+pub fn apply_proxy_env(cmd: &mut tokio::process::Command, proxy: Option<&str>) {
+    for (key, value) in proxy_env_for(proxy) {
+        if value.is_empty() {
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
+    }
+}
+
+/// Whether `key` is one of the proxy environment variables a `"direct"` override clears.
+pub fn is_proxy_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        "HTTPS_PROXY" | "HTTP_PROXY" | "ALL_PROXY" | "https_proxy" | "http_proxy" | "all_proxy"
+    )
 }
 
 /// Whether the hub's own environment already names a proxy for the children to inherit.
@@ -393,9 +486,26 @@ async fn reach_directly(host: &str) -> bool {
 /// `ALL_PROXY` (children inherit them), then the Windows system proxy. `None` when traffic
 /// goes out directly.
 fn effective_proxy(overrides: &[(String, String)]) -> Option<ProxyUrl> {
+    if overrides
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("NO_PROXY"))
+        .is_some_and(|(_, value)| value.trim() == "*")
+    {
+        return None;
+    }
+    if overrides
+        .iter()
+        .rev()
+        .find(|(name, _)| is_proxy_env_key(name))
+        .is_some_and(|(_, value)| value.is_empty())
+    {
+        return None;
+    }
     let lookup = |key: &str| -> Option<String> {
         overrides
             .iter()
+            .rev()
             .find(|(name, value)| name == key && !value.is_empty())
             .map(|(_, value)| value.clone())
             .or_else(|| std::env::var(key).ok().filter(|value| !value.is_empty()))
@@ -439,30 +549,122 @@ pub async fn proxy_echo(url: &str, proxy_url: &str) -> Option<String> {
         let request =
             format!("GET {url} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
         stream.write_all(request.as_bytes()).await.ok()?;
-        let mut bytes = Vec::new();
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.ok()?;
-            if n == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&buf[..n]);
-            if bytes.len() > 16384 {
-                return None;
-            }
-        }
-        let response = String::from_utf8(bytes).ok()?;
-        let (headers, body) = response.split_once("\r\n\r\n")?;
-        if !headers.lines().next()?.contains(" 200 ")
-            || headers.to_ascii_lowercase().contains("transfer-encoding:")
-        {
-            return None;
-        }
-        Some(body.to_owned())
+        read_http_body(&mut stream).await
     })
     .await
     .ok()
     .flatten()
+}
+
+/// Reads an `http://` URL either directly (`proxy_url == None` or `"direct"`) or through an
+/// HTTP / SOCKS5 proxy, for egress candidate discovery in the GUI.
+pub async fn candidate_echo(url: &str, proxy_url: Option<&str>) -> Option<String> {
+    let rest = url.strip_prefix("http://")?;
+    let (authority, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    if authority.is_empty() || authority.contains('@') || url.contains(['\r', '\n', '#']) {
+        return None;
+    }
+    let (target_host, target_port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().ok()?),
+        None => (authority, 80u16),
+    };
+    match proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("direct") | Some("DIRECT") => {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let mut stream = TcpStream::connect((target_host, target_port)).await.ok()?;
+                let request = format!(
+                    "GET {path} HTTP/1.0\r\nHost: {authority}\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(request.as_bytes()).await.ok()?;
+                read_http_body(&mut stream).await
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        Some(raw) => {
+            let proxy = ProxyUrl::parse(raw)?;
+            if proxy.scheme == "http" {
+                return proxy_echo(url, raw).await;
+            }
+            if matches!(proxy.scheme.as_str(), "socks5" | "socks5h" | "socks") {
+                return tokio::time::timeout(Duration::from_secs(3), async {
+                    let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port))
+                        .await
+                        .ok()?;
+                    // SOCKS5 greeting (no auth)
+                    stream.write_all(&[0x05, 0x01, 0x00]).await.ok()?;
+                    let mut reply = [0u8; 2];
+                    stream.read_exact(&mut reply).await.ok()?;
+                    if reply != [0x05, 0x00] {
+                        return None;
+                    }
+                    // SOCKS5 CONNECT domain name
+                    let host_bytes = target_host.as_bytes();
+                    if host_bytes.len() > 255 {
+                        return None;
+                    }
+                    let mut req = Vec::with_capacity(7 + host_bytes.len());
+                    req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+                    req.extend_from_slice(host_bytes);
+                    req.extend_from_slice(&target_port.to_be_bytes());
+                    stream.write_all(&req).await.ok()?;
+                    let mut head = [0u8; 4];
+                    stream.read_exact(&mut head).await.ok()?;
+                    if head[1] != 0x00 {
+                        return None;
+                    }
+                    let skip = match head[3] {
+                        0x01 => 4 + 2,
+                        0x04 => 16 + 2,
+                        0x03 => {
+                            let mut len = [0u8; 1];
+                            stream.read_exact(&mut len).await.ok()?;
+                            usize::from(len[0]) + 2
+                        }
+                        _ => return None,
+                    };
+                    let mut addr_buf = vec![0u8; skip];
+                    stream.read_exact(&mut addr_buf).await.ok()?;
+                    let request = format!(
+                        "GET {path} HTTP/1.0\r\nHost: {authority}\r\nUser-Agent: curl/8.0\r\nConnection: close\r\n\r\n"
+                    );
+                    stream.write_all(request.as_bytes()).await.ok()?;
+                    read_http_body(&mut stream).await
+                })
+                .await
+                .ok()
+                .flatten();
+            }
+            None
+        }
+    }
+}
+
+async fn read_http_body(stream: &mut TcpStream) -> Option<String> {
+    let mut bytes = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut buf).await.ok()?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if bytes.len() > 16384 {
+            return None;
+        }
+    }
+    let response = String::from_utf8(bytes).ok()?;
+    let (headers, body) = response.split_once("\r\n\r\n")?;
+    if !headers.lines().next()?.contains(" 200 ")
+        || headers.to_ascii_lowercase().contains("transfer-encoding:")
+    {
+        return None;
+    }
+    Some(body.to_owned())
 }
 
 async fn probe(proxy: &ProxyUrl) -> Result<(), CoreError> {

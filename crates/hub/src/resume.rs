@@ -147,6 +147,7 @@ fn command(f: &Facts, shell: Shell, env: &[ResumeEnv]) -> Result<String, String>
         DriverKind::ClaudeNative | DriverKind::CodebuddyNative => vec!["--resume".into()],
         DriverKind::CodexNative => vec!["resume".into()],
         DriverKind::CursorNative | DriverKind::GeminiNative => vec!["--resume".into()],
+        DriverKind::AntigravityNative => vec!["--conversation".into()],
         DriverKind::WithNative | DriverKind::AcpGeneric => {
             return Err(format!(
                 "{kind} 驱动的 CLI 没有在终端里按 session id 接着聊的命令"

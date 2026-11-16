@@ -299,6 +299,10 @@ pub trait Store: Send + Sync {
     }
 
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError>;
+    async fn update_account(&self, account: &Account) -> Result<(), CoreError> {
+        let _ = account;
+        Err(CoreError::Unsupported("update_account".into()))
+    }
     async fn get_account(&self, id: &str) -> Result<Account, CoreError>;
     async fn list_accounts(&self) -> Result<Vec<Account>, CoreError>;
     async fn delete_account(&self, id: &str) -> Result<(), CoreError>;

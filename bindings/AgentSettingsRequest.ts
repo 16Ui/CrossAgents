@@ -11,4 +11,9 @@ export type AgentSettingsRequest = { setting_sources: string | null, allow_hooks
 /**
  * Absent keeps the current override; null follows the run or default.
  */
-permission?: import('./PermissionPolicy').PermissionPolicy | null, };
+permission?: import('./PermissionPolicy').PermissionPolicy | null, 
+/**
+ * Absent keeps the current proxy override; null follows the account or system default;
+ * `"direct"` forces a direct connection; `"http://..."` uses that proxy for this agent.
+ */
+proxy?: string | null, };

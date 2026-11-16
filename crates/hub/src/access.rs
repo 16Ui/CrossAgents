@@ -71,6 +71,8 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             | ("POST", "/v1/accounts/import")
             | ("DELETE", "/v1/accounts/{id}")
             | ("POST", "/v1/accounts/{id}/login")
+            | ("POST", "/v1/accounts/{id}/egress")
+            | ("POST", "/v1/egress/proxies")
             // They run a program on this machine (docs/DESIGN.md §9.3).
             | ("POST", "/v1/plugins/{name}/install")
             | ("POST", "/v1/plugins/{name}/upgrade")

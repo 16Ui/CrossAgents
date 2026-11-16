@@ -15,6 +15,12 @@ codebuddy_site: CodebuddySite | null,
  */
 egress?: EgressPolicy, 
 /**
+ * Optional proxy override for this account: `"direct"` for a direct connection without
+ * proxy, or a proxy URL (e.g. `"http://127.0.0.1:7890"`). `None` follows the system or
+ * hub environment proxy.
+ */
+proxy?: string, 
+/**
  * Unique, same rules as agent names (e.g. `codex-main`).
  */
 id: string, 

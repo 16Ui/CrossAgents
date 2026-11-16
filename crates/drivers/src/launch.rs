@@ -171,6 +171,30 @@ pub async fn launch(mut spec: LaunchSpec) -> Result<Launched, CoreError> {
     // read; it is internal and must not reach the vendor CLI, whichever driver launches it.
     spec.env
         .retain(|(key, _)| !key.eq_ignore_ascii_case(EGRESS_ENV));
+    // If an explicit `"direct"` override set empty proxy markers at the end of `spec.env`,
+    // strip any earlier proxy variables and remove them from the child environment.
+    if spec
+        .env
+        .iter()
+        .rev()
+        .find(|(key, _)| crate::process::is_proxy_env_key(key))
+        .is_some_and(|(_, value)| value.is_empty())
+    {
+        spec.env
+            .retain(|(key, _)| !crate::process::is_proxy_env_key(key));
+        for key in [
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "ALL_PROXY",
+            "https_proxy",
+            "http_proxy",
+            "all_proxy",
+        ] {
+            if !spec.env_remove.iter().any(|k| k == key) {
+                spec.env_remove.push(key.to_owned());
+            }
+        }
+    }
     if let Some(owner) = &spec.owner
         && let Some(settings) = host::settings()
     {

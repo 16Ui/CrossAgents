@@ -29,6 +29,7 @@ import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import { permissionOf, type PermissionChoice } from "../lib/permission";
 import { useOperation } from "../lib/features";
+import { EgressPicker, proxyOf, shortProxyLabel } from "../egressPicks";
 import { PermissionPicks } from "../permissionPicks";
 import { unusableOf } from "../lib/unusable";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
@@ -602,9 +603,15 @@ function TeamNotes() {
 /** What the agent is doing now and what it is good at; nothing when the hub says neither. */
 function MemberTags({ agent }: { agent: Agent }) {
   const strengths = strengthsOf(agent);
+  const proxy = proxyOf(agent);
   return (
     <div className="member-tags">
       <RelationChip agent={agent} />
+      {proxy && (
+        <span className="chip small" title={`独立出口：${proxy}`}>
+          出口: {shortProxyLabel(proxy)}
+        </span>
+      )}
       {strengths.length > 0 && <span className="muted small">擅长</span>}
       {strengths.map((s) => (
         <span key={s} className="chip small strength" title={`擅长：${s}`}>
@@ -708,6 +715,8 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
   const [hooks, setHooks] = useState(savedHooks);
   const savedPermission = permissionOf(agent);
   const [permission, setPermission] = useState<PermissionChoice>(savedPermission);
+  const savedProxy = proxyOf(agent);
+  const [proxy, setProxy] = useState<string | null>(savedProxy);
   // Settings (permission, hooks, setting sources) are admin since #retier; a write device's 403
   // greys these fields with the hub's reason instead of failing on save.
   const settings = useOperation("agent.settings");
@@ -734,13 +743,18 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
       if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
       await api.updateProfile(agent.id, { ...profile, display_name: null });
       if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
-      const settingsChanged = !settingsDenied && ((claudeLike && (sources !== savedSources || hooks !== savedHooks)) || permission !== savedPermission);
+      const settingsChanged =
+        !settingsDenied &&
+        ((claudeLike && (sources !== savedSources || hooks !== savedHooks)) ||
+          permission !== savedPermission ||
+          proxy !== savedProxy);
       if (settingsChanged) {
         await api.agentSettings(agent.id, {
           // A plugin that reads no settings files keeps whatever it had; the field is required.
           setting_sources: claudeLike ? sources : savedSources,
           ...(claudeLike ? { allow_hooks: hooks } : {}),
           permission,
+          proxy,
         });
       }
       onDone();
@@ -794,6 +808,15 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
       </Field>
 
       <ModelField value={modelValue} models={reasoningModels(agent.plugin, models, modelValue)} plugin={agent.plugin} onChange={setModel} />
+      <Field label="网络出口（IP / 代理；保存后空闲会话会重启以生效）">
+        <EgressPicker
+          value={proxy}
+          onChange={setProxy}
+          defaultLabel="跟随账号 / 系统默认"
+          disabled={!!settingsDenied}
+          title={settingsDenied}
+        />
+      </Field>
       {claudeLike && (
         <Field label={`${agent.plugin === "codebuddy" ? SOURCES_LABEL.codebuddy : SOURCES_LABEL.claude}；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动`}>
           <select value={sources ?? "default"} disabled={!!settingsDenied} title={settingsDenied} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>

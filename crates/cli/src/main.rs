@@ -81,6 +81,19 @@ pub enum Command {
     /// Sign in to Gemini CLI through its ACP channel (started by the hub).
     #[command(hide = true)]
     GeminiLogin(GeminiLoginArgs),
+    /// Sign in to Antigravity CLI through its login page (started by the hub).
+    #[command(hide = true)]
+    AgyLogin(AgyLoginArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct AgyLoginArgs {
+    /// The Antigravity command to run, program first.
+    #[arg(long, num_args = 1.., allow_hyphen_values = true, required = true)]
+    pub command: Vec<String>,
+    /// The local port the login page is served on.
+    #[arg(long)]
+    pub port: u16,
 }
 
 #[derive(Debug, clap::Args)]

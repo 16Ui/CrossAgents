@@ -39,7 +39,7 @@ use tokio::sync::mpsc;
 
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{hide_console, resolve_program};
+use crate::process::{hide_console, resolve_program, system_proxy_env};
 use wire::{Line, Turn, TurnArgs};
 
 /// The variable that points the CLI at the settings file we write for the session.
@@ -108,6 +108,7 @@ impl GeminiNativeDriver {
         child
             .args(extra)
             .arg("--list-models")
+            .envs(system_proxy_env())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -334,7 +335,8 @@ impl GeminiSession {
         });
         let (program, all_args) = crate::argv::launch_command(&self.command, args)
             .ok_or_else(|| CoreError::Agent("empty Gemini launch command".into()))?;
-        let mut env = self.env.clone();
+        let mut env = system_proxy_env();
+        env.extend(self.env.iter().cloned());
         env.extend(self.files.env());
         self.emit(SessionEventKind::TurnStarted { turn_id: None });
         let launched = crate::launch::launch(LaunchSpec {

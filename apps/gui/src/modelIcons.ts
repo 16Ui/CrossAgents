@@ -1,5 +1,7 @@
 // The official marks, from @lobehub/icons-static-svg. Only the ones named here reach the bundle.
 import claude from "@lobehub/icons-static-svg/icons/claude-color.svg";
+import antigravity from "@lobehub/icons-static-svg/icons/antigravity-color.svg";
+import cursor from "@lobehub/icons-static-svg/icons/cursor.svg";
 import codebuddy from "@lobehub/icons-static-svg/icons/codebuddy-color.svg";
 import cursor from "@lobehub/icons-static-svg/icons/cursor.svg";
 import codex from "@lobehub/icons-static-svg/icons/codex-color.svg";
@@ -56,6 +58,9 @@ export const MODEL_ICONS: Record<string, BrandIcon> = {
 
 /** By the vendor that runs a plugin. */
 export const VENDOR_ICONS: Record<string, BrandIcon> = {
+  antigravity: { src: antigravity },
+  cursor: { src: cursor, mono: true },
+  gemini: { src: gemini },
   claude: { src: claude },
   codex: { src: codex },
   codebuddy: { src: codebuddy },
