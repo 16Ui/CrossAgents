@@ -217,6 +217,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/accounts/{id}/usage", get(account_usage))
         .route("/v1/accounts/{id}/models", get(account_models))
         .route("/v1/accounts/{id}/login", post(account_login))
+        .route("/v1/accounts/{id}/rearm", post(rearm_account))
         .route("/v1/accounts/{id}/egress", post(set_account_egress))
         .route("/v1/egress/candidates", get(egress_candidates))
         .route("/v1/egress/proxies", post(save_egress_proxy))
@@ -2042,10 +2043,17 @@ async fn self_check_plugin(
         .start(state.bus.clone(), state.cli_runs.clone(), driver, model)
         .await;
     if !started {
-        return Err(CoreError::Conflict(format!(
-            "{name} cannot be checked now: a check is running, or its CLI reports no version"
-        ))
-        .into());
+        // Say which of the two reasons it was: "no reaction" on the row is exactly this
+        // error going unnoticed.
+        let why = if state.self_check.running(&name).await {
+            format!("{name} is already being checked; wait for it to finish")
+        } else {
+            format!(
+                "{name} cannot be checked now: its CLI has not reported a version yet — \
+                 run 重新检测, and check this row's 自检中 marker"
+            )
+        };
+        return Err(CoreError::Conflict(why).into());
     }
     Ok(StatusCode::ACCEPTED)
 }
@@ -3527,6 +3535,17 @@ async fn account_login(
     Path(id): Path<String>,
 ) -> ApiResult<Json<LoginStarted>> {
     Ok(Json(state.accounts.login(&id).await?))
+}
+
+/// `POST /v1/accounts/{id}/rearm`: the person's hand clearing a risk pause. Nothing else
+/// clears one (`Accounts::clear_risk`); the fresh status answers right after, so the
+/// button that called this can show the account as it now stands.
+async fn rearm_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AccountStatus>> {
+    state.accounts.clear_risk(&id);
+    Ok(Json(state.accounts.status(&id).await?))
 }
 
 async fn set_account_egress(

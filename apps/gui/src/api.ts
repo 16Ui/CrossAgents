@@ -4,6 +4,7 @@ import type { ApplyRerun } from "@bindings/ApplyRerun";
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
 
 import type { Account } from "@bindings/Account";
+import type { AccountStatus } from "@bindings/AccountStatus";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
@@ -570,6 +571,7 @@ export const api = {
   accountUsage: (id: string, by: AccountUsageGroup) =>
     request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),
   login: (id: string) => request<LoginStarted>("POST", `/v1/accounts/${enc(id)}/login`),
+  rearmAccount: (id: string) => request<AccountStatus>("POST", `/v1/accounts/${enc(id)}/rearm`),
   setAccountEgress: (id: string, req: SetAccountEgressRequest) =>
     request<Account>("POST", `/v1/accounts/${enc(id)}/egress`, req),
   egressCandidates: () => request<EgressCandidatesResponse>("GET", "/v1/egress/candidates"),

@@ -7,6 +7,12 @@
 # The models below are what `gemini --list-models` offered on 0.68.0; the driver asks the
 # installed CLI again at startup and prefers its answer.
 name = "gemini"
+# Hidden from the plugin list: Google shut down the personal-account interface this CLI
+# relied on (June 2026), so on a machine without an enterprise Code Assist plan or a
+# pay-as-you-go API key the CLI only reports auth errors. The entry stays resolvable for
+# enterprise/API-key users — set GEMINI_API_KEY and it works; Antigravity (`agy`) is the
+# personal-account replacement and has its own entry.
+hidden = true
 driver = "gemini-native"
 # The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them
 # the CLI still runs, marked unverified.

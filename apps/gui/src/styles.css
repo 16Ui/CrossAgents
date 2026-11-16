@@ -1888,6 +1888,18 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 
 /* 本机的 CLI（docs/DESIGN.md §9.3）：确认框里的命令，和正在跑的安装的输出。 */
 .cli-line { flex-wrap: wrap; }
+
+/* Entries sharing one vendor's login draw as a group: a head naming the vendor, and the
+   entries indented under it (docs/DESIGN.md §9.3 — one CLI may be listed twice by site). */
+.cli-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 12px 4px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+.setting-line.cli-child { padding-left: 30px; border-top: none; }
 .cli-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cli-job { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .cli-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

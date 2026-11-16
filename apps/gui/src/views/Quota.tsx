@@ -128,6 +128,25 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
     }
   }
 
+  // A person's hand clearing the risk pause: the only thing that un-pauses an account.
+  // The re-arm answer is the account's fresh status, so the row updates at once.
+  const [rearming, setRearming] = useState(false);
+  async function rearm() {
+    setError(undefined);
+    setRearming(true);
+    try {
+      const status = await api.rearmAccount(account.id);
+      if (!status.logged_in) {
+        setError("已解除暂停；但账号当前显示未登录——先重新登录，再来解除才有意义");
+      }
+      onChange();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setRearming(false);
+    }
+  }
+
   return (
     <div className={`account-row ${open ? "open" : ""}`}>
       <div className="account-line">
@@ -232,9 +251,15 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
           </span>
           <span className="account-alert-text">{atRisk}</span>
           <span className="account-alert-hint">
-            CrossAgents 不会自动重试这个账号——重试只会让厂家更怀疑。要恢复：先在厂家那边完成身份验证或人机校验，再由人手动解除暂停；界面目前还没有解除按钮。
+            CrossAgents 不会自动重试这个账号——重试只会让厂家更怀疑。要恢复：先在厂家那边完成身份验证或人机校验，再点下面的解除暂停。
             {quota.agents.length > 0 && ` 绑在它上面的 ${quota.agents.map((n) => `@${n}`).join(" ")} 已经停下。`}
           </span>
+          <div>
+            <button className="chip" disabled={rearming} onClick={rearm}>
+              {rearming ? "解除中…" : "解除暂停"}
+            </button>
+            <span className="hint"> 解除后立即重新探测一次登录与额度。</span>
+          </div>
         </div>
       )}
       {blocked && (

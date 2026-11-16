@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import type { PluginInfo } from "@bindings/PluginInfo";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import { RefreshCw } from "lucide-react";
@@ -303,14 +304,26 @@ function VendorClis() {
       </div>
       <ErrorBox error={plugins.error ?? askError} />
       <div className="setting-card">
-        {list.map((p) => {
+        {groupByProvider(list).map(([provider, entries]) => (
+          <Fragment key={provider}>
+            {entries.length > 1 && (
+              <div className="cli-group-head" title={`这些条目共用 ${vendorLabel(provider)} 的登录与 CLI`}>
+                <VendorMark plugin={provider} size={14} />
+                {vendorLabel(provider)}
+                <span className="hint">
+                  {" "}
+                  · {entries.length} 个入口共用这一个厂商的登录
+                </span>
+              </div>
+            )}
+            {entries.map((p) => {
           const cli = p.cli!;
           const job = jobs[p.name];
           // What the hub is doing for this CLI now: a job of this window, or one started
           // elsewhere and reported on `GET /v1/plugins`. Its buttons stay disabled either way.
           const busy = installingOf(cli, job);
           return (
-            <div className="setting-line cli-line" key={p.name}>
+            <div className={`setting-line cli-line ${entries.length > 1 ? "cli-child" : ""}`} key={p.name}>
               <div className="model-name">
                 <div className="setting-label">
                   <VendorMark plugin={p.provider} entry={p.name} size={18} tile />
@@ -447,6 +460,8 @@ function VendorClis() {
             </div>
           );
         })}
+          </Fragment>
+        ))}
       </div>
       {confirm && <InstallConfirm job={confirm} onCancel={() => setConfirm(undefined)} onRun={() => void start(confirm)} />}
     </section>
@@ -463,6 +478,19 @@ type Progress = {
 };
 
 /** What a description says it came from, in words for the confirmation box. */
+/** Entries grouped by the vendor whose login and CLI they share: one group for `codebuddy`
+ * (国内版 / 国际版), one for the DeepSeek harness (词元工坊 / Harness). Single-entry vendors
+ * stay flat. Group order follows the list. */
+function groupByProvider(list: PluginInfo[]): [string, PluginInfo[]][] {
+  const map = new Map<string, PluginInfo[]>();
+  for (const p of list) {
+    const group = map.get(p.provider);
+    if (group) group.push(p);
+    else map.set(p.provider, [p]);
+  }
+  return [...map.entries()];
+}
+
 function describedBy(source?: string): string {
   if (!source || source === "built-in") return "内置描述";
   if (source === "config.toml") return "config.toml 里的覆盖";
