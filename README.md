@@ -1,240 +1,248 @@
-# CrossAgents
+<div align="center">
+  <img src="docs/brand/crossagents-mark.svg" width="72" height="72" alt="CrossAgents Logo" />
+  <h1>CrossAgents</h1>
+  <p><strong>面向多厂商 Coding Agent 的本地编排操作系统</strong></p>
+  <p>强模型统筹拆解与代码审查 · 多模型在独立 Git Worktree 中并行实现 · Hub 亲自执行验收命令</p>
+  <p>
+    <a href="README.en.md">English</a> ·
+    <a href="https://github.com/L1nkkkk/CrossAgents-releases/releases/latest">下载安装包</a> ·
+    <a href="docs/DESIGN.md">架构设计</a> ·
+    <a href="docs/AGENT-WORKSPACE.md">工作区与协作模型</a> ·
+    <a href="docs/EXTENSIONS.md">扩展开发</a>
+  </p>
+</div>
 
-CodeBuddy 国内站与国际站的独立登录设置见 [使用说明](docs/CODEBUDDY-SITES.md)。
+---
 
-CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / GPT-5 级）负责设计、拆解和验收，
-便宜模型（Haiku / mini 级）并行写代码**。每个任务在独立的 git worktree 里完成，由 hub 亲自跑验收命令，
-失败自动打回重试、必要时升级到更强的模型，通过后合并到一个集成分支，最终是否合入由你决定。
+CrossAgents 是一个本地优先的多 Agent 编码编排器与桌面工作台。你可以把不同厂商、不同价位的 Coding Agent 组合进同一个项目：**用强模型（Claude Opus / GPT-5 级）负责架构设计、任务拆解与代码评审，用高性价比或不同订阅额度的模型并行写代码**。
 
-各家 agent 以插件形式接入：内置 Claude Code、Codex、WorkBuddy（CodeBuddy CLI）、Cursor CLI、Gemini CLI、
-Antigravity CLI（`agy`，Google AI Pro/Ultra 个人账号现在走它）和 With，默认走各自的原生接口；其余 agent 走 [ACP](https://agentclientprotocol.com)，任何讲 ACP 的 agent
-都能通过配置或插件目录接入，不用改代码。
+每个子任务在各自隔离的 `git worktree` 中独立执行，完成后由本地 `hub` 亲自运行项目配置的测试与构建验收命令；验收失败自动打回重试，通过后合入集成分支，最终由你决定是否落入主分支。
 
-- 设计：[docs/DESIGN.md](docs/DESIGN.md)
-- 各里程碑任务书：[docs/tasks/](docs/tasks/)
-- 可选的停滞恢复与持续推进：[docs/CONTINUATION.md](docs/CONTINUATION.md)
-- Mac 安装（不带 hub，连另一台电脑上的 hub）：[docs/INSTALL-MAC.md](docs/INSTALL-MAC.md)
+![CrossAgents 桌面工作台](docs/screens/g1/work-rounds-wide.png)
 
-## 下载
+## 核心特性
 
-安装包在 [CrossAgents-releases](https://github.com/L1nkkkk/CrossAgents-releases/releases/latest)：
+- **平等 Agent 与动态职责**：Agent 是项目中的平等协作者，不再受限于死板的固定身份标签。同一个 Agent 既可以与你日常对话，也可以在一次工作（Work / Run）中担任主导（Lead）、执行（Worker）或评审（Reviewer）。
+- **Worktree 隔离与确定性验收**：`hub` 本身不包含大模型，只做确定性的调度、隔离与验收。每个任务独占 `git worktree`，通过项目根目录的 [`crossagents.toml`](crossagents.toml) 自动执行新工作区初始化（`setup`）与按改动路径触发的验收检查（`checks`）。
+- **进程常驻与无感热接管**：Agent 运行在独立的 `runtime-host` 宿主进程中，生命周期独立于 `hub` 与桌面端。`hub` 重启或升级时不会中断正在执行的编码轮次，新 `hub` 启动后通过本地令牌握手自动接管宿主并补发缓存输出（详见 [进程监督设计](docs/PROCESS-SUPERVISION.md)）。
+- **多厂商原生驱动 + ACP 协议兜底**：主力 Agent 走各自的原生控制协议，支持会话恢复、分叉、回滚、结构化 Diff 与实时额度查询；其余 Agent 通过 [ACP (Agent Client Protocol)](https://agentclientprotocol.com) 接入，零代码扩展新工具。
+- **多账号与跨订阅额度统筹**：同一厂商可绑定多个独立账号（独立配置目录与凭证隔离），实时查看套餐窗口、重置时间与余额，按角色、模型、项目或日期统计 Token 与开销。
+- **内置受控浏览器与人机接管**：桌面端内置浏览器标签与 Chrome 桥接支持，Agent 可调用 `browser_*` 工具读页面无障碍树、点击、填表、截图；所有网页返回内容自动包裹防提示词注入标记，且支持人类随时一键接管标签页（详见 [内置浏览器说明](docs/BROWSER.md)）。
+- **免编译热加载扩展（Extensions）**：在 `~/.crossagents/extensions/` 下无需编译即可为 Agent 挂载自定义工具、附加提示词、流式规则、事件钩子、后台常驻服务与自定义 GUI 面板，基于内容哈希快照保障运行安全（详见 [扩展设计文档](docs/EXTENSIONS.md)）。
+- **经验沉淀与故障复盘**：内置项目级与个人级经验库（Expertise）及踩坑记录（Lessons），让后续接手任务的 Agent 自动继承项目的架构偏好与排障经验。
 
-| 文件 | 说明 |
-|---|---|
-| `CrossAgents-Setup-<版本>.exe` | Windows，带 hub，装好后自动更新 |
-| `CrossAgents-<版本>-arm64.dmg` / `.zip` | Apple 芯片的 Mac，不带 hub、ad-hoc 签名，连另一台电脑上的 hub（[说明](docs/INSTALL-MAC.md)）。GUI 自己不会更新，用 [`scripts/mac-update.sh`](scripts/mac-update.sh) 更新，`--install-agent` 让它每天自动查 |
+## 支持的 Agent 驱动
 
-Intel Mac 和 Linux 没有现成的包，按下面从源码构建。
+| 插件 / 厂商 | 默认驱动 | 接入方式与能力说明 |
+|---|---|---|
+| **Claude Code** | `claude-native` | 基于 `claude -p` 的 `stream-json` 控制协议；自动查找 `PATH`、`~/.local/bin/claude` 或桌面端内置二进制 |
+| **Codex** | `codex-native` | 基于 `codex app-server` 协议；自动查找 `PATH` 或桌面端内置二进制，支持多账号独立登录与实时额度查询 |
+| **Gemini CLI** | `gemini-native` | 原生驱动支持会话管理与流式输出；也可在配置中切换为 `--experimental-acp` 走通用 ACP |
+| **Cursor CLI** | `cursor-native` | 原生对接 Cursor CLI 会话、权限控制与工作区操作 |
+| **Antigravity CLI** | `antigravity-native` | 对接 `agy`（支持 Google AI Pro / Ultra 个人账号登录与模型调用） |
+| **CodeBuddy / With** | `codebuddy-native` / `with-native` | 支持腾讯 CodeBuddy CLI（含[国内站与国际站独立登录](docs/CODEBUDDY-SITES.md)）与 With CLI |
+| **任意 ACP Agent** | `acp-generic` | 任何实现 [ACP 协议](https://agentclientprotocol.com) 的 Agent（如 Goose 等），通过 `config.toml` 或插件目录即可接入 |
 
-## 准备
+## 下载与安装
 
-| 需要 | 用途 |
-|---|---|
-| Rust 1.99（见 `rust-toolchain.toml`） | 构建 |
-| git | 工作区与合并 |
-| Node.js（`npx`） | 运行 Claude / Codex 的 ACP 适配器 |
-| 已登录的 Claude Code 和/或 Codex | 真正干活的 agent；在终端里各自登录一次 |
+预编译安装包发布在 [CrossAgents-releases](https://github.com/L1nkkkk/CrossAgents-releases/releases/latest)：
 
-```sh
-cargo build --release
-# 把 target/release/crossagents 放进 PATH
-```
-
-两个插件都默认走原生驱动：
-- Claude 走 `claude -p` 的 stream-json 控制协议：先找 PATH 上的 `claude`，再找 `~/.local/bin/claude`，最后用 Claude 桌面版自带的那份。桌面版的登录 `claude` 用不上，要在终端里 `claude auth login` 登录一次。
-- Codex 走 `codex app-server`：先找 PATH 上的 `codex`，找不到就用 Codex 桌面版自带的那份。
-
-**代理**：Claude Code 不读 Windows 的系统代理。hub 环境里没有 `HTTPS_PROXY` 时，会把系统代理设置传给它（本机地址除外）。
-
-**Codex 提示**：建议给 agent 显式指定模型。不指定时用 `~/.codex/config.toml` 里的默认模型，
-它不一定支持你的登录方式（例如 ChatGPT 账号）。GUI 的模型下拉框列的是 Codex 为当前登录给出的模型
-（`~/.codex/models_cache.json`），新建队友默认选第一个；已有队友可以在「编辑」里改，从下一轮起生效。
+| 平台 | 安装包 | 说明 |
+|---|---|---|
+| **Windows (x64)** | `CrossAgents-Setup-<版本>.exe` | **推荐**。内置同版本 `hub`，启动 GUI 时自动拉起并管理后台 `hub`，支持应用内自动更新 |
+| **macOS (Apple Silicon)** | `CrossAgents-<版本>-arm64.dmg` / `.zip` | 桌面客户端（Ad-hoc 签名），可连接本机源码编译的 `hub` 或远程主机的 `hub`（见 [Mac 安装说明](docs/INSTALL-MAC.md)） |
+| **macOS (Intel) / Linux** | 从源码构建 | 见下方「从源码构建」章节 |
 
 ## 快速开始
 
-最省事的方式是用引导接入（目前支持 Codex）：
+### 方式一：使用桌面端 GUI（推荐）
+
+Windows 安装版打开即用，自带的 `hub` 会在后台自动启动：
+
+1. **添加账号与成员**：在左侧栏添加你的项目仓库，通过引导绑定已登录的 Claude Code、Codex 或 Gemini 账号，创建团队成员（如用强模型创建 `Leo`，用快模型创建 `Iris`）。
+2. **直接对话或发起 Work**：
+   - **日常对话（Chat）**：点击项目下的任意成员直接交流、查代码或做小改动，每轮回复下方都会展示改动文件摘要，右侧工具栏可按轮次查看完整 Diff、Git 提交图与文件树。
+   - **多 Agent 协同工作（Work）**：在对话中让主导成员发起 Work，或直接新建 Work。主导成员会先分析代码库并提交计划（或在不需拆解时直接原地完成），并行派发给团队成员在各自 worktree 中实现，通过验收后一键合入你的工作区。
+3. **集中处理待办**：左侧栏顶部的「需要你」区域会汇总所有等待你审批计划、回答澄清问题或确认权限的事项，无需在多个会话间来回翻找。
+
+### 方式二：使用命令行 CLI
+
+如果你偏好终端或脚本自动化，可以使用一键引导快速完成环境检查、账号登录与成员初始化：
 
 ```sh
-crossagents setup codex      # 检查环境 → 选/导入账号 → 登录 → 显示套餐与额度 → 选模型 → 建好 planner 和 worker
+# 引导式配置 Codex（检查环境 → 选择/导入账号 → 登录 → 查看额度 → 选择模型 → 创建协作者）
+crossagents setup codex
 ```
 
-也可以手动来：
-
+也可以手动启动 `hub` 并管理协同编排：
 
 ```sh
+# 1. 启动后台 hub
 crossagents hub start
 
-# 在你的项目（git 仓库，至少一次提交）里登记 agent
-crossagents agent add arch  --plugin claude --model opus  --role planner --cwd ~/proj
-crossagents agent add coder --plugin claude --model haiku --role worker  --cwd ~/proj
+# 2. 在你的 Git 仓库中登记 Agent 协作者
+crossagents agent add leo  --plugin claude --model opus  --cwd ~/proj
+crossagents agent add iris --plugin claude --model haiku --cwd ~/proj
 
-# 发起一次编排
-crossagents run "给项目加用户登录" --planner arch --worker coder
-crossagents run show <id>          # Planner 提交计划后在这里查看
-crossagents run approve <id>       # 批准后自动派发、验收、合并
-crossagents run show <id> -v       # 跟踪任务；-v 显示验收输出与 diff
-git merge crossagents/<id>         # 结果在集成分支上
+# 3. 发起一次协同编排（leo 主导拆解与统筹，iris 并行实现）
+crossagents run "为项目添加 OAuth2 登录与集成测试" --planner leo --worker iris
+
+# 4. 查看计划、审批并跟踪进度
+crossagents run show <run-id>          # 查看主导 Agent 提交的任务拆解计划
+crossagents run approve <run-id>       # 批准计划，自动创建 worktree、派发、跑验收并合并
+crossagents run show <run-id> -v       # 跟踪各任务状态；-v 查看验收命令输出与代码 diff
+
+# 5. 将集成分支合入你的当前分支
+git merge crossagents/<run-id>
 ```
 
-常用选项：
-
-| 选项 | 作用 |
-|---|---|
-| `--escalate <agent>` | 某任务连续失败 `--max-attempts` 次后，换这个更强的 agent 在同一 worktree 重做 |
-| `--reviewer <agent>` | 每个通过验收的改动先交给它审查，驳回意见转给 Worker |
-| `--no-approve` | 不等你审批计划，直接开工 |
-| `--max-parallel N` | 同时进行的任务数（默认 3；修改范围重叠的任务自动串行） |
-
-其他命令：
+#### 常用 CLI 命令速览
 
 ```sh
-crossagents send coder "解释一下 src/main.rs" --wait   # 直接和某个 agent 对话
-crossagents attach coder                              # 实时查看输出并交互
-crossagents events --follow                           # 全部事件流
-crossagents events --log                              # 读今天的事件日志，hub 没在跑也能用
-crossagents events --log 2026-10-23                   # 读某一天
-crossagents usage --by role                           # 强/弱模型各花了多少
-crossagents run reject <id> "任务拆得再小一点"          # 驳回计划
-crossagents run cancel <id>
-```
+# 与单个 Agent 交互与查看改动
+crossagents send leo "解释一下调度器的锁机制" --wait --file docs/DESIGN.md
+crossagents attach leo                              # 实时终端附着交互
+crossagents session diff leo --turn 3               # 查看某轮对话产生的完整代码 Diff
 
-所有命令都支持 `--json`。
+# 查看工作组（Work）与多轮迭代历史
+crossagents work ls
+crossagents work show <work-id>
 
-## GUI
+# 编排控制选项
+crossagents run "重构数据库层" --planner leo --worker iris \
+  --reviewer orion \                                # 每个通过命令验收的任务先交由 orion 审查代码
+  --escalate leo \                                  # 连续失败达到上限后，在原 worktree 升级给更强模型重做
+  --max-parallel 3 \                                # 最大并行任务数（修改范围重叠的任务会自动串行化）
+  --continue-run                                    # 开启停滞自动唤醒推进
 
-`apps/gui/` 是桌面 GUI（Electron + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
-GUI 读取 `~/.crossagents/hub.json` 与 `token` 连接（同样遵循 `CROSSAGENTS_HOME`）。
-界面以对话为中心：聊天通过 `work_start` 发起的 run 使用独立主导，原聊天保留；侧边栏按「对话 → run → 成员」展开，
-从首页发起和没有来源的旧 run 仍独立显示。聊天中开始的 Work 默认自动批准计划、自动落地；落地遇到主工作区未提交的改动时，
-结果保留在 run 分支，交给你之后处理。结束摘要不唤醒父聊天，随它的下一次消息带入。设计见 [会话优先设计](docs/SESSION-FIRST.md)。
-每轮回复下有一行改动摘要（改了哪些文件、增删多少行），右侧工具列可以按轮看 diff、看任务详情和原始事件流。
-主题在「设置」里选：跟随系统、浅色（素白 / 纸 / 雾）、深色。
-
-```sh
-cd apps/gui
-npm install
-npm run electron:dev       # 开发（页面热重载）
-npm run preview:mock       # 不起 hub，在浏览器里用假数据看界面；右下角切场景
-npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
-```
-
-Apple 芯片的 Mac 包由 [`.github/workflows/mac.yml`](.github/workflows/mac.yml) 在推 tag 时自动打好、传到发布页；Intel Mac 在本机用 `npm run electron:build:mac` 打 dmg / zip（不带 hub、ad-hoc 签名、不能自动更新），装好后连另一台电脑上的 hub，步骤见 [Mac 安装说明](docs/INSTALL-MAC.md)。
-
-令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）；
-[V6 任务书](docs/tasks/V6-GUI.md)：mock 预览、视觉层次、按轮 diff 与工具列。
-
-## 账号管理
-
-每个 agent 可以绑定一个账号（`agent add --account <id>`），同一家可以有多个账号。
-
-```sh
+# 账号与用量统计
 crossagents account ls
-crossagents account add codex-main --import-default   # 用现有的 ~/.codex 登录
-crossagents account add codex-work                    # 新账号，独立目录
-crossagents account login codex-work                  # 打开浏览器登录
-crossagents account status codex-main                 # 套餐、额度窗口与重置时间、余额（实时）
-crossagents account usage codex-main --by model       # token、缓存命中；还可按 day/origin/agent/role/run
-crossagents account models codex-main                 # 这个账号能用的模型
-crossagents account add claude-work --provider claude # Claude 账号同样管理（独立的 CLAUDE_CONFIG_DIR）
+crossagents account add codex-work                  # 新增独立隔离的厂商账号
+crossagents account login codex-work                # 浏览器授权登录
+crossagents account status codex-work               # 实时查询套餐、额度窗口、重置时间与余额
+crossagents usage --by model                        # 按 role / model / agent / run 统计用量与开销
+
+# 可观测性与排障
+crossagents hub status                              # 查看后台宿主进程、活跃会话与异常摘要
+crossagents events --follow                         # 实时订阅全部 SSE 事件流
+crossagents events --log                            # 离线读取落盘的按日事件日志（hub 未运行时同样可用）
+crossagents lessons ls                              # 查看项目积累的排障记录
 ```
 
-令牌只在 hub 进程内用于查询额度，任何 API 和日志都不会输出令牌，邮箱打码显示。
-实时查询失败（没网、登录过期）时，回退到 Codex 会话日志里最近一次记录的额度，并标明时间。
+所有 CLI 命令均支持添加 `--json` 输出结构化 JSON，方便被外部脚本或 Agent 组合调用。
 
-## 配置
+## 工作流与架构原理
 
-数据在 `~/.crossagents/`（可用环境变量 `CROSSAGENTS_HOME` 改）。`config.toml`：
+```mermaid
+flowchart TD
+    User["用户（GUI / CLI）"] -->|"布置目标 / 发起 Work"| Lead["主导会话 Lead（强模型）"]
+    Lead -->|"提交计划 plan_submit"| Hub["本地 Hub（无模型确定性内核）"]
+    Hub -->|"为每个任务创建独立 Git Worktree"| Worker["执行会话 Worker 1..N（高性价比模型）"]
+    Worker -->|"提交交付 task_complete"| Verify["Hub 跑项目验收命令（crossagents.toml checks）"]
+    Verify -->|"失败：附带报错打回"| Worker
+    Verify -->|"多次失败：升级模型"| Escalate["升级会话 Escalate"]
+    Verify -->|"通过"| Review["（可选）评审会话 Reviewer"]
+    Review -->|"驳回修改"| Worker
+    Review -->|"通过并合入 crossagents/run 分支"| Done["汇总交付，等待用户确认落地"]
+```
+
+1. **Hub 不思考，只守规矩**：所有的代码理解、拆解与评审判断都在 Agent 会话中完成；`hub` 只负责管理 Git Worktree、挂载角色受限的 MCP 协作工具、执行命令验收与维护状态机。
+2. **项目级自描述验收（`crossagents.toml`）**：在项目根目录放置 `crossagents.toml`，即可声明每个新 Worktree 创建后的依赖安装命令（`setup`），以及合入前必须通过的验收检查（`checks`，支持按改动路径 `paths` 条件触发）：
+
+```toml
+[run]
+setup = [
+    { command = "npm ci", dir = "apps/gui", paths = ["apps/gui/package.json"] },
+]
+checks = [
+    { command = "cargo test --workspace", paths = ["crates", "Cargo.toml"] },
+    { command = "npm --prefix apps/gui run typecheck", paths = ["apps/gui"] },
+]
+timeout_secs = 1800
+```
+
+3. **三级权限与本地安全边界**：`hub` 默认仅监听 `127.0.0.1`。API 划分为 `read` / `write` / `admin` 三级凭据；每个 Agent 会话仅持有作用域受限的会话 Token（只能访问 `/v1/me*` 工具接口），无法触达账号管理或越权操作其他会话。Electron 渲染进程与主进程之间通过严格的方法与路径白名单通信，Token 永不暴露给前端页面（详见 [API 鉴权与分级说明](docs/API-AUTH.md)）。
+
+## 全局配置与自定义插件
+
+所有本机数据默认保存在 `~/.crossagents/`（可通过环境变量 `CROSSAGENTS_HOME` 更改）。可在 `~/.crossagents/config.toml` 中自定义端口、覆盖内置驱动命令或接入任意 ACP Agent：
 
 ```toml
 [hub]
 port = 7420
 
-# 覆盖内置插件的启动命令，或注册任意 ACP agent
+# 覆盖内置插件的二进制路径（不配置则自动探测）
 [plugins.claude]
-native_command = ["C:/tools/claude.exe"]   # 不写就自动找
+native_command = ["C:/tools/claude.exe"]
 
-
-# 想改用 ACP 适配器（而不是内置的 gemini-native）：
+# 将内置插件切换为通用 ACP 驱动
 [plugins.gemini]
 command = ["gemini", "--experimental-acp"]
 driver = "acp-generic"
-
-# 要改回 ACP 适配器（codex-acp、claude-agent-acp，需要 Node.js）：
-[plugins.codex]
-driver = "acp-generic"
-
-# WorkBuddy 的 CodeBuddy CLI：需要独立安装 `npm install -g @tencent-ai/codebuddy-code`，
-# 用 `codebuddy` 里的 /login 登录一次（或设 CODEBUDDY_API_KEY）。WorkBuddy 自带的那份离开桌面版跑不了。
-# 不写 native_command 就按 CODEBUDDY_CLI、PATH 的顺序找。
-[plugins.codebuddy]
-native_command = ["node", "C:/tools/codebuddy/bin/codebuddy"]
 ```
 
-单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|codebuddy-native|with-native|cursor-native|gemini-native|antigravity-native|acp-generic` 覆盖插件的默认驱动。
-Claude agent 的 `config` 里还可以写 `permission_mode`（如 `acceptEdits`）、`effort`、`setting_sources`
-（默认 `project,local`，不带你自己的 Claude Code 插件、hook 和连接器）。
-驱动与能力见 [N1 任务书](docs/tasks/N1.md)。
-
-也可以把插件放成目录：`~/.crossagents/plugins/<name>/plugin.toml`
+也可以在 `~/.crossagents/plugins/<name>/plugin.toml` 下放置独立插件目录来注册新的 ACP Agent：
 
 ```toml
 name = "my-agent"
 protocol = "acp"
-command = ["./bin/my-agent", "--acp"]   # 相对路径相对插件目录
+command = ["./bin/my-agent", "--acp"]
 models = ["fast", "smart"]
 ```
 
-## 工作方式
+> **Windows 代理提示**：Claude Code 默认不读取 Windows 系统代理。当 `hub` 环境中未设置 `HTTPS_PROXY` 时，会自动读取 Windows 系统代理并注入给子进程（本机回环地址除外）。
 
+## 从源码构建与开发
+
+### 环境要求
+
+- **Rust 工具链**：最新稳定版 Rust（含 `cargo`、`rustfmt`、`clippy`）
+- **Node.js**：Node.js 20+ 与 `npm`（用于构建 `apps/gui` 桌面端）
+- **Git**：2.30+（需支持 `git worktree`）
+
+### 构建与运行
+
+```sh
+# 1. 编译 CLI 与 Hub
+cargo build --release
+# 编译产物位于 target/release/crossagents（或 crossagents.exe），可加入 PATH
+
+# 2. 启动桌面端 GUI 开发模式
+cd apps/gui
+npm install
+npm run electron:dev       # 启动 Electron 开发窗口（支持热重载）
+npm run preview:mock       # 无需启动 hub，在浏览器中使用内置 Mock 场景预览界面与交互
+npm run electron:build     # 打包桌面客户端
 ```
-你 ──run──▶ Planner（强模型）──plan_submit──▶ 你审批
-                                              │
-        ┌─────────────── hub ─────────────────┘
-        ▼
-  每个任务：新 worktree + 新 Worker 会话（弱模型）
-        │ task_complete
-        ▼
-  hub 提交并跑验收命令 ──失败──▶ 打回重试 ──多次失败──▶ 升级 / 失败
-        │ 通过
-        ▼
-  （可选）Reviewer 审查 ──▶ 合并到 crossagents/<run> ──▶ 通知 Planner
-```
 
-Agent 通过 hub 挂载的 MCP 工具协作（`plan_submit`、`task_complete`、`task_ask` 等），
-每个会话有独立令牌，只能使用自己角色的工具。
+### 运行测试
 
-## 本地 API
-
-hub 只监听 `127.0.0.1`。除 `GET /v1/health` 外都要 `Authorization: Bearer <~/.crossagents/token>`。
-`/v1/health` 免鉴权，所以只说最少的话：`status` 与 `api`；版本、pid、启动时间在需鉴权的 `GET /v1/info`。
-接口的读写分级与调用方见 [docs/API-AUTH.md](docs/API-AUTH.md)。
-`GET /v1/events` 是 SSE 事件流（支持断点续传，`?agent=` 只看某个会话）；`GET /v1/agents/{key}/transcript` 返回按轮分组的对话历史（每轮带改动 stat），`GET /v1/agents/{key}/turns/{message_id}/diff` 返回某一轮的完整 diff（CLI：`crossagents session diff <agent> [--turn N] [--stat]`）。GUI 用的 TypeScript 类型由
-`cargo test -p crossagents-api-types` 生成到 `bindings/`。
-
-## 开发
+仓库内置了可编程的 Mock Agent（`crates/mock-agent`），无需配置任何真实大模型 API Key 或外部账号，即可在本地完整跑通「规划 → 拆解 → Worktree 派发 → 验收打回 → 合并落地」以及「Hub 重启热接管」的端到端测试流水线：
 
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# 前端类型检查与单元测试
+npm --prefix apps/gui run typecheck
+npm --prefix apps/gui test
 ```
 
-端到端测试用 `crates/mock-agent`：一个可编程的 ACP agent，按提示里的 `[write …]`、`[call …]` 指令行事，
-不需要任何 LLM 或账号就能跑通完整流水线。
+若修改了 `crates/api-types` 中的前后端共享数据结构，运行 `cargo test -p crossagents-api-types` 会自动将最新的 TypeScript 类型定义重新生成到 `bindings/` 目录。
 
-发版（在干净的 main 上）：
+## 深入了解设计文档
 
-```sh
-node scripts/release.mjs --dry-run   # 只跑检查
-node scripts/release.mjs             # 补丁位 +1，也可以写死 node scripts/release.mjs 0.2.0
-```
-
-对齐 `Cargo.toml` 与 `apps/gui/package.json` 的版本号、提交、打 tag、打包发到
-`CrossAgents-releases`，发布成功之后才 push，最后核对安装包和 `latest.yml` 在不在。
-tag 推上去后，GitHub Actions 的 `mac` 工作流在 macOS runner 上打 arm64 的 dmg / zip，传到同一个 release
-（要在仓库 secrets 里配 `RELEASES_TOKEN`：只对 `CrossAgents-releases` 有 Contents 读写权限的 fine-grained token）。
-漏了某个版本，在 Actions 里手动运行 `mac`、填上 tag 即可补传。
+- [总体架构设计 (DESIGN.md)](docs/DESIGN.md)：微内核控制面与执行面分离、状态机与协议设计
+- [平等 Agent 与项目工作区 (AGENT-WORKSPACE.md)](docs/AGENT-WORKSPACE.md)：去固定角色化、职责指派与侧栏信息架构
+- [会话优先与工作流设计 (SESSION-FIRST.md)](docs/SESSION-FIRST.md)：日常对话（Chat）与多轮协同工作（Work）的衔接
+- [进程监督与热接管 (PROCESS-SUPERVISION.md)](docs/PROCESS-SUPERVISION.md)：`runtime-host` 守护、断线缓存补发与 Windows Job Object 进程树隔离
+- [免编译扩展系统 (EXTENSIONS.md)](docs/EXTENSIONS.md)：工具、提示词、事件响应、后台服务与 GUI 扩展规范
+- [内置受控浏览器 (BROWSER.md)](docs/BROWSER.md)：GUI 浏览器与 Chrome 桥接、防注入包裹与人工接管机制
+- [API 权限分级与安全边界 (API-AUTH.md)](docs/API-AUTH.md)：三级 Token 体系、Electron 主进程白名单与接口清单
+- [停滞恢复与持续推进 (CONTINUATION.md)](docs/CONTINUATION.md)：无人值守运行时的自动唤醒与推进策略
+- [多节点与跨设备互联 (MULTI-NODE.md)](docs/MULTI-NODE.md)：设备配对、内网穿透与远程 Hub 架构设计
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)。版权声明见 [NOTICE](NOTICE)。
+本项目基于 [Apache License 2.0](LICENSE) 开源，版权声明详见 [NOTICE](NOTICE)。
