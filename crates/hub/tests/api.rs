@@ -1400,6 +1400,59 @@ async fn installing(t: &TestHub) -> Option<String> {
         .and_then(|cli| cli.installing.clone())
 }
 
+#[tokio::test]
+async fn model_visibility_changes_are_persisted_and_announced_to_other_pickers() {
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "catalog-test".into(),
+            crossagents_plugins::PluginConfig {
+                command: vec!["node".into(), "--version".into()],
+                models: vec!["alpha".into(), "beta".into()],
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let mut events = t.hub.bus.subscribe();
+    for shown in [json!(["beta"]), Value::Null] {
+        let response = t
+            .post("/v1/plugins/catalog-test/models")
+            .json(&json!({"shown": shown}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let plugin: crossagents_api_types::PluginInfo = response.json().await.unwrap();
+        let expected = if shown.is_null() {
+            vec!["alpha", "beta"]
+        } else {
+            vec!["beta"]
+        };
+        assert_eq!(plugin.models, expected);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(events.recv().await.unwrap().kind, crossagents_core::EventKind::PluginChanged { name } if name == "catalog-test") { break; }
+            }
+        }).await.expect("a mounted picker must learn about the visibility change");
+        let list: ListPluginsResponse = t
+            .get("/v1/plugins")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            list.plugins
+                .iter()
+                .find(|p| p.name == "catalog-test")
+                .unwrap()
+                .models,
+            expected
+        );
+    }
+}
+
 /// docs/DESIGN.md §9.3 / crates/hub/src/install.rs: the list says which CLI has an install or
 /// upgrade in progress, so the GUI disables its button instead of meeting the 409; once the
 /// job ends the field is empty again (it is kept in memory only).

@@ -81,7 +81,8 @@ impl ModelChoice {
 }
 
 /// Every model `plugin` can run: what its logins report, unless `config.toml` lists them;
-/// its built-in list until a login has reported.
+/// its built-in list until a login has reported. Reads return the account cache at once;
+/// independent background probes publish an account update when more models arrive.
 pub async fn available(
     registry: &PluginRegistry,
     accounts: &Accounts,

@@ -20,7 +20,7 @@ import {
   sessionHref,
   useAgents,
 } from "../components";
-import { onHubEvent, useHubData } from "../hub";
+import { onHubEvent, useHubData, usePlugins } from "../hub";
 import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
@@ -130,19 +130,12 @@ const PROBE_POLLS = 40;
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
  *
- * The list is not only what the hub saw when it started: entering the page and coming back to
- * the window read it again, and the button asks the hub to look again and probe the versions,
+ * The shared list revalidates on window focus and when an old page is reopened;
+ * the button asks the hub to look again and probe the versions,
  * so a CLI installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
-  const plugins = useHubData(
-    () => api.listPlugins().then((r) => r.plugins),
-    [],
-    (e) =>
-      e.type.startsWith("account.") ||
-      e.type === "plugin.changed" ||
-      e.type.startsWith("cli.install."),
-  );
+  const plugins = usePlugins();
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
   // A click the hub refused because that plugin already has a job: said in words, per row.
@@ -188,23 +181,8 @@ function VendorClis() {
       });
   }, [reload]);
 
-  // Entering the page and coming back to the window only read the list. Reading it is enough
-  // for a CLI installed in a terminal to appear: a miss is never cached, and a file that
-  // changed is asked its version again. Triggering a full look here instead kept asking the
-  // CLIs -- and kept their rows saying "probing" for as long as the person kept alt-tabbing
-  // back to the window.
-  useEffect(() => {
-    const onFocus = () => reload();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") reload();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [reload]);
+  // hub.ts shares focus/visibility refreshes with Home and the other pickers. These
+  // only read the list; a full version probe remains the person's explicit action.
 
   useEffect(
     () =>
@@ -683,7 +661,7 @@ function MemberCard({
 
 /** Edits an agent's card: name, face, persona, model. Agents are made by the start page or by a lead. */
 export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent; onDone: () => void; focusPermission?: boolean }) {
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
   const [name, setName] = useState(agent.name);
