@@ -683,6 +683,7 @@ mod tests {
         Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "cursor-work".into(),
             provider: "cursor".into(),
             label: String::new(),

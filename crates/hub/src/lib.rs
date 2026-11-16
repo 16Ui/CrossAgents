@@ -16,6 +16,7 @@ pub mod builtin_node;
 pub mod cli_runs;
 pub mod collab;
 pub mod devices;
+pub mod egress;
 pub mod event_log;
 pub mod extensions;
 pub mod guard;

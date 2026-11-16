@@ -2228,6 +2228,22 @@ impl Store for SqliteStore {
         }
     }
 
+    async fn update_account(&self, account: &Account) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE accounts SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(account).map_err(storage)?)
+            .bind(account.id.clone())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "account",
+                id: account.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     async fn get_account(&self, id: &str) -> Result<Account, CoreError> {
         let data: Option<String> = sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
             .bind(id.to_owned())
@@ -2427,6 +2443,7 @@ mod tests {
         let account = Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "codex-main".into(),
             provider: "codex".into(),
             label: "main".into(),

@@ -630,6 +630,7 @@ mod tests {
             home: PathBuf::from(format!("/accounts/{}", site.environment())),
             codebuddy_site: Some(site),
             egress: None,
+            proxy: None,
             created_at: Utc::now(),
         });
         for account in &accounts {
@@ -845,6 +846,7 @@ mod tests {
         let account = |home: PathBuf| Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "codebuddy".into(),
             provider: "codebuddy".into(),
             label: String::new(),

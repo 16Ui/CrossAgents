@@ -125,6 +125,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/egress$/, level: "admin" },
+  { method: "GET", path: /^\/v1\/egress\/candidates$/, level: "read" },
+  { method: "POST", path: /^\/v1\/egress\/proxies$/, level: "admin" },
   // Files of a scope: a session's cwd, a run's checkout, a task's worktree.
   { method: "GET", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/(tree|content|status|search)$/, level: "read" },
   { method: "POST", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/resolve$/, level: "read" },

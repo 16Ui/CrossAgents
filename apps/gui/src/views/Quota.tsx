@@ -18,6 +18,7 @@ import { useHubData } from "../hub";
 import { creditText, egressOf, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
 import { prettyModel } from "../lib/models";
 import { cursorMode } from "../lib/reasoning";
+import { EgressPicker } from "../egressPicks";
 import { useArmed } from "../parts";
 
 /** Live figures are cached by the hub for a minute; re-read about as often. */
@@ -208,6 +209,18 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
         ) : (
           <span className="muted">还没有记录到出口；下一次经代理启动会话时会采一次。</span>
         )}
+        <div className="spacer" />
+        <EgressPicker
+          compact
+          value={account.proxy ?? null}
+          defaultLabel="跟随默认（系统 / 环境代理）"
+          onChange={(next) => {
+            setError(undefined);
+            api
+              .setAccountEgress(account.id, { proxy: next })
+              .then(onChange, (err) => setError(errorText(err)));
+          }}
+        />
       </div>
 
       {/* The two states that stop work, as blocks rather than a grey line: the reason and

@@ -25,7 +25,9 @@ use crossagents_core::{
 };
 use crossagents_drivers::antigravity_native::wire::parse_models;
 use crossagents_drivers::locate::Cli;
-use crossagents_drivers::process::{hide_console, resolve_program};
+use crossagents_drivers::process::{
+    apply_proxy_env, explicit_proxy_env, hide_console, resolve_program,
+};
 use serde_json::Value;
 
 /// Live status is refreshed at most this often.
@@ -94,7 +96,7 @@ impl AntigravityAccounts {
 
     /// Captures a bounded CLI query. `models` may exit 1 when signed out; headless
     /// reports may return a structured error envelope on a non-zero exit.
-    async fn run(&self, args: &[&str]) -> Result<(String, String), String> {
+    async fn run(&self, account: &Account, args: &[&str]) -> Result<(String, String), String> {
         let Some(command) = self.command() else {
             return Err(NOT_INSTALLED.into());
         };
@@ -109,6 +111,7 @@ impl AntigravityAccounts {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        apply_proxy_env(&mut child, account.proxy.as_deref());
         hide_console(&mut child);
         let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
             .await
@@ -134,8 +137,8 @@ impl AntigravityAccounts {
 
     /// Whether the CLI is signed in, and what it lists. Signed out is the CLI saying so:
     /// `agy models` answers `Please sign in to view available models.`
-    async fn probe(&self) -> (bool, Vec<ModelInfo>, Option<String>) {
-        let (stdout, stderr) = match self.run(&["models"]).await {
+    async fn probe(&self, account: &Account) -> (bool, Vec<ModelInfo>, Option<String>) {
+        let (stdout, stderr) = match self.run(account, &["models"]).await {
             Ok(answer) => answer,
             Err(err) => return (false, Vec::new(), Some(err)),
         };
@@ -168,9 +171,9 @@ impl AntigravityAccounts {
         (!signed_out && !models.is_empty(), models, note)
     }
 
-    async fn report(&self, command: &str) -> Result<Value, String> {
+    async fn report(&self, account: &Account, command: &str) -> Result<Value, String> {
         let (stdout, stderr) = self
-            .run(&["-p", command, "--output-format", "json"])
+            .run(account, &["-p", command, "--output-format", "json"])
             .await?;
         let value: Value = serde_json::from_str(stdout.trim()).map_err(|_| {
             if stderr.trim().is_empty() {
@@ -197,14 +200,14 @@ impl AccountProvider for AntigravityAccounts {
         Some(PathBuf::from(home))
     }
 
-    async fn status(&self, _account: &Account) -> AccountStatus {
+    async fn status(&self, account: &Account) -> AccountStatus {
         if let Some((at, status, _)) = self.live.lock().unwrap().as_ref()
             && at.elapsed() < LIVE_TTL
             && !(status.note.as_deref() == Some(NOT_INSTALLED) && self.command().is_some())
         {
             return status.clone();
         }
-        let (logged_in, models, note) = self.probe().await;
+        let (logged_in, models, note) = self.probe(account).await;
         let mut status = AccountStatus {
             logged_in,
             auth_mode: logged_in.then(|| "google".to_owned()),
@@ -222,7 +225,8 @@ impl AccountProvider for AntigravityAccounts {
             note,
         };
         if logged_in {
-            let (quota, credits) = tokio::join!(self.report("/usage"), self.report("/credits"));
+            let (quota, credits) =
+                tokio::join!(self.report(account, "/usage"), self.report(account, "/credits"));
             let mut notes = Vec::new();
             match quota.and_then(|value| apply_quota(&mut status, &value)) {
                 Ok(()) => {}
@@ -272,7 +276,7 @@ impl AccountProvider for AntigravityAccounts {
     /// `<crossagents> agy-login --command <agy> --port <n>`: the helper serves the page the
     /// GUI opens, and writes the pasted code into `agy acp --login`. The hub watches the
     /// account until the CLI reports a sign-in.
-    fn login_command(&self, _account: &Account) -> LoginCommand {
+    fn login_command(&self, account: &Account) -> LoginCommand {
         let port = free_port().unwrap_or(8323);
         let mut command = self.login.clone().unwrap_or_else(|| {
             vec![
@@ -290,10 +294,17 @@ impl AccountProvider for AntigravityAccounts {
             Some(cli) => command.extend(cli),
             None => command.push("agy".into()),
         }
+        let proxy_env = explicit_proxy_env(account.proxy.as_deref());
+        let env_remove = proxy_env
+            .iter()
+            .filter(|(_, v)| v.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        let env = proxy_env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
         LoginCommand {
             command,
-            env: Default::default(),
-            env_remove: Vec::new(),
+            env,
+            env_remove,
             serves: Some(format!("http://127.0.0.1:{port}/")),
             opens_browser: false,
         }
@@ -303,10 +314,10 @@ impl AccountProvider for AntigravityAccounts {
         *self.live.lock().unwrap() = None;
     }
 
-    /// Nothing: the credential is in the OS keyring, not in the account's home, so there is
-    /// no variable that would point the CLI at another login.
-    fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
-        Vec::new()
+    /// The credential is in the OS keyring, not in the account's home, so only an explicit
+    /// proxy override is carried in the environment.
+    fn agent_env(&self, account: &Account) -> Vec<(String, String)> {
+        explicit_proxy_env(account.proxy.as_deref())
     }
 }
 
@@ -428,6 +439,7 @@ mod tests {
         Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "antigravity-main".into(),
             provider: "antigravity".into(),
             label: "Antigravity".into(),

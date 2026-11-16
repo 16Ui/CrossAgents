@@ -22,7 +22,7 @@ use crossagents_core::{
 };
 use crossagents_drivers::gemini_native::wire::parse_models;
 use crossagents_drivers::locate::Cli;
-use crossagents_drivers::process::{hide_console, resolve_program};
+use crossagents_drivers::process::{apply_proxy_env, hide_console, resolve_program};
 use serde_json::Value;
 
 /// The CLI is asked at most this often.
@@ -156,6 +156,7 @@ impl GeminiAccounts {
         for (key, value) in self.env_for(account) {
             child.env(key, value);
         }
+        apply_proxy_env(&mut child, account.proxy.as_deref());
         child
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -434,6 +435,7 @@ mod tests {
         Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "gemini-main".into(),
             provider: "gemini".into(),
             label: "Gemini".into(),

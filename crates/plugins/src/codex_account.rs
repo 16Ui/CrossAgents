@@ -816,6 +816,7 @@ pub(crate) mod tests {
         Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "codex-main".into(),
             provider: "codex".into(),
             label: "main".into(),

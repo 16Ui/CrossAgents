@@ -25,20 +25,20 @@ use crossagents_api_types::{
     BackgroundReminder, BackgroundResponse, BackgroundWatch, ChangesResponse, CliInfo,
     CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
     CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
-    ErrorCode, FEATURES, FileContentResponse, FileEntry, FileGitChange, FileKind,
-    FileSearchResponse, FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest,
-    GitBranch, GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph, GitGraphRef,
-    GitRefKind, GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef, GraphRefKind,
-    HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse,
-    ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse, ListNotesResponse,
-    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse,
-    ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunCostResponse,
-    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
-    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
-    VerifyingTask, WorkDetail,
+    EgressCandidatesResponse, ErrorCode, FEATURES, FileContentResponse, FileEntry, FileGitChange,
+    FileKind, FileSearchResponse, FileStatusEntry, FileStatusResponse, FileTreeResponse,
+    FinishRequest, GitBranch, GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph,
+    GitGraphRef, GitRefKind, GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef,
+    GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
+    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
+    RunCostResponse, RunDetail, RunTrace, SaveEgressProxyRequest, SendMessageRequest,
+    SendMessageResponse, SetAccountEgressRequest, SetModelRequest, SetPluginModelsRequest,
+    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
+    UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse,
+    UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -217,6 +217,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/accounts/{id}/usage", get(account_usage))
         .route("/v1/accounts/{id}/models", get(account_models))
         .route("/v1/accounts/{id}/login", post(account_login))
+        .route("/v1/accounts/{id}/egress", post(set_account_egress))
+        .route("/v1/egress/candidates", get(egress_candidates))
+        .route("/v1/egress/proxies", post(save_egress_proxy))
         .route("/v1/works", get(list_works).post(create_work))
         .route("/v1/works/{id}", get(get_work))
         .route("/v1/works/{id}/runs", post(create_work_run))
@@ -1000,6 +1003,23 @@ async fn agent_settings(
     let before = agent.config.get("setting_sources").cloned();
     let hooks_before = agent.config.get("allow_hooks").cloned();
     let permission_before = agent.config.get("permission").cloned();
+    let proxy_before = agent.config.get("proxy").cloned();
+    if let Some(proxy) = req.proxy {
+        match proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let normalized = crossagents_drivers::process::normalize_proxy_url(raw)
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!(
+                            "invalid proxy address {raw:?} (expected \"direct\", http://host:port or socks5://host:port)"
+                        ))
+                    })?;
+                agent.config["proxy"] = normalized.into();
+            }
+            None => {
+                agent.config.as_object_mut().unwrap().remove("proxy");
+            }
+        }
+    }
     if let Some(permission) = req.permission {
         if cfg!(windows)
             && agent.plugin == "cursor"
@@ -1055,7 +1075,8 @@ async fn agent_settings(
         .await?;
     if (agent.config.get("setting_sources").cloned() != before
         || agent.config.get("allow_hooks").cloned() != hooks_before
-        || agent.config.get("permission").cloned() != permission_before)
+        || agent.config.get("permission").cloned() != permission_before
+        || agent.config.get("proxy").cloned() != proxy_before)
         && agent.status == AgentStatus::Idle
     {
         state.runtime.stop(&AgentKey::Id(agent.id)).await?;
@@ -3429,6 +3450,76 @@ async fn account_login(
     Path(id): Path<String>,
 ) -> ApiResult<Json<LoginStarted>> {
     Ok(Json(state.accounts.login(&id).await?))
+}
+
+async fn set_account_egress(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<SetAccountEgressRequest>,
+) -> ApiResult<Json<Account>> {
+    let proxy_changed = req.proxy.is_some();
+    let account = state
+        .accounts
+        .update_egress(&id, req.proxy, req.egress)
+        .await?;
+    if proxy_changed && let Ok(agents) = state.store().list_agents().await {
+        for mut agent in agents {
+            let has_own_proxy = agent
+                .config
+                .get("proxy")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty());
+            if !has_own_proxy
+                && agent.status == AgentStatus::Idle
+                && state.accounts.account_for(&agent).await.as_deref() == Some(id.as_str())
+            {
+                let _ = state.runtime.stop(&AgentKey::Id(agent.id)).await;
+                agent.status = AgentStatus::Stopped;
+                let _ = state.bus.publish(EventKind::AgentUpdated { agent }).await;
+            }
+        }
+    }
+    Ok(Json(account))
+}
+
+async fn collect_configured_proxies(state: &AppState) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Ok(accounts) = state.store().list_accounts().await {
+        for account in accounts {
+            if let Some(proxy) = account.proxy {
+                urls.push(proxy);
+            }
+        }
+    }
+    if let Ok(agents) = state.store().list_agents().await {
+        for agent in agents {
+            if let Some(proxy) = agent.config.get("proxy").and_then(|v| v.as_str()) {
+                urls.push(proxy.to_owned());
+            }
+        }
+    }
+    urls
+}
+
+async fn egress_candidates(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<EgressCandidatesResponse>> {
+    let configured = collect_configured_proxies(&state).await;
+    let candidates = crate::egress::discover_candidates(
+        &state.home,
+        state.accounts.echo_url(),
+        &configured,
+    )
+    .await;
+    Ok(Json(EgressCandidatesResponse { candidates }))
+}
+
+async fn save_egress_proxy(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveEgressProxyRequest>,
+) -> ApiResult<Json<EgressCandidatesResponse>> {
+    crate::egress::save_proxy(&state.home, req)?;
+    egress_candidates(State(state)).await
 }
 
 #[derive(Debug, Deserialize)]

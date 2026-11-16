@@ -455,6 +455,7 @@ mod tests {
         let account = |home: PathBuf| Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: "claude".into(),
             provider: "claude".into(),
             label: String::new(),

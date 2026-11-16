@@ -41,7 +41,7 @@ use tokio::sync::mpsc;
 
 use crate::launch::{BoxWrite, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{StderrTail, hide_console, resolve_program};
+use crate::process::{StderrTail, hide_console, resolve_program, system_proxy_env};
 use wire::{Event, Step};
 
 /// How long `agy models` gets.
@@ -103,6 +103,7 @@ impl AntigravityDriver {
         child
             .args(extra)
             .arg("models")
+            .envs(system_proxy_env())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
@@ -362,11 +363,13 @@ impl AntigravitySession {
         let args = self.args();
         let (program, all_args) = crate::argv::launch_command(&self.command, args)
             .ok_or_else(|| CoreError::Agent("empty Antigravity launch command".into()))?;
+        let mut env = system_proxy_env();
+        env.extend(self.env.iter().cloned());
         let launched = crate::launch::launch(LaunchSpec {
             program,
             args: all_args,
             cwd: self.cwd.clone(),
-            env: self.env.clone(),
+            env,
             label: "Antigravity CLI".into(),
             ..LaunchSpec::default()
         })

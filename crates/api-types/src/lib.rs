@@ -374,6 +374,11 @@ pub struct AgentSettingsRequest {
         type = "import('./PermissionPolicy').PermissionPolicy | null"
     )]
     pub permission: Option<Option<crossagents_core::PermissionPolicy>>,
+    /// Absent keeps the current proxy override; null follows the account or system default;
+    /// `"direct"` forces a direct connection; `"http://..."` uses that proxy for this agent.
+    #[serde(default, deserialize_with = "stated", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub proxy: Option<Option<String>>,
 }
 
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
@@ -2598,6 +2603,72 @@ pub struct EgressFingerprint {
     pub country: Option<String>,
     pub via_proxy: Option<bool>,
     pub changed_at: Option<DateTime<Utc>>,
+}
+
+/// One candidate network exit (direct or proxy) discovered or saved on this machine,
+/// along with the IP and country observed through it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EgressCandidate {
+    /// `"direct"` for a direct connection without proxy, or a proxy URL (e.g. `"http://127.0.0.1:7890"`).
+    pub value: String,
+    /// Display label, e.g. `"直连"`, `"系统代理"`, `"本机 :7890"`, or a user-given name.
+    pub label: String,
+    /// `"direct"`, `"system"`, `"env"`, `"local"`, or `"custom"`.
+    pub source: String,
+    /// Observed public exit IP, when the probe succeeded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ip: Option<String>,
+    /// Observed two-letter ISO country code (`"US"`, `"HK"`, `"SG"`, `"JP"`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub country: Option<String>,
+    /// Observed ASN (`"AS13335"`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub asn: Option<String>,
+    /// Round-trip latency of the probe in milliseconds, when it answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub latency_ms: Option<u64>,
+    /// Why the probe failed, when the candidate did not answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `GET /v1/egress/candidates`: discovered and saved exit routes with their live IP/country.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EgressCandidatesResponse {
+    pub candidates: Vec<EgressCandidate>,
+}
+
+/// `POST /v1/egress/proxies`: add, rename or remove a custom proxy in the candidate pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SaveEgressProxyRequest {
+    pub url: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub label: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub remove: Option<bool>,
+}
+
+/// `POST /v1/accounts/{id}/egress`: set an account's proxy override (`None` = follow default,
+/// `"direct"` = direct connection, `"http://..."` = specific proxy) and/or egress policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetAccountEgressRequest {
+    #[serde(default, deserialize_with = "stated", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub proxy: Option<Option<String>>,
+    #[serde(default, deserialize_with = "stated", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "import('./EgressPolicy').EgressPolicy | null")]
+    pub egress: Option<Option<crossagents_core::EgressPolicy>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

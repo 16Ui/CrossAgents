@@ -94,7 +94,7 @@ pub struct Accounts {
     egress: std::sync::RwLock<EgressSettings>,
     fingerprint_settings: FingerprintSettings,
     fingerprint_lock: Mutex<()>,
-    fingerprint_proxy: std::sync::Mutex<HashMap<String, bool>>,
+    fingerprint_proxy: Arc<std::sync::Mutex<HashMap<String, bool>>>,
     /// Per-account risk record (`crossagents_core::Health`): counting and the pause live in
     /// [`crossagents_orchestrator::risk`]. An `Arc` so a background status read can record a
     /// login that fell away without holding `Accounts`. A paused account is excluded from
@@ -126,6 +126,76 @@ impl Accounts {
             block_country_change,
         };
         self
+    }
+
+    pub fn echo_url(&self) -> Option<&str> {
+        self.fingerprint_settings.echo_url.as_deref()
+    }
+
+    /// Updates an account's proxy override and/or egress policy, refreshes its live status,
+    /// and probes the selected exit in the background so the account's exit row updates.
+    pub async fn update_egress(
+        &self,
+        id: &str,
+        proxy: Option<Option<String>>,
+        egress: Option<Option<EgressPolicy>>,
+    ) -> Result<Account, CoreError> {
+        let mut account = self.store().get_account(id).await?;
+        if let Some(next_proxy) = proxy {
+            account.proxy = match next_proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                None => None,
+                Some(raw) => Some(
+                    crossagents_drivers::process::normalize_proxy_url(raw).ok_or_else(|| {
+                        CoreError::InvalidName(format!(
+                            "proxy address {raw:?} (expected \"direct\", http://host:port or socks5://host:port)"
+                        ))
+                    })?,
+                ),
+            };
+        }
+        if let Some(next_egress) = egress {
+            account.egress = next_egress;
+        }
+        self.store().update_account(&account).await?;
+        self.statuses.lock().unwrap().remove(id);
+        if let Ok(provider) = self.provider(&account.provider).cloned() {
+            provider.forget_status(&account);
+            self.refresh_status(account.clone(), provider);
+        }
+        let store = self.store().clone();
+        let bus = self.bus.clone();
+        let echo_url = self.fingerprint_settings.echo_url.clone();
+        let proxy_choice = account.proxy.clone();
+        let account_id = account.id.clone();
+        let via_proxy_map = self.fingerprint_proxy.clone();
+        tokio::spawn(async move {
+            let probe_target = match proxy_choice.as_deref() {
+                Some("direct") => Some("direct".to_owned()),
+                Some(url) => Some(url.to_owned()),
+                None => crossagents_drivers::process::effective_proxy_url(&[]),
+            };
+            let via_proxy = probe_target.as_deref() != Some("direct") && probe_target.is_some();
+            {
+                let mut states = via_proxy_map.lock().unwrap();
+                states.insert(account_id.clone(), via_proxy);
+            }
+            let (ip, asn, country) =
+                crate::egress::probe_exit(echo_url.as_deref(), probe_target.as_deref()).await;
+            if ip.is_some() {
+                let record = crossagents_core::EgressRecord {
+                    account: account_id.clone(),
+                    egress_ip: ip,
+                    asn,
+                    country,
+                    at: Utc::now(),
+                };
+                let _ = store.insert_egress_record(&record).await;
+            }
+            let _ = bus
+                .publish(EventKind::AccountQuotaUpdated { id: account_id })
+                .await;
+        });
+        Ok(account)
     }
 
     /// The latest observation, without assuming an unknown proxy state survived a restart.
@@ -316,7 +386,7 @@ impl Accounts {
                 ..Default::default()
             },
             fingerprint_lock: Mutex::new(()),
-            fingerprint_proxy: std::sync::Mutex::default(),
+            fingerprint_proxy: Arc::default(),
             risk: Arc::default(),
             egress_blocks: std::sync::Mutex::default(),
         }
@@ -370,6 +440,7 @@ impl Accounts {
             let probe = Account {
                 codebuddy_site: None,
                 egress: None,
+                proxy: None,
                 id: name.clone(),
                 provider: name.clone(),
                 label: String::new(),
@@ -544,6 +615,7 @@ impl Accounts {
         let account = Account {
             codebuddy_site: req.codebuddy_site,
             egress: None,
+            proxy: None,
             label: req.label.unwrap_or_else(|| req.id.clone()),
             id: req.id,
             provider: req.provider,
@@ -915,20 +987,47 @@ impl Accounts {
         models
     }
 
-    /// Environment for an agent bound to an account through `config.account`.
+    /// Environment for an agent bound to an account through `config.account`, plus any
+    /// per-account or per-agent proxy override (`config.proxy`).
     ///
     /// Carries the account's egress policy too, in [`EGRESS_ENV`]: drivers take it from the
     /// session's environment rather than reading configuration themselves.
     pub async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
-        let Some(id) = account_of(agent) else {
-            return Ok(Vec::new());
+        let agent_proxy = agent
+            .config
+            .get("proxy")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty());
+        let mut env = match account_of(agent) {
+            Some(id) => {
+                let account = self.store().get_account(&id).await?;
+                let mut env = self.provider(&account.provider)?.agent_env(&account);
+                if agent_proxy.is_none()
+                    && let Some(proxy) = account.proxy.as_deref()
+                {
+                    apply_proxy_pairs(&mut env, proxy);
+                }
+                env.push((
+                    EGRESS_ENV.to_owned(),
+                    self.egress_for(&account).as_str().to_owned(),
+                ));
+                env
+            }
+            None => {
+                let mut env = Vec::new();
+                if agent_proxy.is_none()
+                    && let Some(id) = self.account_for(agent).await
+                    && let Ok(account) = self.store().get_account(&id).await
+                    && let Some(proxy) = account.proxy.as_deref()
+                {
+                    apply_proxy_pairs(&mut env, proxy);
+                }
+                env
+            }
         };
-        let account = self.store().get_account(&id).await?;
-        let mut env = self.provider(&account.provider)?.agent_env(&account);
-        env.push((
-            EGRESS_ENV.to_owned(),
-            self.egress_for(&account).as_str().to_owned(),
-        ));
+        if let Some(proxy) = agent_proxy {
+            apply_proxy_pairs(&mut env, proxy);
+        }
         Ok(env)
     }
 
@@ -1086,8 +1185,11 @@ impl Accounts {
         for key in &login.env_remove {
             command.env_remove(key);
         }
+        command.envs(&login.env);
+        if let Some(proxy) = account.proxy.as_deref() {
+            crossagents_drivers::process::apply_proxy_env(&mut command, Some(proxy));
+        }
         command
-            .envs(&login.env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1590,6 +1692,17 @@ pub fn account_of(agent: &Agent) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn apply_proxy_pairs(env: &mut Vec<(String, String)>, proxy: &str) {
+    let pairs = crossagents_drivers::process::explicit_proxy_env(Some(proxy));
+    if pairs.is_empty() {
+        return;
+    }
+    env.retain(|(k, _)| {
+        !crossagents_drivers::process::is_proxy_env_key(k) && !k.eq_ignore_ascii_case("NO_PROXY")
+    });
+    env.extend(pairs);
+}
+
 fn outside(ours: bool) -> String {
     if ours {
         "(unknown CrossAgents agent)".into()
@@ -2058,6 +2171,7 @@ mod login_tests {
         let account = Account {
             codebuddy_site: None,
             egress: None,
+            proxy: None,
             id: format!("{provider_name}-work"),
             provider: provider_name.clone(),
             label: "work".into(),
@@ -3375,6 +3489,7 @@ mod egress_tests {
         Account {
             codebuddy_site: None,
             egress,
+            proxy: None,
             id: id.into(),
             provider: provider.into(),
             label: String::new(),
