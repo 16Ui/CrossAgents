@@ -35,6 +35,9 @@ const LIVE_TTL: Duration = Duration::from_secs(60);
 /// China and its fallback (the CLI's `CN_SAAS_CORE_API_*` origins). WorkBuddy calls the same
 /// path with the same login.
 const BILLING_ORIGINS: [&str; 2] = ["https://www.workbuddy.cn", "https://copilot.tencent.com"];
+/// The international site answers on the same path (an unauthenticated GET there is a 401,
+/// not a 404). Credentials never cross sites: an international login asks only here.
+const INTL_BILLING_ORIGINS: [&str; 1] = ["https://www.codebuddy.ai"];
 const BILLING_PATH: &str = "/billing/meter/get-user-resource-summary";
 const BILLING_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -184,17 +187,26 @@ impl CodebuddyAccounts {
                 model.credit_multiplier = rates.get(&model.id).copied();
             }
         }
-        if account.codebuddy_site == Some(CodebuddySite::International) && status.logged_in {
-            // Do not send an international credential to the mainland billing API.
-            status.note = Some("International CodeBuddy login and models are available; its billing endpoint is not integrated".into());
-        } else if account.codebuddy_site != Some(CodebuddySite::International)
+        // Billing: credentials never cross sites — an international login asks the
+        // international origin, a mainland (or machine) login the mainland origins.
+        let billing_origins: &[&str] = match account.codebuddy_site {
+            Some(CodebuddySite::International) => INTL_BILLING_ORIGINS.as_slice(),
+            _ => BILLING_ORIGINS.as_slice(),
+        };
+        if status.logged_in
             && let Some((token, uid)) =
                 login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
         {
-            match billing_summary(token, uid).await {
+            match billing_summary(token, uid, billing_origins).await {
                 Ok(summary) => read_summary(&mut status, &summary),
                 Err(err) => status.note = Some(format!("cannot read credits: {err}")),
             }
+        } else if account.codebuddy_site == Some(CodebuddySite::International) && status.logged_in {
+            status.note = Some(
+                "International login is in place, but the CLI answer carried no token/uid to \
+                 ask the billing API with"
+                    .into(),
+            );
         }
         (status, models)
     }
@@ -202,7 +214,7 @@ impl CodebuddyAccounts {
 
 /// The login's billing summary (`data` of the answer). The token goes into this request's
 /// header and nowhere else; errors name the origin, never the token.
-async fn billing_summary(token: &str, uid: &str) -> Result<Value, String> {
+async fn billing_summary(token: &str, uid: &str, origins: &[&str]) -> Result<Value, String> {
     let http = reqwest::Client::builder()
         .timeout(BILLING_TIMEOUT)
         // Without one the API answers "请求不合法" (code 10085).
@@ -210,7 +222,7 @@ async fn billing_summary(token: &str, uid: &str) -> Result<Value, String> {
         .build()
         .map_err(|e| e.to_string())?;
     let mut failures = Vec::new();
-    for origin in BILLING_ORIGINS {
+    for origin in origins {
         let answer = http
             .post(format!("{origin}{BILLING_PATH}"))
             .bearer_auth(token)

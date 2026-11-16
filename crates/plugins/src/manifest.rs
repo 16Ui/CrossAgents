@@ -214,7 +214,10 @@ fn parse_in(
             hidden: manifest.hidden,
             provider: Some(manifest.provider.unwrap_or_else(|| manifest.name.clone())),
             model_env: manifest.model_env,
-            driver: manifest.driver,
+            // Stored resolved: an ACP entry that says nothing is `acp-generic`, so a reader
+            // never has to guess the entry's protocol. Every native builtin names its driver
+            // explicitly; `None` only survives for entries a config overlay trimmed down.
+            driver: Some(manifest.driver.unwrap_or_default()),
             native_command,
             efforts,
             min_version: manifest.min_version,

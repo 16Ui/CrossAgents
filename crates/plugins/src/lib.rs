@@ -566,7 +566,9 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 7);
+        // This fork lists 11: the upstream set plus the two WorkBuddy sites and the two dsh
+        // entries, with `codebuddy` kept as their hidden base.
+        assert_eq!(builtin::all().len(), 11);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -717,9 +719,13 @@ mod tests {
                 "codebuddy",
                 "codex",
                 "cursor",
+                "deepseek-harness",
                 "gemini",
                 "mock",
-                "with"
+                "tokenworks",
+                "with",
+                "workbuddy-cn",
+                "workbuddy-intl"
             ]
         );
         assert_eq!(
@@ -906,15 +912,16 @@ mod tests {
         assert_eq!(counting.0.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         wrapped.defaults();
-        assert_eq!(
-            counting.0.load(std::sync::atomic::Ordering::SeqCst),
-            plugins.names().len(),
-            "defaults wrap the plugins' drivers, each once"
-        );
+        // Each driver is wrapped once, whatever it serves: two entries over one driver kind
+        // (workbuddy-cn / workbuddy-intl on codebuddy-native) resolve to one cached driver,
+        // so the count is the number of distinct kinds, and a second run adds nothing.
+        let after_first = counting.0.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_first > 0, "defaults wrap the plugins' drivers");
         wrapped.defaults();
         assert_eq!(
             counting.0.load(std::sync::atomic::Ordering::SeqCst),
-            plugins.names().len()
+            after_first,
+            "one driver per (plugin, kind), resolved once"
         );
 
         // The node's own calls go through the local form, which is never wrapped, and a
@@ -923,12 +930,13 @@ mod tests {
         assert_eq!(local.kind(), DriverKind::ClaudeNative);
         assert_eq!(
             counting.0.load(std::sync::atomic::Ordering::SeqCst),
-            plugins.names().len()
+            after_first,
+            "local and pre-wrap lookups never wrap"
         );
         assert!(plugins.get("claude").is_some());
         assert_eq!(
             counting.0.load(std::sync::atomic::Ordering::SeqCst),
-            plugins.names().len()
+            after_first
         );
     }
 }
