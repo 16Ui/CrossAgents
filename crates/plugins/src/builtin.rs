@@ -53,6 +53,7 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         out.push((name, config));
     }
     out
+});
 
 /// Every built-in description, in the order the API lists them.
 pub fn all() -> &'static [(String, PluginConfig)] {
