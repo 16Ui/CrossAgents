@@ -40,11 +40,11 @@ function setStatus(next: ConnectionStatus) {
  * matches; a hub that speaks another one is refused, never half-used.
  */
 function setTransport(next: ConnectionStatus) {
+  clearTimeout(pluginRefresh);
+  pluginRefresh = undefined;
   // A reconnect may reach a restarted or different hub. Discard old in-flight reads too.
   if (next !== "connected") {
     connectionEpoch++;
-    clearTimeout(pluginRefresh);
-    pluginRefresh = undefined;
     pluginCatalog.reset();
   }
   transport = next;
@@ -197,11 +197,12 @@ export type Loaded<T> = { data?: T; error?: string; loading: boolean; reload: ()
 const pluginCatalog = new ResourceCache(() => api.listPlugins().then((r) => r.plugins));
 let pluginRefresh: ReturnType<typeof setTimeout> | undefined;
 function schedulePlugins() {
+  if (status !== "connected") return;
   // Coalesce a burst without starving refreshes under a continuous quota event stream.
   if (pluginRefresh !== undefined) return;
   pluginRefresh = setTimeout(() => {
     pluginRefresh = undefined;
-    void pluginCatalog.refresh();
+    if (status === "connected") void pluginCatalog.refresh();
   }, 250);
 }
 onHubEvent((event) => {
@@ -211,13 +212,16 @@ onHubEvent((event) => {
     schedulePlugins();
   }
 });
-statusListeners.add(() => { if (status === "connected") schedulePlugins(); });
+// First usable connection has no event burst to debounce. Start immediately; mounts
+// join this read, and reconnect/identity resets have already discarded the old list.
+statusListeners.add(() => { if (status === "connected") pluginCatalog.ensure(); });
+const refreshPlugins = () => status === "connected" ? pluginCatalog.refresh() : Promise.resolve();
 
 /** A shared model list for every picker; no empty flash when Home is mounted again. */
 export function usePlugins() {
   const state = useSyncExternalStore(pluginCatalog.subscribe, pluginCatalog.snapshot);
-  useEffect(() => { pluginCatalog.ensure(); }, []);
-  return { ...state, reload: pluginCatalog.refresh };
+  useEffect(() => { if (status === "connected") pluginCatalog.ensure(); }, []);
+  return { ...state, reload: refreshPlugins };
 }
 
 /**
@@ -238,9 +242,10 @@ export function useHubData<T>(
   const applied = useRef(0);
 
   const reload = useCallback(() => {
+    if (status !== "connected") return;
     const mine = ++generation.current;
     const epoch = connectionEpoch;
-    const fresh = () => epoch === connectionEpoch && mine > applied.current && ((applied.current = mine), true);
+    const fresh = () => status === "connected" && epoch === connectionEpoch && mine > applied.current && ((applied.current = mine), true);
     load().then(
       (data) => fresh() && setState({ data, loading: false }),
       (err) => fresh() && setState((s) => ({ data: s.data, error: errorText(err), loading: false })),
@@ -260,7 +265,12 @@ export function useHubData<T>(
     const offEvent = onHubEvent((e) => relevantRef.current(e) && schedule());
     let prev = status;
     const onStatus = () => {
-      if (status !== "connected") setState({ loading: true });
+      if (status !== "connected") {
+        clearTimeout(timer);
+        // Even a version recheck without a transport drop invalidates pending reads.
+        applied.current = generation.current;
+        setState({ loading: true });
+      }
       if (status === "connected" && prev !== "connected") schedule();
       prev = status;
     };
