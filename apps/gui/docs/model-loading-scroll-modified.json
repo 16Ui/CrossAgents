@@ -1,0 +1,237 @@
+{
+  "electron": "44.6.0",
+  "chromium": "152.0.7977.130",
+  "viewport": [
+    1280,
+    800
+  ],
+  "catalogDelayMs": 800,
+  "coldChatMs": 915,
+  "warmWorkToChatMs": 2,
+  "returnChatMs": 1,
+  "readBefore": 1,
+  "menu": {
+    "options": 8,
+    "reads": 1,
+    "overflow": "auto",
+    "afterWheel": {
+      "inner": 159,
+      "x": 0,
+      "outer": 0,
+      "left": 0,
+      "window": 0
+    },
+    "atBoundary": {
+      "inner": 159,
+      "x": 0,
+      "outer": 0,
+      "left": 0,
+      "window": 0
+    }
+  },
+  "nativeWheelMatrix": {
+    "#wheel-code": {
+      "before": {
+        "inner": 0,
+        "x": 0,
+        "outer": 316,
+        "left": 0,
+        "window": 0
+      },
+      "inside": {
+        "inner": 160,
+        "x": 0,
+        "outer": 316,
+        "left": 0,
+        "window": 0
+      },
+      "boundaryBefore": {
+        "inner": 11084,
+        "x": 0,
+        "outer": 316,
+        "left": 0,
+        "window": 0
+      },
+      "boundaryAfter": {
+        "inner": 11084,
+        "x": 0,
+        "outer": 476,
+        "left": 0,
+        "window": 0
+      },
+      "topBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 356,
+        "left": 0,
+        "window": 0
+      },
+      "topAfter": {
+        "inner": 0,
+        "x": 0,
+        "outer": 196,
+        "left": 0,
+        "window": 0
+      }
+    },
+    "#wheel-panel": {
+      "before": {
+        "inner": 0,
+        "x": 0,
+        "outer": 33,
+        "left": 0,
+        "window": 0
+      },
+      "inside": {
+        "inner": 160,
+        "x": 0,
+        "outer": 33,
+        "left": 0,
+        "window": 0
+      },
+      "boundaryBefore": {
+        "inner": 2669,
+        "x": 0,
+        "outer": 33,
+        "left": 0,
+        "window": 0
+      },
+      "boundaryAfter": {
+        "inner": 2669,
+        "x": 0,
+        "outer": 193,
+        "left": 0,
+        "window": 0
+      },
+      "topBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 73,
+        "left": 0,
+        "window": 0
+      },
+      "topAfter": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 0,
+        "window": 0
+      }
+    },
+    "input": {
+      "inputBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 0,
+        "window": 0
+      },
+      "inputAfter": {
+        "inner": 90,
+        "x": 0,
+        "outer": 0,
+        "left": 0,
+        "window": 0
+      },
+      "boundary": {
+        "inner": 4135,
+        "x": 0,
+        "outer": 0,
+        "left": 0,
+        "window": 0
+      }
+    },
+    "sidebar": {
+      "sideBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 0,
+        "window": 0
+      },
+      "sideAfter": {
+        "inner": 160,
+        "x": 0,
+        "outer": 0,
+        "left": 160,
+        "window": 0
+      },
+      "boundary": {
+        "inner": 1625,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      }
+    },
+    "right": {
+      "rightBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "rightAfter": {
+        "inner": 160,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "boundary": {
+        "inner": 1499,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      }
+    },
+    "horizontal": {
+      "horizontalBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "horizontalAfter": {
+        "inner": 0,
+        "x": 160,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "boundary": {
+        "inner": 0,
+        "x": 35488,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      }
+    },
+    "modal": {
+      "modalBefore": {
+        "inner": 0,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "modalAfter": {
+        "inner": 160,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      },
+      "boundary": {
+        "inner": 998,
+        "x": 0,
+        "outer": 0,
+        "left": 1625,
+        "window": 0
+      }
+    }
+  }
+}

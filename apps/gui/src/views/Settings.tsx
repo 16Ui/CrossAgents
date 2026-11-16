@@ -9,7 +9,7 @@ import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
 import { ErrorBox, FamilyMark, Icon, VendorMark, type IconName } from "../components";
-import { useConnectionStatus, useHubData } from "../hub";
+import { useConnectionStatus, usePlugins } from "../hub";
 import { useFeatureSupport } from "../lib/features";
 import { buildTag } from "../lib/build";
 import { useUpdateState } from "../lib/updates";
@@ -214,7 +214,7 @@ function UpdateCard() {
 
 /** Per vendor, every model its logins can use, each with a switch for whether pickers list it. */
 function ModelsPage() {
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], (e) => e.type.startsWith("account."));
+  const plugins = usePlugins();
   const [query, setQuery] = useState("");
   const list = (plugins.data ?? []).filter((p) => p.all_models.length > 0);
   return (

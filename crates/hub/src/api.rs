@@ -1908,6 +1908,10 @@ async fn set_plugin_models(
             id: name.clone(),
         })?;
     state.models.set(&name, req.shown)?;
+    state
+        .bus
+        .publish(EventKind::PluginChanged { name: name.clone() })
+        .await?;
     Ok(Json(plugin_info(&state, driver.as_ref()).await))
 }
 
@@ -3505,12 +3509,9 @@ async fn egress_candidates(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<EgressCandidatesResponse>> {
     let configured = collect_configured_proxies(&state).await;
-    let candidates = crate::egress::discover_candidates(
-        &state.home,
-        state.accounts.echo_url(),
-        &configured,
-    )
-    .await;
+    let candidates =
+        crate::egress::discover_candidates(&state.home, state.accounts.echo_url(), &configured)
+            .await;
     Ok(Json(EgressCandidatesResponse { candidates }))
 }
 

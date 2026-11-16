@@ -36,6 +36,24 @@ const STATUS_TTL: Duration = Duration::from_secs(60);
 /// The last status read per account, with when.
 type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
 
+#[derive(Default)]
+struct ModelReads {
+    next: u64,
+    entries: HashMap<String, ModelRead>,
+}
+
+struct ModelRead {
+    identity: String,
+    ticket: u64,
+    at: Instant,
+    loading: bool,
+    models: Vec<String>,
+}
+
+fn model_identity(account: &Account) -> String {
+    serde_json::to_string(account).unwrap()
+}
+
 /// The per-account risk record ([`crossagents_core::Health`]), shared with background reads.
 type RiskRecords = std::sync::Mutex<HashMap<String, crossagents_core::Health>>;
 
@@ -83,6 +101,9 @@ pub struct Accounts {
     /// Status reads, served at once: a provider read can take seconds (it may start the
     /// vendor's CLI), so only an account's first one is waited for.
     statuses: Statuses,
+    /// Owned by this hub instance, keyed by the full account configuration. A ticket
+    /// prevents a pre-login or pre-install response from repopulating invalidated data.
+    model_reads: Arc<std::sync::Mutex<ModelReads>>,
     /// Accounts whose status is being read in the background.
     refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
     refresh_attempts: std::sync::Mutex<HashMap<String, Instant>>,
@@ -158,6 +179,7 @@ impl Accounts {
         }
         self.store().update_account(&account).await?;
         self.statuses.lock().unwrap().remove(id);
+        self.model_reads.lock().unwrap().entries.remove(id);
         if let Ok(provider) = self.provider(&account.provider).cloned() {
             provider.forget_status(&account);
             self.refresh_status(account.clone(), provider);
@@ -376,6 +398,7 @@ impl Accounts {
             logins: Arc::default(),
             observed: std::sync::Mutex::default(),
             statuses: Arc::default(),
+            model_reads: Arc::default(),
             refreshing: Arc::default(),
             refresh_attempts: std::sync::Mutex::default(),
             default_models: Arc::default(),
@@ -429,7 +452,9 @@ impl Accounts {
     /// Registers each provider's own login (e.g. `~/.codex`) as an account, if it is
     /// logged in and no account uses that home yet. Agents without an account run there.
     pub async fn detect_defaults(&self) -> Result<(), CoreError> {
-        let existing = self.store().list_accounts().await?;
+        use futures::{StreamExt, stream::FuturesUnordered};
+        let mut existing = self.store().list_accounts().await?;
+        let mut probes = FuturesUnordered::new();
         for (name, provider) in &self.providers {
             let Some(home) = provider.default_home() else {
                 continue;
@@ -447,7 +472,12 @@ impl Accounts {
                 home: home.clone(),
                 created_at: Utc::now(),
             };
-            if !provider.status(&probe).await.logged_in {
+            probes.push(async move { (name, provider.status(&probe).await.logged_in, probe) });
+        }
+        // Register each login as soon as it answers. An unrelated slow quota/status
+        // provider must not delay discovering another provider's accounts or models.
+        while let Some((name, logged_in, probe)) = probes.next().await {
+            if !logged_in || existing.iter().any(|a| same_path(&a.home, &probe.home)) {
                 continue;
             }
             let id = if existing.iter().any(|a| a.id == *name) {
@@ -461,6 +491,7 @@ impl Accounts {
                 ..probe
             };
             self.store().insert_account(&account).await?;
+            existing.push(account.clone());
             self.bus
                 .publish(EventKind::AccountCreated { account })
                 .await?;
@@ -635,6 +666,7 @@ impl Accounts {
     pub async fn remove(&self, id: &str) -> Result<(), CoreError> {
         self.store().delete_account(id).await?;
         self.statuses.lock().unwrap().remove(id);
+        self.model_reads.lock().unwrap().entries.remove(id);
         self.egress_blocks.lock().unwrap().remove(id);
         if let Some(mut login) = self.logins.lock().await.remove(id) {
             login.kill();
@@ -970,19 +1002,85 @@ impl Accounts {
     /// The model ids `plugin`'s logins report, each once, in the order the first login to
     /// report it lists them. Empty when the plugin has no accounts or none reported yet.
     pub async fn offered_models(&self, plugin: &str) -> Vec<String> {
-        let Ok(provider) = self.provider(plugin) else {
+        let Ok(provider) = self.provider(plugin).cloned() else {
             return Vec::new();
         };
         let Ok(accounts) = self.store().list_accounts().await else {
             return Vec::new();
         };
         let mut models: Vec<String> = Vec::new();
-        for account in accounts.iter().filter(|a| a.provider == plugin) {
-            for model in provider.models(account).await {
-                if !models.contains(&model.id) {
-                    models.push(model.id);
+        for account in accounts.into_iter().filter(|a| a.provider == plugin) {
+            let identity = model_identity(&account);
+            let mut reads = self.model_reads.lock().unwrap();
+            if reads
+                .entries
+                .get(&account.id)
+                .is_some_and(|r| r.identity != identity)
+            {
+                reads.entries.remove(&account.id);
+            }
+            if let Some(read) = reads.entries.get(&account.id) {
+                for model in &read.models {
+                    if !models.contains(model) {
+                        models.push(model.clone());
+                    }
+                }
+                if read.loading || read.at.elapsed() < STATUS_TTL {
+                    continue;
                 }
             }
+            reads.next += 1;
+            let ticket = reads.next;
+            let previous = reads
+                .entries
+                .remove(&account.id)
+                .map(|r| r.models)
+                .unwrap_or_default();
+            reads.entries.insert(
+                account.id.clone(),
+                ModelRead {
+                    identity,
+                    ticket,
+                    at: Instant::now(),
+                    loading: true,
+                    models: previous,
+                },
+            );
+            drop(reads);
+            let provider = provider.clone();
+            let cache = self.model_reads.clone();
+            let bus = self.bus.clone();
+            tokio::spawn(async move {
+                // No vendor CLI or network query is on GET /plugins' critical path.
+                let result =
+                    tokio::time::timeout(Duration::from_secs(30), provider.models(&account)).await;
+                let changed = {
+                    let mut reads = cache.lock().unwrap();
+                    let Some(read) = reads
+                        .entries
+                        .get_mut(&account.id)
+                        .filter(|r| r.ticket == ticket)
+                    else {
+                        return;
+                    };
+                    read.loading = false;
+                    read.at = Instant::now();
+                    match result {
+                        Ok(result) => {
+                            let result: Vec<_> = result.into_iter().map(|m| m.id).collect();
+                            let changed = read.models != result;
+                            read.models = result;
+                            changed
+                        }
+                        Err(_) => false,
+                    }
+                };
+                if changed {
+                    let _ = bus
+                        .publish(EventKind::AccountQuotaUpdated { id: account.id })
+                        .await;
+                }
+            });
         }
         models
     }
@@ -1450,6 +1548,9 @@ impl Accounts {
 
     async fn on_event(&self, event: &Event) {
         match &event.kind {
+            EventKind::AccountLoginFinished { id, .. } | EventKind::AccountRemoved { id } => {
+                self.model_reads.lock().unwrap().entries.remove(id);
+            }
             EventKind::AgentRateLimits { id, limits } => {
                 if let Some(account) = self.observe(*id, limits).await {
                     let _ = self
@@ -1466,6 +1567,7 @@ impl Accounts {
                     return;
                 };
                 for account in accounts.into_iter().filter(|a| a.provider == *name) {
+                    self.model_reads.lock().unwrap().entries.remove(&account.id);
                     provider.forget_status(&account);
                     self.refresh_status(account, provider.clone());
                 }
@@ -2227,6 +2329,220 @@ mod login_tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    struct GatedModels {
+        name: &'static str,
+        home: Option<PathBuf>,
+        status_gate: Option<Arc<tokio::sync::Semaphore>>,
+        reads: AtomicUsize,
+        gate: tokio::sync::Semaphore,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountProvider for GatedModels {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn default_home(&self) -> Option<PathBuf> {
+            self.home.clone()
+        }
+        async fn status(&self, account: &Account) -> AccountStatus {
+            if let Some(gate) = &self.status_gate {
+                gate.acquire().await.unwrap().forget();
+            }
+            PrintLogin {
+                logged_in: true,
+                url: "",
+            }
+            .status(account)
+            .await
+        }
+        async fn sessions(&self, _: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+            Ok(Vec::new())
+        }
+        async fn models(&self, account: &Account) -> Vec<ModelInfo> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.gate.acquire().await.unwrap().forget();
+            let id = account.label.clone();
+            vec![ModelInfo {
+                id: id.clone(),
+                name: id,
+                description: None,
+                context_window: None,
+                credit_multiplier: None,
+            }]
+        }
+        fn login_command(&self, _: &Account) -> LoginCommand {
+            panic!("no login in model test")
+        }
+        fn agent_env(&self, _: &Account) -> Vec<(String, String)> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn offered_models_is_nonblocking_coalesced_and_account_scoped() {
+        let provider = Arc::new(GatedModels {
+            name: "cursor",
+            home: None,
+            status_gate: None,
+            reads: AtomicUsize::new(0),
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let (accounts, bus, _dir, mut account) = accounts_with_any(provider.clone()).await;
+        let started = Instant::now();
+        for _ in 0..10 {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), accounts.offered_models("cursor"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        eprintln!("cold nonblocking model reads: {:?}", started.elapsed());
+        wait_for(|| provider.reads.load(Ordering::SeqCst) == 1).await;
+        // Editing the account must not accept the old in-flight result.
+        account.label = "new-account-model".into();
+        bus.store().update_account(&account).await.unwrap();
+        assert!(accounts.offered_models("cursor").await.is_empty());
+        wait_for(|| provider.reads.load(Ordering::SeqCst) == 2).await;
+        provider.gate.add_permits(2);
+        wait_for(|| {
+            accounts
+                .model_reads
+                .lock()
+                .unwrap()
+                .entries
+                .get(&account.id)
+                .is_some_and(|r| !r.loading)
+        })
+        .await;
+        assert_eq!(
+            accounts.offered_models("cursor").await,
+            ["new-account-model"]
+        );
+        assert_eq!(provider.reads.load(Ordering::SeqCst), 2);
+        // Plugin install/uninstall/refresh and successful login discard the account list.
+        for kind in [
+            EventKind::PluginChanged {
+                name: "cursor".into(),
+            },
+            EventKind::AccountLoginFinished {
+                id: account.id.clone(),
+                ok: true,
+                message: None,
+            },
+        ] {
+            let event = bus.publish(kind).await.unwrap();
+            accounts.on_event(&event).await;
+            assert!(accounts.offered_models("cursor").await.is_empty());
+            provider.gate.add_permits(1);
+            wait_for(|| {
+                accounts
+                    .model_reads
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .get(&account.id)
+                    .is_some_and(|r| !r.loading)
+            })
+            .await;
+            assert_eq!(
+                accounts.offered_models("cursor").await,
+                ["new-account-model"]
+            );
+        }
+        accounts.remove(&account.id).await.unwrap();
+        assert!(accounts.offered_models("cursor").await.is_empty());
+        // A different hub owns a different cache, even with the same account id.
+        let (other, _, _other_dir, _) = accounts_with_any(provider.clone()).await;
+        assert!(other.offered_models("cursor").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_slow_model_provider_does_not_hold_back_another_provider() {
+        let slow = Arc::new(GatedModels {
+            name: "slow",
+            home: None,
+            status_gate: None,
+            reads: AtomicUsize::new(0),
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let (_, bus, dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "models-test",
+        })
+        .await;
+        let mut slow_account = account.clone();
+        slow_account.id = "slow-work".into();
+        slow_account.provider = "slow".into();
+        bus.store().insert_account(&slow_account).await.unwrap();
+        let accounts = Accounts::new(
+            bus,
+            vec![
+                slow.clone(),
+                Arc::new(PrintLogin {
+                    logged_in: true,
+                    url: "models-test",
+                }),
+            ],
+            dir.path().to_path_buf(),
+        );
+        assert!(accounts.offered_models("slow").await.is_empty());
+        assert!(accounts.offered_models("cursor").await.is_empty());
+        wait_for(|| {
+            accounts
+                .model_reads
+                .lock()
+                .unwrap()
+                .entries
+                .get(&account.id)
+                .is_some_and(|r| !r.loading)
+        })
+        .await;
+        assert_eq!(accounts.offered_models("cursor").await, ["restored"]);
+        assert!(accounts.offered_models("slow").await.is_empty());
+        slow.gate.add_permits(1);
+    }
+
+    #[tokio::test]
+    async fn cold_account_discovery_publishes_fast_logins_before_slow_status_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let bus = Arc::new(EventBus::new(store));
+        let mut events = bus.subscribe();
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let slow = Arc::new(GatedModels {
+            name: "a-slow",
+            home: Some(dir.path().join("slow")),
+            status_gate: Some(gate.clone()),
+            reads: AtomicUsize::new(0),
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let fast = Arc::new(GatedModels {
+            name: "z-fast",
+            home: Some(dir.path().join("fast")),
+            status_gate: None,
+            reads: AtomicUsize::new(0),
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let accounts = Arc::new(Accounts::new(
+            bus,
+            vec![slow, fast],
+            dir.path().to_path_buf(),
+        ));
+        let pending = tokio::spawn(async move { accounts.detect_defaults().await });
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event.kind, EventKind::AccountCreated { account } if account.provider == "z-fast")
+        );
+        assert!(!pending.is_finished());
+        gate.add_permits(1);
+        pending.await.unwrap().unwrap();
     }
 
     #[tokio::test]
