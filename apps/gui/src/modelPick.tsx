@@ -6,7 +6,7 @@ import { useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "./api";
 import { Icon, VendorMark } from "./components";
-import { useHubData } from "./hub";
+import { usePlugins } from "./hub";
 import { accountOf, effortLabel, effortLevels, effortOf } from "./lib/models";
 import { modelDisplay } from "./lib/modelDisplay";
 import { cursorMode, reasoningModels } from "./lib/reasoning";
@@ -16,7 +16,7 @@ import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
 
 export function ModelEffortPicks({ agent }: { agent: Agent }) {
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const [error, setError] = useState<string>();
   const quota = useQuota();
   const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], accountOf(agent));

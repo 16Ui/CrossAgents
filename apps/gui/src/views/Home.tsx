@@ -7,7 +7,7 @@ import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentLine, agentTitle, displayName, hueOf, relationText, sessionLabel, useAgents } from "../components";
-import { useHubData } from "../hub";
+import { useHubData, usePlugins } from "../hub";
 import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
 import { modelDisplay } from "../lib/modelDisplay";
@@ -70,7 +70,7 @@ function save(key: string, value: unknown) {
  */
 export function HomeView() {
   const agents = useAgents();
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const scope = useSelectedWorkspace();
   const { list: all } = useWorkspaces();
   // Projects only: the chats group is not a directory to work in.

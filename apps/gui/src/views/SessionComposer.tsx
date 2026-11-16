@@ -9,7 +9,7 @@ import { api, errorText } from "../api";
 import { HeldFiles, MiniFiles, useHeld } from "../attach";
 import { ErrorBox, Icon, Vendor, displayName } from "../components";
 import { useCompact } from "../contextusage";
-import { useHubData } from "../hub";
+import { useHubData, usePlugins } from "../hub";
 import { supportNote } from "../lib/attachments";
 // `draft` is this file's word for the text being typed, so the module keeps the plural.
 import * as drafts from "../lib/draft";
@@ -104,7 +104,7 @@ export function Composer({
   const [deferred, setDeferred] = useState<string[]>([]);
   const [keepNote, setKeepNote] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
   const compact = useCompact(agent);
   const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],

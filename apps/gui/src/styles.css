@@ -1149,14 +1149,14 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 
 /* Questions and notices for the person (H1-2). */
-.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; max-height: 45vh; overflow-y: auto; overscroll-behavior: contain; }
+.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; max-height: 45vh; overflow-y: auto; }
 .dock-asks > .asks { margin-bottom: 0; }
 .dock-asks:empty { display: none; }
 .ask { flex-shrink: 0; background: var(--surface); border: 1px solid var(--border-strong); border-left: 3px solid var(--link); border-radius: var(--radius-lg); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
 .ask.ask-notice { border-left-color: var(--border-strong); padding: 8px 12px; gap: 4px; flex-shrink: 0; }
 .ask-notice .ask-text { font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
 .ask-notice .ask-text.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
-.ask-notice .ask-text.opened { max-height: 32vh; overflow-y: auto; overscroll-behavior: contain; }
+.ask-notice .ask-text.opened { max-height: 32vh; overflow-y: auto; }
 .ask-notice .ask-more { align-self: flex-start; padding: 0; border: 0; background: none; color: var(--link); font-size: 12px; cursor: pointer; }
 .ask-notice .ask-more:hover { text-decoration: underline; }
 .ask.defaulted { border-left-color: var(--warn); padding: 8px 14px; }
@@ -1654,8 +1654,8 @@ html, body { overflow: hidden; }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text) 14%, transparent); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; min-height: 32px; }
 :hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text) 26%, transparent); }
 ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--text) 40%, transparent); }
-/* No elastic bounce at the ends either (Chromium stretches the page and squashes the thumb). */
-*, html, body { overscroll-behavior: none; }
+/* Stop window bounce while allowing nested code, panels and inputs to chain natively. */
+html, body { overscroll-behavior: none; }
 .menubar-title.folded { width: 30px; padding: 0; display: grid; place-items: center; }
 .menu-heading { padding: 6px 10px 2px 28px; font-size: 11px; font-weight: 600; color: var(--muted); }
 .menubar-menu { max-height: calc(100vh - 56px); overflow: auto; }
