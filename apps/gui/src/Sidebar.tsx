@@ -11,7 +11,7 @@ import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
-import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
+import { Avatar, BrandMark, Icon, ModelMark, VendorMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
 import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
 import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
@@ -28,7 +28,7 @@ import { useUnboundProjects } from "./lessons/projects";
 import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
-import { level, tightest, windowLabel } from "./lib/quota";
+import { level, resetText, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
@@ -1090,36 +1090,99 @@ const togglePinned = pins.toggle;
 const useCollapsed = collapsedGroups.use;
 const toggleCollapsed = collapsedGroups.toggle;
 
-/** The most used quota window of all accounts, e.g. "额度 8% · 30 天". */
+/** Fleet equalizer and quick peek across all accounts, plus the tightest quota window. */
 function QuotaMini() {
   const quota = useQuota();
+  const accounts = quota.data?.accounts ?? [];
   const found = tightest(
-    (quota.data?.accounts ?? []).map((a) => ({
+    accounts.map((a) => ({
       ...a,
       windows: a.status.rate_limits,
     })),
   );
-  if (!found) return null;
-  const pct = Math.round(found.window.used_percent);
-  const name = found.account.account.label || found.account.account.id;
+  if (!found && !accounts.length) return null;
+  const pct = found ? Math.round(found.window.used_percent) : 0;
+  const name = found ? found.account.account.label || found.account.account.id : "";
+  const cells = accounts.map((a) => {
+    const top = tightest([{ ...a, windows: a.status.rate_limits }])?.window;
+    const used = top ? Math.max(0, Math.min(100, Math.round(top.used_percent))) : 0;
+    const remain = !a.status.logged_in || a.at_risk ? 0 : top ? Math.max(8, 100 - used) : 100;
+    const tone = !a.status.logged_in || a.at_risk
+      ? "danger"
+      : top
+        ? level(top.used_percent, a.status.limit_reached)
+        : "ok";
+    return { a, top, used, remain, tone };
+  });
+  const okCount = cells.filter((c) => c.a.status.logged_in && !c.a.at_risk && c.tone !== "danger").length;
+
   return (
-    <a
-      className="quota-mini"
-      href="#/usage"
-      title={t("quota.miniTitle", {
-        name,
-        window: windowLabel(found.window),
-        pct,
-      })}
-    >
-      <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
-        <span style={{ width: `${Math.min(100, pct)}%` }} />
-      </span>
-      {t("quota.mini", {
-        pct,
-        window: windowLabel(found.window).replace(/限额$/, ""),
-      })}
-    </a>
+    <div className="quota-mini-wrap">
+      <a
+        className="quota-mini"
+        href="#/usage"
+        title={
+          found
+            ? t("quota.miniTitle", {
+                name,
+                window: windowLabel(found.window),
+                pct,
+              })
+            : t("quota.fleet", { ok: okCount, total: accounts.length })
+        }
+      >
+        <span className="quota-equalizer" aria-hidden="true">
+          {cells.map((c) => (
+            <span key={c.a.account.id} className={`eq-col ${c.tone}`}>
+              <span style={{ height: `${c.remain}%` }} />
+            </span>
+          ))}
+        </span>
+        <span className="quota-mini-text">
+          {accounts.length > 1
+            ? t("quota.fleet", { ok: okCount, total: accounts.length })
+            : found
+              ? t("quota.mini", {
+                  pct,
+                  window: windowLabel(found.window).replace(/限额$/, ""),
+                })
+              : t("quota.fleet", { ok: okCount, total: accounts.length })}
+        </span>
+        {found && (
+          <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
+            <span style={{ width: `${Math.min(100, pct)}%` }} />
+          </span>
+        )}
+      </a>
+      {accounts.length > 0 && (
+        <div className="quota-peek" role="region" aria-label={t("quota.peekTitle")}>
+          <div className="quota-peek-head">
+            <span>{t("quota.peekTitle")}</span>
+            <span className="chip small">{t("quota.fleet", { ok: okCount, total: accounts.length })}</span>
+          </div>
+          <div className="quota-peek-list">
+            {cells.map(({ a, top, used, tone }) => (
+              <div key={a.account.id} className="quota-peek-row">
+                <VendorMark plugin={a.account.provider} size={13} />
+                <span className="quota-peek-name">{a.account.label || a.account.id}</span>
+                {a.agents.length > 0 && (
+                  <span className="quota-peek-agents">{a.agents.map((ag) => `@${ag}`).join(" ")}</span>
+                )}
+                <span className={`quota-peek-val ${tone}`}>
+                  {a.at_risk
+                    ? t("quota.atRisk")
+                    : !a.status.logged_in
+                      ? t("quota.unlogged")
+                      : top
+                        ? `${used}% · ${resetText(top.resets_at) ?? windowLabel(top)}`
+                        : t("quota.noLimit")}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

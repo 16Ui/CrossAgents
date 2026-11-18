@@ -1142,10 +1142,33 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
   .quota-row .quota-bar { grid-column: 1 / -1; grid-row: 2; }
 }
 
-/* Sidebar: the tightest quota window. */
-.quota-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding: 2px 4px; border-radius: 6px; }
-.quota-mini:hover { background: var(--hover); text-decoration: none; color: var(--text-2); }
-.quota-mini .quota-bar { width: 40px; height: 4px; }
+/* Sidebar: fleet equalizer + quick peek popover. */
+.quota-mini-wrap { position: relative; }
+.quota-mini { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--text-2); padding: 4px 7px; border-radius: 7px; background: color-mix(in srgb, var(--text) 3%, transparent); border: 1px solid var(--border); transition: background 0.15s, border-color 0.15s; }
+.quota-mini:hover { background: var(--hover); border-color: var(--border-strong); text-decoration: none; color: var(--text); }
+.quota-mini-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; font-weight: 500; }
+.quota-mini .quota-bar { width: 32px; height: 4px; flex-shrink: 0; }
+.quota-equalizer { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; padding: 1px 2px; border-radius: 3px; background: var(--surface-sunk); flex-shrink: 0; }
+.eq-col { width: 3.5px; height: 100%; border-radius: 1.5px; background: color-mix(in srgb, var(--text) 12%, transparent); display: flex; align-items: flex-end; overflow: hidden; }
+.eq-col span { display: block; width: 100%; border-radius: 1.5px; transition: height 0.25s; }
+.eq-col.ok span { background: var(--ok); }
+.eq-col.warn span { background: var(--warn); }
+.eq-col.danger span { background: var(--danger); }
+.quota-peek {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); z-index: 60;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-float); padding: 10px 12px; display: none; flex-direction: column; gap: 8px;
+  min-width: 248px;
+}
+.quota-mini-wrap:hover .quota-peek, .quota-mini-wrap:focus-within .quota-peek { display: flex; }
+.quota-peek-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--text-2); border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+.quota-peek-list { display: flex; flex-direction: column; gap: 6px; }
+.quota-peek-row { display: flex; align-items: center; gap: 6px; font-size: 11.5px; min-width: 0; }
+.quota-peek-name { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quota-peek-agents { font-family: var(--font-mono); font-size: 10.5px; color: var(--accent-text); background: var(--accent-bg); padding: 0 5px; border-radius: 999px; white-space: nowrap; }
+.quota-peek-val { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.quota-peek-val.warn { color: var(--warn-text); font-weight: 500; }
+.quota-peek-val.danger { color: var(--danger-text); font-weight: 600; }
 .peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 
 /* Questions and notices for the person (H1-2). */
@@ -1436,45 +1459,194 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
   --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
 }
 
-/* All accounts in one list (views/Quota.tsx): a line each, details open underneath. */
-.accounts { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
-.account-row + .account-row { border-top: 1px solid var(--border); }
-.account-line { display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(180px, 2fr) 84px max-content; align-items: center; gap: 14px; padding: 10px 12px 10px 14px; }
-.account-actions button { white-space: nowrap; }
+/* Account Power Deck & Reset Horizon (views/Quota.tsx). */
+.quota-deck-section { display: flex; flex-direction: column; gap: 7px; }
+.quota-head-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* Fleet overview filter bar — compact single-line strip */
+.fleet-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;
+  padding: 5px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.fleet-pills, .fleet-vendors { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.fleet-pill {
+  display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; border: 1px solid var(--border); background: color-mix(in srgb, var(--text) 2%, transparent);
+  color: var(--text-2); cursor: pointer; transition: all 0.15s; line-height: 18px;
+}
+.fleet-pill b { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+.fleet-pill:hover { background: var(--hover); border-color: var(--border-strong); }
+.fleet-pill.on { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--accent-text); font-weight: 500; }
+.fleet-pill.on b { color: var(--accent-text); }
+.fleet-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.fleet-dot.all { background: var(--accent); }
+.fleet-dot.ok { background: var(--ok); box-shadow: 0 0 5px color-mix(in srgb, var(--ok) 55%, transparent); }
+.fleet-dot.warn { background: var(--warn); }
+.fleet-dot.danger { background: var(--danger); }
+
+.fleet-vendor-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+  font-size: 11.5px; border: 1px solid var(--border); background: transparent; color: var(--text-2); cursor: pointer; line-height: 18px;
+}
+.fleet-vendor-chip:hover { background: var(--hover); }
+.fleet-vendor-chip.on { background: var(--selected); border-color: var(--text-2); color: var(--text); font-weight: 500; }
+.fleet-vendor-count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* Reset Horizon radar — compact single-line horizontal ticker */
+.reset-horizon {
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 5%, var(--surface)), var(--surface));
+  border: 1px solid var(--border); border-radius: var(--radius); min-width: 0;
+}
+.reset-horizon-badge {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
+  color: var(--accent-text); background: var(--accent-bg); padding: 1px 7px; border-radius: 999px;
+  white-space: nowrap; flex-shrink: 0; line-height: 18px;
+}
+.reset-horizon-track {
+  display: flex; align-items: center; gap: 6px; overflow-x: auto; flex: 1; min-width: 0; scrollbar-width: none;
+}
+.reset-horizon-track::-webkit-scrollbar { display: none; }
+.reset-node {
+  flex: none; display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--text) 2%, var(--surface)); font-size: 11.5px; cursor: pointer;
+  white-space: nowrap; line-height: 19px; transition: border-color 0.15s, background 0.15s;
+}
+.reset-node:hover { border-color: var(--border-strong); background: var(--hover); }
+.reset-node.danger { border-left: 2.5px solid var(--danger); background: color-mix(in srgb, var(--danger) 5%, var(--surface)); }
+.reset-node.warn { border-left: 2.5px solid var(--warn); background: color-mix(in srgb, var(--warn) 5%, var(--surface)); }
+.reset-node.ok { border-left: 2.5px solid var(--ok); }
+.reset-node-key { width: 3px; height: 10px; border-radius: 1.5px; flex-shrink: 0; }
+.reset-node-acct { font-weight: 600; color: var(--text); }
+.reset-node-win { font-size: 11px; color: var(--muted); }
+.reset-node-time { color: var(--text-2); font-weight: 500; font-variant-numeric: tabular-nums; font-size: 11px; background: var(--surface-sunk); padding: 0 5px; border-radius: 4px; }
+.reset-node-pct { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 11px; }
+.reset-node-pct.ok { color: var(--ok-text); }
+.reset-node-pct.warn { color: var(--warn-text); }
+.reset-node-pct.danger { color: var(--danger-text); }
+
+/* Accounts container: Deck (compact 2-col cards grid) vs List (compact stacked) */
+.accounts.accounts-deck {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(390px, 1fr)); gap: 7px; align-items: start;
+  background: transparent; border: none; border-radius: 0; overflow: visible;
+}
+.accounts.accounts-deck .account-row {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; display: flex; flex-direction: column; transition: border-color 0.15s;
+}
+.accounts.accounts-deck .account-row:hover { border-color: var(--border-strong); }
+.accounts.accounts-deck .account-row.open { grid-column: 1 / -1; border-color: var(--border-strong); }
+.accounts.accounts-deck .account-row.is-risk { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
+.accounts.accounts-deck .account-row.is-blocked { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+
+.accounts.accounts-list { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.accounts.accounts-list .account-row + .account-row { border-top: 1px solid var(--border); }
+
+.account-line { display: flex; flex-direction: column; gap: 5px; padding: 7px 9px 5px; }
+.account-top-bar { display: flex; align-items: center; gap: 5px; flex-wrap: nowrap; justify-content: space-between; min-width: 0; }
+.account-actions button { white-space: nowrap; padding: 1px 6px; font-size: 11px; line-height: 17px; }
 .account-row.open .account-line { background: color-mix(in srgb, var(--text) 3%, transparent); }
-.account-who { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: none; background: none; padding: 0; text-align: left; color: var(--text); }
+.account-who { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex: 1 1 auto; overflow: hidden; border: none; background: none; padding: 0; text-align: left; color: var(--text); cursor: pointer; }
 .account-who:hover:not(:disabled) { background: none; }
-.account-who .account-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.series-key { width: 4px; height: 18px; border-radius: 2px; flex-shrink: 0; }
-.account-meters { display: flex; gap: 16px; min-width: 0; flex-wrap: wrap; }
-.meter { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
-.meter .quota-bar { width: 72px; height: 6px; }
-.meter-label { color: var(--muted); white-space: nowrap; }
-.meter-pct { font-variant-numeric: tabular-nums; min-width: 32px; }
+.account-who .account-name { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-email { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px; }
+.accounts.accounts-deck .account-email { display: none; }
+.plan-chip { font-weight: 500; flex-shrink: 0; font-size: 10.5px; padding: 0 5px; line-height: 17px; }
+.series-key { width: 3px; height: 14px; border-radius: 1.5px; flex-shrink: 0; }
+
+/* Active teammate chips & health badges */
+.account-badges { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.account-agents {
+  display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; border-radius: 999px; line-height: 17px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.agent-pulse { width: 5px; height: 5px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 4px var(--ok); }
+.agent-tag { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; color: var(--accent-text); }
+.account-idle-tag { font-size: 10.5px; color: var(--muted); padding: 0 5px; line-height: 17px; border-radius: 999px; background: var(--surface-sunk); }
+
+/* 10-Segment LED Power Cell Meters — single-line high-density bars */
+.account-meters { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; width: 100%; }
+.meter.cell-meter {
+  flex: 1 1 130px; display: flex; flex-direction: row; align-items: center; gap: 5px; padding: 3px 7px; min-width: 0;
+  border-radius: 5px; background: color-mix(in srgb, var(--text) 2.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+}
+.meter.cell-meter.danger { background: color-mix(in srgb, var(--danger) 5%, transparent); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
+.meter.cell-meter.warn { background: color-mix(in srgb, var(--warn) 5%, transparent); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+.meter-label { color: var(--text-2); font-weight: 600; font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+.meter-label b { font-weight: 600; color: var(--text); }
+.cell-meter-reset { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; flex-shrink: 0; background: var(--surface-sunk); padding: 0 4px; border-radius: 3px; line-height: 15px; }
+.quota-bar.cell-bar {
+  position: relative; display: block; flex: 1; min-width: 42px; height: 8px; border-radius: 2.5px;
+  background: transparent; overflow: hidden; padding: 0;
+}
+.quota-bar.cell-bar > span {
+  position: absolute; inset: 0; opacity: 0.16; border-radius: 2.5px; transition: width 0.3s ease;
+}
+.cell-segments {
+  position: relative; z-index: 1; width: 100%; height: 100%;
+  display: grid; grid-template-columns: repeat(10, 1fr); gap: 1.5px;
+  pointer-events: none;
+}
+.cell-segments b {
+  display: block; height: 100%; border-radius: 1px;
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  transition: background 0.2s;
+}
+.quota-bar.cell-bar.ok .cell-segments b.lit { background: var(--ok); }
+.quota-bar.cell-bar.warn .cell-segments b.lit { background: var(--warn); }
+.quota-bar.cell-bar.danger .cell-segments b.lit { background: var(--danger); }
+.meter-pct { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 11px; text-align: right; white-space: nowrap; flex-shrink: 0; }
+.meter-pct.ok { color: var(--ok-text); }
+.meter-pct.warn { color: var(--warn-text); }
+.meter-pct.danger { color: var(--danger-text); }
+
+.account-perk-pill {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
+  border-radius: 5px; background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--warn) 40%, transparent);
+  font-size: 11px; font-weight: 500; color: var(--text); align-self: stretch;
+}
+.account-empty-meter {
+  flex: 1 1 100%; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 3px 7px; border-radius: 5px; background: color-mix(in srgb, var(--text) 2%, transparent);
+}
+
 .account-health { display: flex; }
-.account-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.account-health .health { font-size: 10.5px; padding: 0 5px; line-height: 17px; }
+.account-actions { display: flex; align-items: center; gap: 3px; justify-content: flex-end; flex-shrink: 0; }
 /* The exit line under a row (views/Quota.tsx): small and always present, so an unconfirmed
    exit reads as unconfirmed rather than as nothing to see. */
-.account-egress { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin: -2px 14px 8px; padding-left: 12px; font-size: 12px; color: var(--text-2); }
-.account-egress-label { color: var(--muted); font-size: 11.5px; letter-spacing: 0.02em; }
+.account-egress {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 5px;
+  margin: 0 8px 6px; padding: 2px 7px; border-radius: 5px;
+  background: color-mix(in srgb, var(--text) 2%, transparent);
+  font-size: 10.5px; color: var(--text-2);
+}
+.accounts.accounts-deck .egress-asn { display: none; }
+.account-egress-label { color: var(--muted); font-size: 10px; font-weight: 600; }
 .egress-value { font-variant-numeric: tabular-nums; }
-code.egress-value { font-size: 11.5px; }
-.egress-route { border-radius: 999px; padding: 0 7px; line-height: 18px; font-size: 11.5px; font-weight: 500; background: var(--surface-sunk); color: var(--text-2); }
+code.egress-value { font-size: 10px; padding: 0 2px; }
+.egress-route { border-radius: 999px; padding: 0 5px; line-height: 15px; font-size: 10px; font-weight: 500; background: var(--ok-bg); color: var(--ok-text); }
 .egress-route.direct, .egress-route.unknown { background: var(--warn-bg); color: var(--warn-text); }
+.account-egress .egress-picker.compact select {
+  width: auto !important; max-width: 105px !important; min-height: 20px !important; height: 20px !important; padding: 0 20px 0 6px !important; font-size: 10.5px !important;
+}
+.account-egress .egress-picker.compact button.small {
+  padding: 0 5px; font-size: 10px; line-height: 18px; height: 20px;
+}
 /* The states that stop a session: a block, not a grey line, with what the person must do. */
-.account-alert { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 14px 10px; padding: 8px 12px; border-radius: var(--radius); border-left: 3px solid; font-size: 12.5px; }
+.account-alert { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 8px; margin: 0 8px 6px; padding: 6px 10px; border-radius: 6px; border-left: 3px solid; font-size: 11.5px; }
 .account-alert.danger { background: var(--danger-bg); color: var(--danger-text); border-left-color: var(--danger-text); }
 .account-alert.warn { background: var(--warn-bg); color: var(--warn-text); border-left-color: var(--warn-text); }
-.account-alert-title { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.account-alert-title { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
 .account-alert-text { overflow-wrap: anywhere; }
-.account-alert-hint { flex-basis: 100%; font-size: 12px; opacity: 0.85; }
-.account-row > .notice, .account-row > .error { margin: 0 14px 10px; }
-.account-detail { padding: 6px 16px 14px; display: flex; flex-direction: column; gap: 14px; border-top: 1px dashed var(--border); }
-@media (max-width: 1100px) {
-  .account-line { grid-template-columns: 1fr auto; }
-  .account-meters { grid-column: 1 / -1; grid-row: 2; }
-  .account-health { grid-row: 1; grid-column: 2; justify-self: end; }
-  .account-actions { grid-column: 1 / -1; justify-content: flex-start; }
+.account-alert-hint { flex-basis: 100%; font-size: 11px; opacity: 0.85; line-height: 1.4; }
+.account-row > .notice, .account-row > .error { margin: 0 8px 6px; }
+.account-detail { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 10px; border-top: 1px dashed var(--border); }
+@media (max-width: 920px) {
+  .accounts.accounts-deck { grid-template-columns: 1fr; }
 }
 
 .all-usage { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }

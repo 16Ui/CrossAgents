@@ -85,6 +85,11 @@ const zhCN = {
 
   "quota.mini": "额度 {pct}% · {window}",
   "quota.miniTitle": "{name} · {window}已用 {pct}%",
+  "quota.fleet": "号池 {ok}/{total} 可用",
+  "quota.peekTitle": "账号号池状态",
+  "quota.unlogged": "未登录",
+  "quota.noLimit": "无额度限制",
+  "quota.atRisk": "风控暂停",
 
   "hub.connected": "hub 已连接",
   "hub.connecting": "连接中…",
