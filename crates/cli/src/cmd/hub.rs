@@ -244,9 +244,9 @@ fn report_started(ctx: &Context, hub: &HubFile, already: bool) -> Result<()> {
 #[cfg(windows)]
 fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     // Else the hub would hold our stdout open (e.g. `$(crossagents hub start)`).
     crossagents_drivers::process::stop_inheriting_std_handles();
 }
