@@ -9,6 +9,7 @@
     "screenshot": "node scripts/screenshot.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
+    "tauri:build": "tsc --noEmit && vite build --mode tauri --outDir dist-tauri && cargo build --release --locked --manifest-path src-tauri/Cargo.toml",
     "test": "node --test \"src/lib/*.test.ts\" \"src/extensions/*.test.ts\" && tsc -p electron && node --test scripts/packaging.test.mjs && node --test \"dist-electron/*.test.cjs\"",
     "test:browser": "node scripts/browser-regression.mjs",
     "electron:compile": "tsc -p electron",
@@ -31,6 +32,7 @@
     "electron": "44.6.0",
     "electron-builder": "26.15.3",
     "lucide-react": "^1.61.0",
+    "mermaid": "12.2.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "typescript": "~5.9.3",
@@ -126,7 +128,6 @@
   },
   "dependencies": {
     "electron-updater": "6.8.10",
-    "htm": "^3.1.1",
-    "mermaid": "12.2.0"
+    "htm": "^3.1.1"
   }
 }

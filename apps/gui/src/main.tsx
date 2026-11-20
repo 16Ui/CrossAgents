@@ -6,6 +6,7 @@ import { startEventLog } from "./eventlog";
 import { startExtensionsUi } from "./extensions/wire";
 import { startEvents } from "./hub";
 import { startTheme } from "./lib/theme";
+import { installTauriBridge } from "./tauriBridge";
 import "./fonts.css";
 import "./styles.css";
 
@@ -18,6 +19,7 @@ if (__MOCK__) {
 }
 
 if (start) {
+  installTauriBridge();
   startTheme();
   startEvents();
   startActivity();

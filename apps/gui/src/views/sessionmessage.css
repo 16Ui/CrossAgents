@@ -10,6 +10,7 @@
 .person-message-name { text-align: end; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
 .person-message > .chat-avatar { margin-top: 16px; }
 .turn .person-message.with-avatar .bubble { max-width: 100%; }
+.conversation-earlier { align-self: center; }
 
 .turn .bubble-md { white-space: normal; }
 .turn .bubble-md .prose { font-size: inherit; line-height: 1.6; white-space: normal; }

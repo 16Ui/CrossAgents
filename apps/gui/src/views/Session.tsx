@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { shortcut, shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
@@ -303,7 +303,7 @@ export function SessionView({
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
         <LiveInfo.Provider value={live}>
-        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
+        <Conversation key={agent.id} agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -886,6 +886,10 @@ const LiveInfo = createContext<LiveTurn | undefined>(undefined);
 
 const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
 
+const HISTORY_PAGE = 50;
+const findTurn = (element: HTMLElement, id: string) =>
+  element.querySelector<HTMLElement>(`[data-turn="${CSS.escape(id)}"]`);
+
 function Conversation({
   agent,
   turns,
@@ -914,17 +918,61 @@ function Conversation({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const [firstTurn, setFirstTurn] = useState<string>();
+  const pendingScroll = useRef<{ id: string; offset?: number }>(null);
+  const remembered = firstTurn ? turns.findIndex((turn) => turn.message_id === firstTurn) : -1;
+  const first = remembered >= 0 ? remembered : Math.max(0, turns.length - HISTORY_PAGE);
+  const visible = first ? turns.slice(first) : turns;
+  const follow = useMemo(() => ({ el: ref, stick }), []);
   const chatProfile = useChatProfile();
   // The run page shows its lead's conversation inside the run's scope: paths there are the run's.
   const outerScope = useFileScope();
+  const fileScope = useMemo(() => outerScope ?? { kind: "agent" as const, agent: agent.id }, [outerScope, agent.id]);
   // One mark per message from a person; recomputed only when those change.
   const asked = turns.filter(fromPerson);
   const key = asked.map((t) => t.message_id).join(",");
   const entries = useMemo<MapEntry[]>(() => asked.map((t) => ({ id: t.message_id, text: t.input })), [key]);
+  const notes = [...switches, ...handoffs, ...works, ...(rounds ?? []).map((round) => ({ ...round, round_id: round.id }))];
+
+  function loadEarlier() {
+    const el = ref.current;
+    if (!el || first === 0 || pendingScroll.current) return;
+    const id = turns[first].message_id;
+    const anchor = findTurn(el, id);
+    if (!anchor) return;
+    stick.current = false;
+    pendingScroll.current = { id, offset: anchor.getBoundingClientRect().top - el.getBoundingClientRect().top };
+    setFirstTurn(turns[Math.max(0, first - HISTORY_PAGE)].message_id);
+  }
+
+  function jumpTo(id: string) {
+    const el = ref.current;
+    if (!el) return;
+    stick.current = false;
+    const target = findTurn(el, id);
+    if (target) {
+      target.scrollIntoView({ block: "start", behavior: "smooth" });
+      return;
+    }
+    const index = turns.findIndex((turn) => turn.message_id === id);
+    if (index < 0) return;
+    pendingScroll.current = { id };
+    setFirstTurn(turns[Math.max(0, index - 10)].message_id);
+  }
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const pending = pendingScroll.current;
+    if (pending) {
+      pendingScroll.current = null;
+      const target = findTurn(el, pending.id);
+      if (!target) return;
+      if (pending.offset === undefined) target.scrollIntoView({ block: "start" });
+      else el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - pending.offset;
+    } else if (stick.current) {
+      el.scrollTop = el.scrollHeight;
+    }
   });
 
   return (
@@ -936,10 +984,16 @@ function Conversation({
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          if (!stick.current && el.scrollTop < 24) loadEarlier();
         }}
       >
         <div className="convo-inner">
           {top}
+          {first > 0 && (
+            <button type="button" className="ghost small conversation-earlier" onClick={loadEarlier}>
+              加载更早的消息（还有 {first} 回合）
+            </button>
+          )}
           {turns.length === 0 && !top && (
             <div className="empty">
               <h1>和 {displayName(agent)} 开始对话</h1>
@@ -949,11 +1003,11 @@ function Conversation({
               </p>
             </div>
           )}
-          <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
+          <FileScopeProvider value={fileScope}>
           <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
-          <Follow.Provider value={{ el: ref, stick }}>
-            {byTime(turns, [...switches, ...handoffs, ...works, ...(rounds ?? []).map((r) => ({ ...r, round_id: r.id }))]).map((x) =>
+          <Follow.Provider value={follow}>
+            {byTime(visible, first ? notes.filter((note) => note.at >= visible[0].sent_at) : notes).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
               ) : "round_id" in x ? (
@@ -974,7 +1028,7 @@ function Conversation({
         </div>
       </div>
       <ScrollThumb scroller={ref} />
-      <TurnMap scroller={ref} entries={entries} />
+      <TurnMap scroller={ref} entries={entries} onJump={jumpTo} />
     </div>
     </MessageAppearance.Provider>
   );
@@ -1058,7 +1112,7 @@ function SwitchNote({ change }: { change: ModelSwitch }) {
   );
 }
 
-function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
+const Turn = memo(function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
   const { showAvatars } = useContext(MessageAppearance);
   // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
@@ -1103,7 +1157,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
   );
-}
+});
 
 function Item({ item }: { item: TranscriptItem }) {
   const cards = useToolCards();

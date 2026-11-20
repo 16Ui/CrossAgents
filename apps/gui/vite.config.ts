@@ -97,7 +97,15 @@ export default defineConfig(({ command, mode }) => {
   return {
     // Relative asset URLs: the packaged app loads dist/index.html from a file:// URL.
     base: "./",
-    plugins: [react(), ...(mock ? [] : [hubProxy()]), devCsp()],
+    plugins: [
+      react(),
+      ...(mock ? [] : [hubProxy()]),
+      devCsp(),
+      ...(mode === "tauri" ? [{
+        name: "crossagents-tauri-csp",
+        transformIndexHtml: (html: string) => html.replace("connect-src 'self'", "connect-src 'self' ipc: http://ipc.localhost"),
+      }] : []),
+    ],
     define: {
       __MOCK__: JSON.stringify(mock),
       __BUILD__: JSON.stringify({
