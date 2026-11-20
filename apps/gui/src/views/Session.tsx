@@ -1,3 +1,4 @@
+import { writeClipboard } from "../lib/clipboard";
 import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { shortcut, shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
@@ -473,7 +474,7 @@ function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) 
   async function copy() {
     if (!r?.command) return;
     try {
-      await navigator.clipboard.writeText(r.command);
+      await writeClipboard(r.command);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -1472,7 +1473,7 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
       )}
       {d?.result != null && (
         <>
-          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void navigator.clipboard.writeText(d.result!)}>复制原始结果</button></div>
+          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void writeClipboard(d.result!)}>复制原始结果</button></div>
           <ToolImages images={resultImages} />
           {result && result !== error && <pre className="out">{result}</pre>}
         </>
@@ -1607,7 +1608,7 @@ function TurnChanges({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
   const view = (file?: string) => openTool("changes", { agent: agent.name, turn: turn.message_id, file });
   const copy = async (path: string) => {
     try {
-      await navigator.clipboard.writeText(path);
+      await writeClipboard(path);
       setCopied(path);
       setTimeout(() => setCopied(undefined), 1500);
     } catch {

@@ -3,6 +3,7 @@
 // over the page, opened from anywhere with `openFile({ scope, path, line })`, and the 文件 pane
 // of the tool column (`FilesPane`), which puts its tabs and content beside the tree when its own
 // width allows and falls back to showing them in turn when it does not.
+import { writeClipboard } from "./lib/clipboard";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, Copy, ExternalLink, File, FileCode, Folder, FolderOpen, List, Maximize2, RefreshCw, Search, X } from "lucide-react";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
@@ -225,10 +226,10 @@ function FileViewer({ target }: { target: Current }) {
 
   const copy = () => {
     if (!path) return;
-    navigator.clipboard?.writeText(path).then(() => {
+    writeClipboard(path).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
-    });
+    }).catch(() => setCopied(false));
   };
 
   const loaded = loadedOf(file);

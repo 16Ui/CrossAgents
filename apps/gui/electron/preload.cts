@@ -2,13 +2,13 @@
 // `CrossAgentsBridge`; no Electron or Node API reaches the page.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { BookmarkEntry, ChromeBridgeStatus, ConnectionState, CrossAgentsBridge, HubResponse, PairStep, TailscaleStatus, UpdateState } from "../src/bridge";
+import type { BrowserBridge, ConnectionState, CrossAgentsBridge, HubResponse, PairStep, TailscaleStatus, UpdateState } from "../src/bridge";
 
 type Reply = { ok: true; response: HubResponse } | { ok: false; error: string };
 
 /** The main process answers `{ ok, state }` or `{ ok: false, error }`, so the reason reaches the page as is. */
-async function connectionCall(channel: string, ...args: unknown[]): Promise<ConnectionState> {
-  const reply: { ok: true; state: ConnectionState } | { ok: false; error: string } = await ipcRenderer.invoke(channel, ...args);
+async function connectionCall<T = ConnectionState>(channel: string, ...args: unknown[]): Promise<T> {
+  const reply: { ok: true; state: T } | { ok: false; error: string } = await ipcRenderer.invoke(channel, ...args);
   if (!reply.ok) throw new Error(reply.error);
   return reply.state;
 }
@@ -27,29 +27,6 @@ async function browserCall<T>(channel: string, ...args: unknown[]): Promise<T> {
   if (!reply.ok) throw new Error(reply.error);
   return reply.value;
 }
-
-/**
- * `window.crossagents.browser` (run note browser/contract §3). Every call names the tab by its
- * webContents id (`webview.getWebContentsId()`); the main process refuses any other.
- */
-export type BrowserBridge = {
-  snapshot(wcId: number): Promise<{ text: string; url: string; title: string }>;
-  click(wcId: number, ref: number): Promise<{ ok: true }>;
-  type(wcId: number, ref: number, text: string, submit?: boolean): Promise<{ ok: true }>;
-  press(wcId: number, key: string): Promise<{ ok: true }>;
-  scroll(wcId: number, dy: number): Promise<{ ok: true }>;
-  screenshot(wcId: number): Promise<{ base64: string; mime: "image/png" }>;
-  console(wcId: number): Promise<{ level: string; text: string; ts: number }[]>;
-  fileUrl(absPath: string): Promise<string>;
-  onOpenTab(listener: (url: string) => void): () => void;
-  bookmarks(): Promise<{ source: string | null; entries: BookmarkEntry[] }>;
-  openExternal(url: string): Promise<{ ok: true }>;
-  chromeStatus(): Promise<ChromeBridgeStatus>;
-  chromeAction(payload: Record<string, unknown>): Promise<unknown>;
-  chromeActivate(tab: string): Promise<{ ok: true }>;
-  chromeSyncCookies(opts?: { tab?: string; urls?: string[] }): Promise<{ count: number }>;
-  openExtensionFolder(): Promise<{ dir: string }>;
-};
 
 const browser: BrowserBridge = {
   snapshot: (wcId) => browserCall("browser:snapshot", wcId),
@@ -77,6 +54,7 @@ const browser: BrowserBridge = {
   openExternal: (url) => browserCall("browser:open-external", url),
   chromeStatus: () => browserCall("browser:chrome-status"),
   chromeAction: (payload) => browserCall("browser:chrome-action", payload),
+  exportSession: (id) => browserCall("browser:export-session", id),
   chromeActivate: (tab) => browserCall("browser:chrome-activate", tab),
   chromeSyncCookies: (opts) => browserCall("browser:chrome-sync-cookies", opts),
   openExtensionFolder: () => browserCall("browser:chrome-open-ext-dir"),
@@ -123,6 +101,7 @@ const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {
     use: (mode) => connectionCall("connection:use", mode),
     reconnect: () => connectionCall("connection:reconnect"),
     forget: () => connectionCall("connection:forget"),
+    exportPairing: () => connectionCall<{ file: string; key: string }>("connection:export-pairing"),
     onState(listener) {
       const wrapped = (_event: IpcRendererEvent, state: ConnectionState) => listener(state);
       ipcRenderer.on("connection:state", wrapped);

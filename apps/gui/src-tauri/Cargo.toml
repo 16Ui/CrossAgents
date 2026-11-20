@@ -6,15 +6,48 @@ publish = false
 
 [workspace]
 
+[features]
+bundled-hub = []
+
 [build-dependencies]
-tauri-build = "2"
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.22"
+constant_time_eq = "0.6"
 dirs = "7"
 eventsource-stream = "0.2"
 futures-util = "0.3"
+keyring = { version = "3.6", features = ["apple-native", "windows-native"] }
+percent-encoding = "2"
+regex = "1"
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["custom-protocol"] }
-tokio = { version = "1", features = ["time"] }
+tauri = { version = "2", features = ["custom-protocol", "tray-icon", "unstable"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2.6"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2.10"
+tauri-plugin-window-state = "2"
+tempfile = "3"
+time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["fs", "io-util", "net", "process", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_System_Com_StructuredStorage"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSDictionary", "NSError"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKSnapshotConfiguration", "WKWebView"] }

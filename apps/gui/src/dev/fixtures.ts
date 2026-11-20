@@ -80,7 +80,7 @@ const CAPS: Record<DriverKind, Capabilities> = {
   "antigravity-native": {
     streaming: true, interrupt: true, steer: false, mcp: false, multi_session: false, resume: true, move_cwd: false, fork: false, rollback: false,
     revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: false, permission_callback: false, compaction: false,
-    attachments: null,
+    attachments: { image: true, pdf: false, text: true },
   },
   "acp-generic": {
     streaming: true, interrupt: true, steer: false, mcp: true, multi_session: false, resume: false, move_cwd: false, fork: false, rollback: false,

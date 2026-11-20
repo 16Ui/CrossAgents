@@ -238,6 +238,7 @@ connectionHandler("connection:pair-code", (r, code, deviceName) => r.pairCode(co
 connectionHandler("connection:use", (r, mode) => r.use(mode));
 connectionHandler("connection:reconnect", (r) => r.reconnect());
 connectionHandler("connection:forget", (r) => r.forget());
+connectionHandler("connection:export-pairing", (r) => r.exportPairing());
 
 const REMOTE_UNAVAILABLE = "远程模式下不可用";
 
@@ -326,7 +327,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
     if (typeof path !== "string" || !path.startsWith("/v1/")) throw new Error(`not an API path: ${path}`);
     if (!allowed(method, path)) {
       throw new Error(
-        `the GUI does not call ${method} ${route(path)}; add it to ALLOWED in electron/allowed.cts if it now does`,
+        `the GUI does not call ${method} ${route(path)}; add it to shared/hub-routes.json if it now does`,
       );
     }
     if (body !== null && typeof body !== "string") throw new Error("body must be a string");

@@ -2,6 +2,7 @@
 // configuration into it. It joins the team with the same tools as everyone and reads its
 // messages with inbox_read.
 
+import { writeClipboard } from "../lib/clipboard";
 import { useState, type FormEvent } from "react";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import { api, errorText } from "../api";
@@ -108,7 +109,7 @@ function CopyText({ text, label }: { text: string; label: string }) {
       className="ghost small"
       onClick={async () => {
         try {
-          await navigator.clipboard.writeText(text);
+          await writeClipboard(text);
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
         } catch {

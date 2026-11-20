@@ -9,6 +9,8 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub mod method {
     pub const INITIALIZE: &str = "initialize";
     pub const SESSION_NEW: &str = "session/new";
+    pub const SESSION_RESUME: &str = "session/resume";
+    pub const SESSION_CLOSE: &str = "session/close";
     pub const SESSION_SET_MODE: &str = "session/set_mode";
     pub const SESSION_SET_CONFIG_OPTION: &str = "session/set_config_option";
     pub const SESSION_PROMPT: &str = "session/prompt";
@@ -77,6 +79,14 @@ pub struct AgentCapabilities {
     pub mcp_capabilities: McpCapabilities,
     #[serde(default)]
     pub prompt_capabilities: PromptCapabilities,
+    #[serde(default)]
+    pub session_capabilities: SessionCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionCapabilities {
+    pub resume: Option<Value>,
+    pub close: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +121,14 @@ pub struct NewSessionRequest {
     pub mcp_servers: Vec<McpServerStdio>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSessionRequest {
+    pub session_id: String,
+    #[serde(flatten)]
+    pub session: NewSessionRequest,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMode {
@@ -135,6 +153,13 @@ pub struct NewSessionResponse {
     pub modes: Option<SessionModeState>,
     /// Kept loose: see [`find_select_option`].
     #[serde(default)]
+    pub config_options: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeSessionResponse {
+    pub modes: Option<SessionModeState>,
     pub config_options: Option<Vec<Value>>,
 }
 

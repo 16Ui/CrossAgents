@@ -6,6 +6,8 @@
 //! cheaper than restarting it per turn, and the process holds the conversation; when it is
 //! gone (an interrupt, a crash), the next turn starts a new one with
 //! `--conversation <id>`, which is also what [`Driver::resume`] does.
+//! Image turns use `agy acp` with the same conversation id because headless input
+//! supports only text blocks.
 //!
 //! - The conversation id is the CLI's: it arrives in `init`/`result`, and the session
 //!   reports it as [`SessionEventKind::Started`] once it has it. A new session therefore
@@ -30,19 +32,26 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, OutputStream,
-    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage,
-    ToolDetail, ToolStatus, TurnOutcome,
+    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
+    OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
+use crate::acp::{AcpLaunch, AcpOptions, AcpSession, ImageTurnOptions};
 use crate::launch::{BoxWrite, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
 use crate::process::{StderrTail, hide_console, resolve_program, system_proxy_env};
 use wire::{Event, Step};
+
+const ATTACHMENTS: AttachmentSupport = AttachmentSupport {
+    image: true,
+    pdf: false,
+    text: true,
+};
 
 /// How long `agy models` gets.
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -144,6 +153,7 @@ impl Driver for AntigravityDriver {
             resume: true,
             set_model: true,
             usage: true,
+            attachments: Some(ATTACHMENTS),
             // Conversations are stored per project directory.
             move_cwd: false,
             ..Capabilities::default()
@@ -224,6 +234,7 @@ pub struct AntigravitySession {
     child: tokio::sync::Mutex<Option<Live>>,
     running: Mutex<Option<Arc<ProcessHandle>>>,
     cancelled: AtomicBool,
+    interrupt_image: Notify,
     closed: AtomicBool,
 }
 
@@ -272,6 +283,7 @@ impl AntigravitySession {
             child: tokio::sync::Mutex::new(None),
             running: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            interrupt_image: Notify::new(),
             closed: AtomicBool::new(false),
         }
     }
@@ -280,8 +292,7 @@ impl AntigravitySession {
         let _ = self.events.send(kind.into());
     }
 
-    /// The message as the CLI gets it: the opening instructions once, then the text and
-    /// its attachments as `@path` references (which the CLI reads as files).
+    /// The headless message includes the opening instructions once and references to text files.
     fn prompt_text(&self, prompt: &Prompt) -> String {
         let mut text = match self.instructions.lock().expect("instructions").take() {
             Some(instructions) => format!("{instructions}\n\n{}", prompt.text),
@@ -511,6 +522,13 @@ impl AntigravitySession {
             return Err(CoreError::Agent("the session has ended".into()));
         }
         self.cancelled.store(false, Ordering::SeqCst);
+        if prompt
+            .attachments
+            .iter()
+            .any(|attachment| attachment.is_image())
+        {
+            return self.run_image_turn(prompt).await;
+        }
         let text = self.prompt_text(prompt);
         if let Err(err) = self.ensure().await {
             self.emit(SessionEventKind::Error {
@@ -617,6 +635,99 @@ impl AntigravitySession {
         })
     }
 
+    async fn run_image_turn(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        let cancelled = || TurnOutcome {
+            stop_reason: StopReason::Cancelled,
+            turn_id: None,
+        };
+        let interrupted = self.interrupt_image.notified();
+        tokio::pin!(interrupted);
+        if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Ok(cancelled());
+        }
+        // Flush the headless process before another process opens the same conversation.
+        if let Some(live) = self.child.lock().await.take() {
+            drop(live.stdin);
+            if live
+                .process
+                .exit_within(Duration::from_secs(5))
+                .await
+                .is_none()
+            {
+                live.process.start_kill();
+                if live
+                    .process
+                    .exit_within(Duration::from_secs(5))
+                    .await
+                    .is_none()
+                {
+                    return Err(CoreError::Agent(
+                        "could not stop the Antigravity headless process".into(),
+                    ));
+                }
+            }
+        }
+
+        let mut launch = AcpLaunch::from_command(&self.command, self.cwd.clone())?;
+        launch.args.push("acp".into());
+        if self.permission == PermissionPolicy::Bypass {
+            launch.args.push("--dangerously-skip-permissions".into());
+        }
+        launch.env = system_proxy_env();
+        launch.env.extend(self.env.iter().cloned());
+        #[cfg(windows)]
+        launch
+            .env
+            .push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+
+        let opts = AcpOptions {
+            launch,
+            mcp_servers: Vec::new(),
+            // Guard accepts edits through the ACP mode. Other permission requests are declined.
+            permission: if self.permission == PermissionPolicy::Bypass {
+                PermissionPolicy::Bypass
+            } else {
+                PermissionPolicy::Deny
+            },
+            model: self.model.lock().expect("model").clone(),
+            instructions: self.instructions.lock().expect("instructions").clone(),
+            events: self.events.clone(),
+        };
+        let image = ImageTurnOptions {
+            resume: self.conversation.lock().expect("conversation").clone(),
+            effort: self.effort.lock().expect("effort").clone(),
+            mode: match self.permission {
+                PermissionPolicy::Bypass => None,
+                PermissionPolicy::Guard => Some("accept-edits"),
+                PermissionPolicy::Deny => Some("default"),
+            },
+        };
+        let acp = tokio::select! {
+            biased;
+            () = &mut interrupted => return Ok(cancelled()),
+            session = AcpSession::start_for_image(opts, image) => session?,
+        };
+        self.remember(acp.session_id());
+        let send = acp.prompt_with_images(prompt);
+        tokio::pin!(send);
+        let outcome = tokio::select! {
+            biased;
+            () = &mut interrupted => {
+                let _ = acp.interrupt().await;
+                Ok(cancelled())
+            }
+            result = &mut send => result,
+        };
+        if outcome
+            .as_ref()
+            .is_ok_and(|result| result.stop_reason != StopReason::Cancelled)
+        {
+            self.instructions.lock().expect("instructions").take();
+        }
+        acp.close_image_turn().await;
+        outcome
+    }
+
     fn stop_reason(&self, result: &wire::Result) -> StopReason {
         if self.cancelled.load(Ordering::SeqCst) {
             return StopReason::Cancelled;
@@ -647,6 +758,7 @@ impl AntigravitySession {
 
     fn stop(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.interrupt_image.notify_waiters();
         if let Some(process) = self.running.lock().expect("running").as_ref() {
             process.start_kill();
         }
@@ -677,6 +789,10 @@ impl DriverSession for AntigravitySession {
 
     async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
         self.run(prompt).await
+    }
+
+    fn attachment_support(&self) -> Option<AttachmentSupport> {
+        Some(ATTACHMENTS)
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
@@ -831,6 +947,95 @@ mod tests {
         log.lines()
             .filter_map(|line| line.strip_prefix("ARG	").map(str::to_owned))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn an_image_turn_resumes_via_acp_and_text_returns_to_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log.txt");
+        let (mut spec, _) = spec(dir.path());
+        spec.agent.model = None;
+        spec.env = vec![("CROSSAGENTS_AGY_TEST_LOG".into(), log.display().to_string())];
+        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true},"sessionCapabilities":{"resume":{},"close":{}}}}}"#;
+        let resume = r#"{"jsonrpc":"2.0","id":2,"result":{}}"#;
+        let prompt_result = r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#;
+        let close = r#"{"jsonrpc":"2.0","id":4,"result":{}}"#;
+        let windows = format!(
+            r#"
+if ($args[0] -eq 'acp') {{
+    foreach ($response in @('{init}', '{resume}', '{prompt_result}', '{close}')) {{
+        $line = [Console]::In.ReadLine()
+        Add-Content -Path $env:CROSSAGENTS_AGY_TEST_LOG -Value $line
+        [Console]::Out.WriteLine($response)
+        [Console]::Out.Flush()
+    }}
+    exit
+}}
+{}"#,
+            stream_for(true),
+        );
+        let unix = format!(
+            r#"
+if [ "$1" = acp ]; then
+    for response in '{init}' '{resume}' '{prompt_result}' '{close}'; do
+        IFS= read -r line || exit 1
+        printf '%s\n' "$line" >> "$CROSSAGENTS_AGY_TEST_LOG"
+        printf '%s\n' "$response"
+    done
+    exit
+fi
+{}"#,
+            stream_for(false),
+        );
+        let command = mock_cli(dir.path(), &windows, &unix);
+        let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
+        assert!(driver.capabilities().attachments.unwrap().image);
+        let session = driver.open(spec).await.unwrap();
+        session.prompt("before").await.unwrap();
+
+        let path = dir.path().join("shot.png");
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(&path, bytes).unwrap();
+        let image = crossagents_core::Attachment {
+            id: "shot".into(),
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            size: bytes.len() as u64,
+            path,
+        };
+        let outcome = session
+            .prompt_with(&Prompt {
+                text: "look".into(),
+                attachments: vec![image],
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+        session.prompt("after").await.unwrap();
+        session.shutdown().await;
+
+        let log = read_log(&log);
+        let requests: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(requests[1]["method"], "session/resume");
+        assert_eq!(requests[1]["params"]["sessionId"], "conv-1");
+        assert_eq!(requests[2]["method"], "session/prompt");
+        assert_eq!(requests[2]["params"]["sessionId"], "conv-1");
+        assert_eq!(
+            requests[2]["params"]["prompt"],
+            json!([
+                { "type": "text", "text": "look" },
+                { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" }
+            ])
+        );
+        assert_eq!(requests[3]["method"], "session/close");
+        assert!(
+            logged_args(&log)
+                .windows(2)
+                .any(|pair| pair == ["--conversation", "conv-1"])
+        );
     }
 
     #[tokio::test]

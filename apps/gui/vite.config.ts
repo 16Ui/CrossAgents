@@ -103,7 +103,9 @@ export default defineConfig(({ command, mode }) => {
       devCsp(),
       ...(mode === "tauri" ? [{
         name: "crossagents-tauri-csp",
-        transformIndexHtml: (html: string) => html.replace("connect-src 'self'", "connect-src 'self' ipc: http://ipc.localhost"),
+        transformIndexHtml: (html: string) => html
+          .replaceAll("crossagents-ext:", "crossagents-ext: http://crossagents-ext.localhost")
+          .replace("connect-src 'self'", "connect-src 'self' ipc: http://ipc.localhost"),
       }] : []),
     ],
     define: {
