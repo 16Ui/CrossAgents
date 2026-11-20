@@ -4,3 +4,4 @@ dist-electron/
 dist-tauri/
 release/
 src-tauri/gen/
+src-tauri/binaries/

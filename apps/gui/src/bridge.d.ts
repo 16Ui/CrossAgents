@@ -106,6 +106,9 @@ export type BrowserBridge = {
   console(wcId: number): Promise<BrowserConsoleEntry[]>;
   /** A local file's `crossagents-file://` url; the main process lets the tab read that file's folder. */
   fileUrl(absPath: string): Promise<string>;
+  scopedFileUrl?(scope: string, path: string): Promise<string>;
+  exportSession?(id: number): Promise<{ file: string; key: string }>;
+  importSession?(id: number, file: string, key: string): Promise<{ count: number }>;
   /** The url of a new tab the page asked for (a `window.open` or `target=_blank` in a tab). */
   onOpenTab(listener: (url: string) => void): () => void;
   /** Reads the person's local Chrome / Edge bookmark bar. */
@@ -124,9 +127,23 @@ export type BrowserBridge = {
   openExtensionFolder?(): Promise<{ dir: string }>;
 };
 
+export type NativeBrowserEvent = { kind: "started" | "finished"; url: string }
+  | { kind: "title"; title: string }
+  | { kind: "open"; url: string };
+
+export type NativeBrowser = {
+  create(id: number, url: string, onEvent: (event: NativeBrowserEvent) => void): Promise<void>;
+  bounds(id: number, bounds: { x: number; y: number; width: number; height: number } | null): Promise<void>;
+  navigate(id: number, url: string): Promise<void>;
+  step(id: number, action: "back" | "forward" | "reload" | "stop"): Promise<void>;
+  style(id: number, css: string): Promise<void>;
+  close(id: number): Promise<void>;
+};
+
 export interface CrossAgentsBridge {
   /** The built-in browser (<webview> tabs); absent where the page has no tab of its own. */
   browser?: BrowserBridge;
+  nativeBrowser?: NativeBrowser;
   /**
    * Which hub the GUI talks to (electron/remoteController.cts). Switching mode, pairing anew or
    * forgetting while remote reloads the window. Electron only.
@@ -141,11 +158,15 @@ export interface CrossAgentsBridge {
     reconnect(): Promise<ConnectionState>;
     /** Forgets the pairing here only; the device stays on the hub until revoked there. */
     forget(): Promise<ConnectionState>;
+    exportPairing?(): Promise<{ file: string; key: string }>;
+    importPairing?(file: string, key: string): Promise<ConnectionState>;
     onState(listener: (state: ConnectionState) => void): () => void;
     onPairStep(listener: (step: PairStep) => void): () => void;
   };
   /** Main-process recovery state and durable extension startup reporting (Electron only). */
   extensions?: {
+    /** Origin for installed extension assets when the desktop shell uses a shared protocol host. */
+    assetBase?: string;
     safeMode(): Promise<{ enabled: boolean; reason: string | null }>;
     /** Await before importing/activating any extension, so a crash is remembered. */
     loading(): Promise<void>;
@@ -177,6 +198,7 @@ export interface CrossAgentsBridge {
   useShippedHub?(): Promise<void>;
   /** Asks for a folder in the system dialog; null when cancelled. Rejects in remote mode (the folder is on the hub's machine). */
   pickFolder?(): Promise<string | null>;
+  writeClipboard?(text: string): Promise<void>;
   /**
    * Opens a file of a scope (`scope` is its API prefix, e.g. `/v1/agents/Rex`; `path` is relative
    * to its root) with the system's default program. The main process first asks the hub's

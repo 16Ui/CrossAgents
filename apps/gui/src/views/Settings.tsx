@@ -18,6 +18,7 @@ import { setChatProfile, useChatProfile, type ChatProfile } from "../lib/chatPro
 import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { cursorFamilies } from "../lib/reasoning";
+import { exportPreferences, importPreferences, PREFERENCES_MAX_BYTES } from "../lib/preferencesTransfer";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
 import { AvatarGallery } from "./AvatarGallery";
@@ -116,7 +117,56 @@ function AppearancePage() {
         </div>
       </div>
       <AvatarGallery />
+      <PreferencesTransfer />
     </section>
+  );
+}
+
+function PreferencesTransfer() {
+  const picker = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string>();
+  function download() {
+    try {
+      const url = URL.createObjectURL(new Blob([exportPreferences(localStorage)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "CrossAgents-个性化设置.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setError(undefined);
+    } catch {
+      setError("无法导出这台设备的设置。");
+    }
+  }
+
+  async function upload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      if (file.size > PREFERENCES_MAX_BYTES) throw new Error("设置文件超过 2 MiB");
+      importPreferences(await file.text(), localStorage);
+      location.reload();
+    } catch (err) {
+      setError(`导入失败。${errorText(err)}`);
+    }
+  }
+
+  return (
+    <div className="setting-card">
+      <div className="setting-line">
+        <div>
+          <div className="setting-label">迁移个性化设置</div>
+          <div className="setting-hint">在旧客户端导出，再到新客户端导入。导入会覆盖本机的主题、聊天资料和布局。</div>
+        </div>
+        <div className="row">
+          <button type="button" onClick={download}>导出设置</button>
+          <button type="button" onClick={() => picker.current?.click()}>导入设置</button>
+          <input ref={picker} type="file" accept=".json,application/json" hidden onChange={upload} />
+        </div>
+      </div>
+      <ErrorBox error={error} />
+    </div>
   );
 }
 

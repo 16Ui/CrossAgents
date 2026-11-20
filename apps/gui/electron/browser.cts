@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, net, session, shell, webContents, type DownloadItem, type IpcMainInvokeEvent, type Session, type WebContents, type WebPreferences } from "electron";
 import { bookmarkUrlAllowed, readLocalBookmarks } from "./browserBookmarks.cjs";
+import { sealTransfer } from "./transfer.cjs";
 import { BrowserTab } from "./browserDriver.cjs";
 import { createFileRegistry, decodeRoots, encodeRoots, isWithin, mimeFor, type FileRegistry } from "./browserFiles.cjs";
 import {
@@ -226,7 +227,7 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
   };
 
   /** The tab a call names: a browser tab of the calling page, or an error. */
-  const tabFor = (event: IpcMainInvokeEvent, wcId: unknown): BrowserTab => {
+  const contentsFor = (event: IpcMainInvokeEvent, wcId: unknown): WebContents => {
     if (typeof wcId !== "number" || !Number.isInteger(wcId)) throw new Error("没有这个浏览器标签");
     const contents = webContents.fromId(wcId);
     if (
@@ -238,8 +239,9 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
     ) {
       throw new Error("没有这个浏览器标签");
     }
-    return tabOf(contents);
+    return contents;
   };
+  const tabFor = (event: IpcMainInvokeEvent, wcId: unknown) => tabOf(contentsFor(event, wcId));
 
   const ref = (value: unknown): number => {
     if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error("ref 必须是正整数");
@@ -260,6 +262,18 @@ export function registerBrowserIpc(fromApp: (event: IpcMainInvokeEvent) => boole
   });
   handle("browser:screenshot", (event, wcId) => tabFor(event, wcId).screenshot());
   handle("browser:console", (event, wcId) => tabFor(event, wcId).console());
+  handle("browser:export-session", async (event, wcId) => {
+    const contents = contentsFor(event, wcId);
+    const url = new URL(contents.getURL());
+    if (url.protocol !== "https:") throw new Error("只能迁移当前 HTTPS 网站的登录状态");
+    const cookies = (await contents.session.cookies.get({ domain: url.hostname }))
+      .filter((cookie) => cookie.hostOnly && cookie.domain === url.hostname && cookie.secure
+        && !Object.hasOwn(cookie, "partitionKey"))
+      .map(({ name, value, path, httpOnly, sameSite, expirationDate }) => ({ name, value, path, httpOnly, sameSite, expirationDate }));
+    if (cookies.length > 200) throw new Error("当前网站 Cookie 过多，无法迁移");
+    if (!cookies.length) throw new Error("当前网站没有符合迁移条件的登录状态");
+    return sealTransfer("crossagents-browser-session-v1", { origin: url.origin, cookies });
+  });
   handle("browser:file-url", async (_event, absPath) => {
     if (typeof absPath !== "string" || !absPath) throw new Error("没有文件路径");
     if (!(await stat(absPath)).isFile()) throw new Error("不是一个文件");

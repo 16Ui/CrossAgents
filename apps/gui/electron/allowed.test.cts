@@ -77,7 +77,7 @@ test("every hub call src/api.ts makes is in ALLOWED", () => {
   const calls = apiCalls();
   assert.ok(calls.length >= 40, `only ${calls.length} calls found in src/api.ts`);
   const missing = calls.filter((c) => !allowed(c.method, c.path)).map((c) => `${c.method} ${c.path}`);
-  assert.deepEqual(missing, [], "add these to ALLOWED in electron/allowed.cts");
+  assert.deepEqual(missing, [], "add these to shared/hub-routes.json");
 });
 
 test("the S1 endpoints pass, query strings included", () => {
