@@ -3,6 +3,7 @@ import type { Attachment } from "@bindings/Attachment";
 import { TurnFiles } from "../attach";
 import { CopyButton, Prose, useFileScope } from "../components";
 import type { TranscriptItem } from "../session";
+import { PersonMessage } from "./SessionMessage";
 import "./steer.css";
 
 type Steer = Extract<TranscriptItem, { type: "steer" }>;
@@ -20,7 +21,7 @@ export function SteerItem({ item }: { item: TranscriptItem }) {
   const ended = useContext(TurnEnded);
   if (item.type !== "steer") return null;
   return (
-    <>
+    <PersonMessage>
       {item.read ? (
         // Read: an ordinary message of yours, the same as Bubble's.
         <div className="bubble bubble-md">
@@ -47,7 +48,7 @@ export function SteerItem({ item }: { item: TranscriptItem }) {
         </div>
       )}
       <SteerFiles item={item} />
-    </>
+    </PersonMessage>
   );
 }
 

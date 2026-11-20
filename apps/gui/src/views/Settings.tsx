@@ -1,17 +1,20 @@
 // Settings, laid out like Codex's: sections on the left, one page of cards on the right.
-// 外观 is kept on this device (docs/tasks/V6-GUI.md §4.4); 模型 is kept by the hub, so every
+// 个性化 is kept on this device (docs/tasks/V6-GUI.md §4.4); 模型 is kept by the hub, so every
 // window and the hub's own picks (e.g. a worker's model) see the same list.
 // 关于 shows both builds and the GUI's own update (electron/updates.cts).
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
+import { avatarFromFile } from "../avatarImages";
+import { ChatAvatar } from "../ChatAvatar";
 import { ErrorBox, FamilyMark, Icon, VendorMark, type IconName } from "../components";
 import { useConnectionStatus, usePlugins } from "../hub";
 import { useFeatureSupport } from "../lib/features";
 import { buildTag } from "../lib/build";
+import { setChatProfile, useChatProfile, type ChatProfile } from "../lib/chatProfile";
 import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { cursorFamilies } from "../lib/reasoning";
@@ -22,7 +25,7 @@ import { ConnectionPage } from "./Connection";
 import { DevicesPage } from "./Devices";
 
 const PAGES: { key: string; label: string; icon: IconName }[] = [
-  { key: "appearance", label: "外观", icon: "settings" },
+  { key: "appearance", label: "个性化", icon: "settings" },
   { key: "models", label: "模型", icon: "brain" },
   { key: "agents", label: "智能体", icon: "team" },
   { key: "connection", label: "连接", icon: "connection" },
@@ -80,6 +83,7 @@ function AppearancePage() {
   const dark = resolve(theme, matchMedia("(prefers-color-scheme: dark)").matches) === "dark";
   return (
     <section className="settings-section">
+      <ChatProfileSettings />
       <div className="setting-card">
         <div className="setting-line">
           <div>
@@ -113,6 +117,68 @@ function AppearancePage() {
       </div>
       <AvatarGallery />
     </section>
+  );
+}
+
+function ChatProfileSettings() {
+  const profile = useChatProfile();
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  function save(patch: Partial<ChatProfile>) {
+    try {
+      setChatProfile(patch);
+      setError(undefined);
+    } catch {
+      setError("无法保存个性化设置。请检查本机的应用存储后重试。");
+    }
+  }
+
+  async function chooseImage(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      save({ avatar: await avatarFromFile(file) });
+    } catch {
+      setError("无法读取这张图片，请换一张 PNG、JPEG 或 WebP 图片。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="setting-card chat-profile-card">
+      <div className="setting-line">
+        <div className="chat-profile-identity">
+          <ChatAvatar image={profile.avatar} size={44} />
+          <div>
+            <div className="setting-label">我的聊天资料</div>
+            <div className="setting-hint">昵称和头像仅用于本机显示。</div>
+          </div>
+        </div>
+        <div className="row chat-profile-actions">
+          <button type="button" disabled={busy} onClick={() => fileInput.current?.click()}>{busy ? "正在读取…" : "选择头像"}</button>
+          {profile.avatar && <button type="button" className="ghost" disabled={busy} onClick={() => save({ avatar: null })}>恢复默认</button>}
+          <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={chooseImage} />
+        </div>
+      </div>
+      <div className="setting-line">
+        <label htmlFor="chat-profile-name" className="setting-label">聊天昵称</label>
+        <input id="chat-profile-name" value={profile.name} onChange={(event) => save({ name: event.target.value })} maxLength={32} placeholder="我" />
+      </div>
+      <div className="setting-line">
+        <div className="setting-label">聊天显示</div>
+        <div className="segmented" role="group" aria-label="聊天显示">
+          <button type="button" aria-pressed={profile.showAvatars} className={profile.showAvatars ? "active" : ""} onClick={() => save({ showAvatars: true })}>显示头像</button>
+          <button type="button" aria-pressed={!profile.showAvatars} className={!profile.showAvatars ? "active" : ""} onClick={() => save({ showAvatars: false })}>只看消息</button>
+        </div>
+      </div>
+      <ErrorBox error={error} />
+    </div>
   );
 }
 

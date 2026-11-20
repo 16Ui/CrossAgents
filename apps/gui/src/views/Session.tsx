@@ -26,6 +26,7 @@ import { errorHint } from "../lib/errors";
 import { isModerationError } from "../lib/moderation";
 import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { effortLabel, prettyModel } from "../lib/models";
+import { useChatProfile } from "../lib/chatProfile";
 import { clock, range } from "../lib/time";
 import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
@@ -58,7 +59,7 @@ import { ContextUsageButton, useCompact } from "../contextusage";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { Composer, QueuePanel } from "./SessionComposer";
-import { AgentText, Bubble, fromPerson } from "./SessionMessage";
+import { AgentText, Bubble, fromPerson, MessageAppearance, PersonMessage } from "./SessionMessage";
 import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
 
@@ -817,8 +818,10 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
     : "发送中…";
   return (
     <div className="turn sending">
-      {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
-      {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
+      <PersonMessage>
+        {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
+        {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
+      </PersonMessage>
       {message.error ? (
         <div className="turn-note danger row" style={{ alignSelf: "flex-end", gap: 8 }} title={message.errorRaw ?? message.error}>
           <span>{message.outcomeUnknown ? message.error : `没发出去：${message.error}`}</span>
@@ -911,6 +914,7 @@ function Conversation({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const chatProfile = useChatProfile();
   // The run page shows its lead's conversation inside the run's scope: paths there are the run's.
   const outerScope = useFileScope();
   // One mark per message from a person; recomputed only when those change.
@@ -924,6 +928,7 @@ function Conversation({
   });
 
   return (
+    <MessageAppearance.Provider value={chatProfile}>
     <div className="convo-wrap">
       <div
         className="convo"
@@ -971,6 +976,7 @@ function Conversation({
       <ScrollThumb scroller={ref} />
       <TurnMap scroller={ref} entries={entries} />
     </div>
+    </MessageAppearance.Provider>
   );
 }
 
@@ -1054,6 +1060,7 @@ function SwitchNote({ change }: { change: ModelSwitch }) {
 
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
+  const { showAvatars } = useContext(MessageAppearance);
   // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
   // command and output out, so the same lines are not written twice (see ShownLive).
   const [shownLive, setShownLive] = useState<string | null>(null);
@@ -1064,16 +1071,18 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
         <>
-          {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
-          <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          <PersonMessage>
+            {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
+            <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          </PersonMessage>
           {!turn.started_at && <WaitingTurn turn={turn} agent={agent} />}
         </>
       ) : (
-        <PeerMessage turn={turn} agents={agents} tree={tree} />
+        <PeerMessage turn={turn} agents={agents} tree={tree} showAvatars={showAvatars} />
       )}
       {turn.items.length > 0 && (
         <div className="author">
-          <Avatar agent={agent} size={22} />
+          {showAvatars && <Avatar agent={agent} size={22} />}
           <span className="who">{displayName(agent)}</span>
           <span className="what">{agentTitle(agent)}</span>
         </div>

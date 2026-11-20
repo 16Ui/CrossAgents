@@ -1,6 +1,8 @@
-import { useState } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import type { RunDetail } from "@bindings/RunDetail";
+import { ChatAvatar } from "../ChatAvatar";
 import { CopyButton, Prose, time } from "../components";
+import { DEFAULT_CHAT_PROFILE } from "../lib/chatProfile";
 import { FOLD_INPUT, foldText, KICKOFF_SEPARATOR } from "../lib/messageText";
 import { noticeLines } from "../lib/notices";
 import type { TranscriptTurn } from "../session";
@@ -8,6 +10,21 @@ import "./sessionmessage.css";
 
 /** A person's message, or one recorded before senders were. */
 export const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
+
+export const MessageAppearance = createContext(DEFAULT_CHAT_PROFILE);
+
+export function PersonMessage({ children }: { children: ReactNode }) {
+  const { name, avatar, showAvatars } = useContext(MessageAppearance);
+  return (
+    <div className={showAvatars ? "person-message with-avatar" : "person-message"}>
+      <div className="person-message-content">
+        {showAvatars && <span className="person-message-name">{name.trim() || "我"}</span>}
+        {children}
+      </div>
+      {showAvatars && <ChatAvatar image={avatar} />}
+    </div>
+  );
+}
 
 /** What the message carried to the agent besides the person's words, kept out of the bubble's text. */
 export function RideAlong({ notices }: { notices?: string[] }) {
