@@ -664,6 +664,16 @@ async fn drivers_say_which_files_they_take() {
             .status(),
         201
     );
+    // Cursor's CLI takes no images as such: a file goes in as a path its own Read tool
+    // opens, so every kind is accepted rather than refused (docs/TODO.md §7).
+    assert_eq!(
+        create("cursorer", "cursor", "cursor-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
 
     let codex: Value = t
         .get("/v1/agents/codexer/transcript")
@@ -700,6 +710,19 @@ async fn drivers_say_which_files_they_take() {
         .unwrap();
     assert_eq!(
         buddy["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": true, "text": true })
+    );
+    let cursor: Value = t
+        .get("/v1/agents/cursorer/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cursor["driver"], "cursor-native");
+    assert_eq!(
+        cursor["capabilities"]["attachments"],
         json!({ "image": true, "pdf": true, "text": true })
     );
 
