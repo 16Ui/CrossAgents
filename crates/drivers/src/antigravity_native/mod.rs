@@ -49,6 +49,14 @@ const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the process gets to exit once its output has ended.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Windows' `agy` updater launches its own visible `agy --version` console.
+/// Skip that updater for background queries while still letting the query run.
+pub fn prepare_query(command: &mut Command) {
+    #[cfg(windows)]
+    command.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    hide_console(command);
+}
+
 pub struct AntigravityDriver {
     name: String,
     cli: Cli,
@@ -107,7 +115,7 @@ impl AntigravityDriver {
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        hide_console(&mut child);
+        prepare_query(&mut child);
         let Ok(Ok(output)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, child.output()).await else {
             tracing::debug!("agy models did not answer");
             return;

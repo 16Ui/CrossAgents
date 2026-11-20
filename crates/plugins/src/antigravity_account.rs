@@ -23,11 +23,9 @@ use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, Credits, DataSource, LimitGroup,
     LoginCommand, ModelInfo, RateWindow, SessionUsage,
 };
-use crossagents_drivers::antigravity_native::wire::parse_models;
+use crossagents_drivers::antigravity_native::{prepare_query, wire::parse_models};
 use crossagents_drivers::locate::Cli;
-use crossagents_drivers::process::{
-    apply_proxy_env, explicit_proxy_env, hide_console, resolve_program,
-};
+use crossagents_drivers::process::{apply_proxy_env, explicit_proxy_env, resolve_program};
 use serde_json::Value;
 
 /// Live status is refreshed at most this often.
@@ -126,7 +124,7 @@ impl AntigravityAccounts {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         apply_proxy_env(&mut child, account.proxy.as_deref());
-        hide_console(&mut child);
+        prepare_query(&mut child);
         let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
             .await
             .map_err(|_| {
