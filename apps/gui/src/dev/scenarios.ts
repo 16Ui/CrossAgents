@@ -47,6 +47,13 @@ function typeInto(selector: string, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function showUnavailableSession() {
+  const panel = document.querySelector<HTMLDetailsElement>(".settings-sessions");
+  if (!panel) return;
+  panel.open = true;
+  panel.querySelector("[data-unusable]")?.scrollIntoView({ block: "center" });
+}
+
 export const SCENARIOS: Scenario[] = [
   { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏里工作组落在各自的项目下，一个项目只列最近三个", build: () => {
     const scene = workRounds();
@@ -388,7 +395,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: "#/agents",
       script: [
-        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 700, act: showUnavailableSession },
         { at: 1200, act: verify },
       ],
     };
@@ -417,7 +424,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: "#/agents",
       script: [
-        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 700, act: showUnavailableSession },
         { at: 1000, act: () => {
           const link = [...document.querySelectorAll<HTMLButtonElement>(".member-unusable button")].find((b) => b.textContent?.includes("去设置权限"));
           if (!link) throw new Error("the unusable card has no link to the permission setting");
@@ -615,7 +622,7 @@ export const SCENARIOS: Scenario[] = [
       el.dispatchEvent(new Event("input", { bubbles: true }));
     };
     const verify = () => {
-      const card = document.querySelector<HTMLElement>(".member.unusable .member-unusable");
+      const card = document.querySelector<HTMLElement>(".settings-session[data-unusable] .member-unusable");
       const row = document.querySelector<HTMLButtonElement>(".mention-menu .menu-item.disabled");
       if (location.hash.startsWith("#/agents")) {
         if (!card) throw new Error("the stale-model agent is not greyed out on the Agents page");
@@ -627,7 +634,7 @@ export const SCENARIOS: Scenario[] = [
     };
     return { ...scene, route: "#/agents", script: [
       // The CLI list comes first; bring the greyed card into view at any width.
-      { at: 600, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+      { at: 600, act: showUnavailableSession },
       { at: 900, act: typeAt },
       { at: 1300, act: verify },
     ] };
