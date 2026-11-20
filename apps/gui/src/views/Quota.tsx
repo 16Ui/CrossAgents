@@ -1,6 +1,4 @@
-// Subscriptions and their quota, laid out like Claude Code's usage settings: one block per
-// account, a bar per rate-limit window with "N% 已用" and when it resets. Vendor-neutral: every
-// provider's AccountStatus renders the same way.
+// Account quota at a glance, with management and usage history on demand.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
@@ -35,18 +33,19 @@ export function useQuota() {
 
 type ViewLayout = "deck" | "list";
 type MeterMode = "remain" | "used";
-type FleetFilter = "all" | "ok" | "warn" | "danger";
+type AccountHealth = Level | "unknown";
 
-function accountHealth(a: AccountQuota): Level {
-  if (!a.status.logged_in || a.at_risk || a.egress_block) return "danger";
-  const allWindows = [
-    ...a.status.rate_limits,
-    ...a.status.limits.slice(1).flatMap((g) => g.windows),
-  ];
-  const levels = allWindows.map((w) => level(w.used_percent, a.status.limit_reached && w.used_percent >= 100));
-  if (levels.includes("danger")) return "danger";
-  if (levels.includes("warn")) return "warn";
-  return "ok";
+const HEALTH_LABEL: Record<AccountHealth, string> = {
+  ok: "充足",
+  warn: "偏紧",
+  danger: "需关注",
+  unknown: "暂无额度数据",
+};
+
+function accountHealth({ status, at_risk, egress_block }: AccountQuota): AccountHealth {
+  if (!status.logged_in || at_risk || egress_block || status.limit_reached) return "danger";
+  const windows = [...status.rate_limits, ...status.limits.slice(1).flatMap((g) => g.windows)];
+  return windows.length ? level(Math.max(...windows.map((w) => w.used_percent))) : "unknown";
 }
 
 export function QuotaSection() {
@@ -55,177 +54,75 @@ export function QuotaSection() {
   const [open, setOpen] = useState<string>();
   const [layout, setLayout] = useState<ViewLayout>("deck");
   const [meterMode, setMeterMode] = useState<MeterMode>("remain");
-  const [statusFilter, setStatusFilter] = useState<FleetFilter>("all");
-  const [vendorFilter, setVendorFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<AccountHealth | "all">("all");
+  const [vendorFilter, setVendorFilter] = useState("all");
   const accounts = quota.data?.accounts ?? [];
-
-  const counts = { ok: 0, warn: 0, danger: 0 };
-  for (const a of accounts) counts[accountHealth(a)]++;
-
-  const vendors = Array.from(new Set(accounts.map((a) => a.account.provider)));
-  const visible = accounts.filter((a) => {
-    if (statusFilter !== "all" && accountHealth(a) !== statusFilter) return false;
-    if (vendorFilter !== "all" && a.account.provider !== vendorFilter) return false;
-    return true;
-  });
-
-  // Collect upcoming reset events across all accounts for the Reset Horizon radar.
-  const upcomingResets = accounts
-    .flatMap((a, idx) => {
-      const extra = a.status.limits.slice(1).flatMap((g) =>
-        g.windows.map((w) => ({ w, prefix: g.name ?? g.model ?? g.id, reached: g.reached })),
-      );
-      const main = a.status.rate_limits.map((w) => ({ w, prefix: "", reached: a.status.limit_reached }));
-      return [...main, ...extra]
-        .filter((x) => x.w.resets_at)
-        .map((x) => ({
-          account: a,
-          color: seriesColor(idx),
-          window: x.w,
-          label: x.prefix ? `${x.prefix} · ${shortWindow(x.w)}` : shortWindow(x.w),
-          tone: level(x.w.used_percent, x.reached && x.w.used_percent >= 100),
-          atMs: new Date(x.w.resets_at!).getTime(),
-        }));
-    })
-    .filter((r) => Number.isFinite(r.atMs) && r.atMs > Date.now() - 60_000)
-    .sort((a, b) => a.atMs - b.atMs);
+  const vendors = [...new Set(accounts.map(({ account }) => account.provider))];
+  const vendor = vendors.includes(vendorFilter) ? vendorFilter : "all";
+  const filtered = accounts.filter((a) => vendor === "all" || a.account.provider === vendor);
+  const counts = { ok: 0, warn: 0, danger: 0, unknown: 0 };
+  for (const a of filtered) counts[accountHealth(a)]++;
+  const visible = filtered.filter((a) => statusFilter === "all" || accountHealth(a) === statusFilter);
 
   return (
-    <section className="settings-section quota-deck-section">
-      <div className="settings-head">
+    <section className="settings-section quota-section">
+      <div className="settings-head quota-header">
         <h2>订阅与额度</h2>
-        {accounts.length > 0 && <span className="chip">{accounts.length} 个账号</span>}
+        {accounts.length > 0 && <span className="muted small">{accounts.length} 个账号</span>}
         <div className="spacer" />
         {accounts.length > 0 && (
-          <div className="quota-head-controls">
-            <div className="segmented small" role="group" aria-label="电量显示方式">
-              <button className={meterMode === "remain" ? "active" : ""} onClick={() => setMeterMode("remain")} title="按剩余可用电量显示">
-                ⚡ 剩余电量
-              </button>
-              <button className={meterMode === "used" ? "active" : ""} onClick={() => setMeterMode("used")} title="按已消耗百分比显示">
-                📊 已用占比
-              </button>
-            </div>
-            <div className="segmented small" role="group" aria-label="视图布局">
-              <button className={layout === "deck" ? "active" : ""} onClick={() => setLayout("deck")}>
-                能量舱
-              </button>
-              <button className={layout === "list" ? "active" : ""} onClick={() => setLayout("list")}>
-                紧凑列表
-              </button>
-            </div>
+          <div className="segmented small" role="group" aria-label="账号视图">
+            <button className={layout === "deck" ? "active" : ""} aria-pressed={layout === "deck"} onClick={() => setLayout("deck")}>卡片</button>
+            <button className={layout === "list" ? "active" : ""} aria-pressed={layout === "list"} onClick={() => setLayout("list")}>列表</button>
           </div>
         )}
-        {!adding && (
-          <button className="ghost" onClick={() => setAdding(true)}>
-            添加账号
-          </button>
-        )}
+        {!adding && <button className="primary" onClick={() => setAdding(true)}>添加账号</button>}
       </div>
       <ErrorBox error={quota.error} />
       {adding && <AddAccount providers={quota.data?.providers ?? []} onDone={() => (setAdding(false), quota.reload())} />}
       {quota.data && !accounts.length && !adding && (
         <p className="muted">还没有账号。登录过 Claude Code、Codex 或 CodeBuddy 的话，hub 启动时会自动把本机登录加进来；也可以手动添加。</p>
       )}
-
       {accounts.length > 0 && (
-        <div className="fleet-bar">
-          <div className="fleet-pills" role="group" aria-label="按健康度筛选">
-            <button
-              className={`fleet-pill ${statusFilter === "all" ? "on" : ""}`}
-              onClick={(e) => {
-                setStatusFilter("all");
-                e.currentTarget.closest(".quota-deck-section")?.scrollIntoView({ block: "start" });
-              }}
-            >
-              <span className="fleet-dot all" />
-              全部 <b>{accounts.length}</b>
-            </button>
-            <button className={`fleet-pill ok ${statusFilter === "ok" ? "on" : ""}`} onClick={() => setStatusFilter(statusFilter === "ok" ? "all" : "ok")}>
-              <span className="fleet-dot ok" />
-              充足 <b>{counts.ok}</b>
-            </button>
-            <button className={`fleet-pill warn ${statusFilter === "warn" ? "on" : ""}`} onClick={() => setStatusFilter(statusFilter === "warn" ? "all" : "warn")}>
-              <span className="fleet-dot warn" />
-              偏紧 <b>{counts.warn}</b>
-            </button>
-            <button className={`fleet-pill danger ${statusFilter === "danger" ? "on" : ""}`} onClick={() => setStatusFilter(statusFilter === "danger" ? "all" : "danger")}>
-              <span className="fleet-dot danger" />
-              告警 <b>{counts.danger}</b>
-            </button>
-          </div>
-          {vendors.length > 1 && (
-            <div className="fleet-vendors" role="group" aria-label="按厂商筛选">
-              {vendors.map((v) => {
-                const n = accounts.filter((a) => a.account.provider === v).length;
-                const active = vendorFilter === v;
-                return (
-                  <button
-                    key={v}
-                    className={`fleet-vendor-chip ${active ? "on" : ""}`}
-                    onClick={() => setVendorFilter(active ? "all" : v)}
-                    title={`只看 ${vendorName(v)}`}
-                  >
-                    <VendorMark plugin={v} size={12} />
-                    <span>{vendorName(v)}</span>
-                    <span className="fleet-vendor-count">{n}</span>
-                  </button>
-                );
-              })}
+        <>
+          <div className="quota-filters">
+            {vendors.length > 1 && (
+              <select aria-label="按服务筛选" value={vendor} onChange={(e) => setVendorFilter(e.target.value)}>
+                <option value="all">全部服务</option>
+                {vendors.map((v) => <option key={v} value={v}>{vendorName(v)}</option>)}
+              </select>
+            )}
+            <select aria-label="按额度状态筛选" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as AccountHealth | "all")}>
+              <option value="all">全部状态（{filtered.length}）</option>
+              {(Object.keys(counts) as AccountHealth[]).map((key) => (
+                <option key={key} value={key}>{HEALTH_LABEL[key]}（{counts[key]}）</option>
+              ))}
+            </select>
+            <div className="spacer" />
+            <div className="segmented small" role="group" aria-label="额度显示方式">
+              <button className={meterMode === "remain" ? "active" : ""} aria-pressed={meterMode === "remain"} onClick={() => setMeterMode("remain")}>剩余</button>
+              <button className={meterMode === "used" ? "active" : ""} aria-pressed={meterMode === "used"} onClick={() => setMeterMode("used")}>已用</button>
             </div>
-          )}
-        </div>
-      )}
-
-      {upcomingResets.length > 0 && (
-        <div className="reset-horizon" aria-label="回血时间轴">
-          <span className="reset-horizon-badge" title="各账号限额窗口重置倒计时（点击定位账号）">⏱ 回血雷达</span>
-          <div className="reset-horizon-track">
-            {upcomingResets.map((r) => {
-              const used = Math.max(0, Math.min(100, Math.round(r.window.used_percent)));
-              const remain = 100 - used;
-              return (
-                <button
-                  key={`${r.account.account.id}-${r.window.name}-${r.label}`}
-                  type="button"
-                  className={`reset-node ${r.tone}`}
-                  onClick={() => setOpen(open === r.account.account.id ? undefined : r.account.account.id)}
-                  title={`${r.account.account.label || r.account.account.id} · ${r.label} · ${resetText(r.window.resets_at)}`}
-                >
-                  <span className="reset-node-key" style={{ background: r.color }} />
-                  <VendorMark plugin={r.account.account.provider} size={11} />
-                  <span className="reset-node-acct">{r.account.account.label || r.account.account.id}</span>
-                  <span className="reset-node-win">{r.label}</span>
-                  <span className="reset-node-time">{shortReset(r.window.resets_at)}</span>
-                  <span className={`reset-node-pct ${r.tone}`}>
-                    {meterMode === "remain" ? `剩${remain}%` : `${used}%`}
-                  </span>
-                </button>
-              );
-            })}
           </div>
-        </div>
-      )}
 
-      {accounts.length > 0 && (
-        <div className={`accounts ${layout === "deck" ? "accounts-deck" : "accounts-list"}`}>
-          {visible.map((a) => {
-            const idx = accounts.indexOf(a);
-            return (
-              <AccountRow
-                key={a.account.id}
-                quota={a}
-                color={seriesColor(idx)}
-                meterMode={meterMode}
-                open={open === a.account.id}
-                onToggle={() => setOpen(open === a.account.id ? undefined : a.account.id)}
-                onChange={quota.reload}
-              />
-            );
-          })}
-        </div>
+          {visible.length > 0 ? (
+            <div className={`accounts accounts-${layout}`}>
+              {visible.map((a) => (
+                <AccountRow
+                  key={a.account.id}
+                  quota={a}
+                  color={seriesColor(accounts.indexOf(a))}
+                  meterMode={meterMode}
+                  open={open === a.account.id}
+                  onToggle={() => setOpen(open === a.account.id ? undefined : a.account.id)}
+                  onChange={quota.reload}
+                />
+              ))}
+            </div>
+          ) : <p className="muted quota-no-match">没有匹配的账号。</p>}
+          <AllUsage accounts={accounts} />
+        </>
       )}
-      {accounts.length > 0 && <AllUsage accounts={accounts} />}
     </section>
   );
 }
@@ -233,20 +130,6 @@ export function QuotaSection() {
 /** Account i's colour in every chart: categorical slot i, in list order. */
 const seriesColor = (i: number) => `var(--series-${(i % 8) + 1})`;
 
-const shortWindow = (w: RateWindow) => windowLabel(w).replace(/限额$/, "");
-
-/** Ultra-compact reset time for inline power cells: "38m", "2h20m", "明天 16:55", "11/20". */
-function shortReset(resetsAt: string | null | undefined): string | undefined {
-  if (!resetsAt) return undefined;
-  const full = resetText(resetsAt);
-  if (!full) return undefined;
-  return full
-    .replace(/\s*后重置$/, "")
-    .replace(/\s*重置$/, "")
-    .replace(/\s*小时\s*/g, "h")
-    .replace(/\s*分钟?/g, "m")
-    .replace(/(\d+)月(\d+)日\s*周./, "$1/$2");
-}
 
 /** Cursor lists every mode of a model as its own ID; keep the first of each base model. */
 function byBase(models: readonly ModelInfo[]): ModelInfo[] {
@@ -259,54 +142,31 @@ function byBase(models: readonly ModelInfo[]): ModelInfo[] {
   });
 }
 
-/**
- * A single-line 10-segment LED power cell meter for one rate-limit or credit window.
- * Keeps `.quota-bar` inside so existing selectors and accessibility checks continue to work.
- */
-function PowerCellMeter({
-  window: w,
-  tone,
-  meterMode,
-  prefix,
-}: {
-  window: RateWindow;
-  tone: Level;
-  meterMode: MeterMode;
-  prefix?: string;
-}) {
+function QuotaMeter({ window: w, reached, mode, group }: { window: RateWindow; reached: boolean; mode: MeterMode; group?: string }) {
+  const tone = level(w.used_percent, reached && w.used_percent >= 100);
   const used = Math.max(0, Math.min(100, Math.round(w.used_percent)));
-  const remain = Math.max(0, 100 - used);
-  const fillPct = meterMode === "remain" ? remain : used;
-  const activeCells = Math.round(fillPct / 10);
-  const pool = poolText(w);
-  const reset = w.resets_at ? resetText(w.resets_at) : undefined;
-  const briefReset = shortReset(w.resets_at);
-  const titleText = `${prefix ? `${prefix} · ` : ""}${windowLabel(w)} · ${pool ?? `${used}% 已用（剩 ${remain}%）`}${reset ? ` · ${reset}` : ""}`;
-  const displayPct = pool ? pool : meterMode === "remain" ? `剩 ${remain}%` : `${used}%`;
+  const value = mode === "used" ? used : 100 - used;
+  const label = windowLabel(w).replace(/限额$/, "") || windowLabel(w);
+  const name = group && group !== label ? `${group} · ${label}` : label;
+  const reset = resetText(w.resets_at);
+  const pool = w.total != null && w.remaining != null
+    ? `${creditNumber(mode === "used" ? w.total - w.remaining : w.remaining)} / ${creditNumber(w.total)}`
+    : undefined;
+  const amount = `${mode === "used" ? "已用" : "剩余"} ${pool ?? `${value}%`}`;
 
   return (
-    <div className={`meter cell-meter ${tone}`} title={titleText}>
-      <span className="meter-label">
-        {prefix ? <b>{prefix}</b> : shortWindow(w)}
-      </span>
-      <span className={`quota-bar cell-bar ${tone}`} data-mode={meterMode}>
-        <span style={{ width: `${fillPct}%` }} />
-        <i className="cell-segments" aria-hidden="true">
-          {Array.from({ length: 10 }, (_, k) => (
-            <b key={k} className={k < activeCells ? "lit" : ""} />
-          ))}
-        </i>
-      </span>
-      <span className={`meter-pct ${tone}`}>{displayPct}</span>
-      {briefReset && <span className="cell-meter-reset">{briefReset}</span>}
+    <div className="account-meter">
+      <div className="account-meter-heading">
+        <span className="account-meter-name">{name}</span>
+        <span className={`account-meter-value ${tone}`}>{amount}</span>
+      </div>
+      <div className={`quota-bar account-meter-bar ${tone}`} role="progressbar" aria-label={name} aria-valuenow={value} aria-valuetext={amount}>
+        <span style={{ width: `${value}%` }} />
+      </div>
+      {reset && <span className="account-meter-reset" title={w.resets_at ?? undefined}>{reset}</span>}
     </div>
   );
 }
-
-/**
- * One account power pod: who it is, active teammate badges, segmented power cells per window,
- * worst health, actions, and egress shield bar. Clicking opens full details & token charts.
- */
 function AccountRow({
   quota,
   color,
@@ -322,31 +182,33 @@ function AccountRow({
   onToggle: () => void;
   onChange: () => void;
 }) {
-  const { account, status } = quota;
+  const { account, status, at_risk: atRisk, egress_block: blocked } = quota;
   const [login, setLogin] = useState<LoginStarted>();
   const [error, setError] = useState<string>();
   const remove = useArmed();
+  const name = account.label || account.id;
   const plan = planLabel(status.plan);
   const credits = status.credits;
+  const balance = credits && (credits.has_credits || credits.unlimited)
+    ? credits.unlimited ? "不限" : creditText(credits.balance) ?? "—"
+    : null;
   const windows = status.rate_limits;
   const extraGroups = status.limits.slice(1).filter((g) => g.windows.length > 0);
-  const availableResets = status.reset_credits.filter((c) => c.status === "available");
-  // Cursor's list has one ID per mode; the chips show each base model once.
+  const hasWindows = windows.length > 0 || extraGroups.length > 0;
   const cursor = account.provider === "cursor";
   const models = cursor ? byBase(quota.models) : quota.models;
-  const levels = windows.map((w) => level(w.used_percent, status.limit_reached && w.used_percent >= 100));
-  const worst: Level | undefined = levels.includes("danger") ? "danger" : levels.includes("warn") ? "warn" : levels.length ? "ok" : undefined;
-  // The hub's own words for the two states that stop a session; the GUI does not paraphrase them.
-  const atRisk = quota.at_risk;
-  const blocked = quota.egress_block;
   const egress = egressOf(quota.egress);
+  const health = accountHealth(quota);
+  const stateLabel = atRisk ? "风控暂停" : blocked ? "出口待确认" : !status.logged_in ? "未登录"
+    : status.limit_reached ? "已达限额" : health === "danger" ? "快用完" : health === "warn" ? "偏紧" : undefined;
+  const detailId = `quota-detail-${account.id}`;
 
-  // The login notice goes once the account turns logged in.
   const wasLoggedIn = useRef(status.logged_in);
   useEffect(() => {
     if (status.logged_in && !wasLoggedIn.current) setLogin(undefined);
     wasLoggedIn.current = status.logged_in;
   }, [status.logged_in]);
+
   async function startLogin() {
     setError(undefined);
     try {
@@ -357,268 +219,192 @@ function AccountRow({
   }
 
   return (
-    <div className={`account-row ${open ? "open" : ""} ${atRisk ? "is-risk" : blocked ? "is-blocked" : worst ? `is-${worst}` : ""}`}>
-      <div className="account-line">
-        <div className="account-top-bar">
-          <button className="account-who" onClick={onToggle} aria-expanded={open} title={status.email ?? undefined}>
-            <span className="series-key" style={{ background: color }} />
-            <VendorMark plugin={account.provider} size={16} />
-            <span className="account-name">{account.label || account.id}</span>
-            {account.codebuddy_site && <span className="chip">{account.codebuddy_site === "china" ? "国内站" : "国际站"}</span>}
-            {plan && <span className="chip plan-chip">{plan}</span>}
-            {status.email && <span className="account-email muted small">{status.email}</span>}
-          </button>
-
-          <div className="account-badges">
-            {quota.agents.length > 0 ? (
-              <span className="account-agents" title={`绑定在此账号的队友：${quota.agents.map((n) => `@${n}`).join(" ")}`}>
-                <span className="agent-pulse" />
-                {quota.agents.map((n) => (
-                  <span key={n} className="agent-tag">@{n}</span>
-                ))}
-              </span>
-            ) : (
-              <span className="account-idle-tag">空闲</span>
-            )}
-            <span className="account-health">
-              {atRisk ? (
-                <span className="health danger">
-                  <span aria-hidden="true">✕</span>风控熔断
-                </span>
-              ) : blocked ? (
-                <span className="health warn">
-                  <span aria-hidden="true">!</span>出口待确认
-                </span>
-              ) : (
-                worst && (
-                  <span className={`health ${worst}`}>
-                    <span aria-hidden="true">{HEALTH[worst].glyph}</span>
-                    {HEALTH[worst].label}
-                  </span>
-                )
-              )}
-            </span>
+    <article className={`account-row ${open ? "open" : ""} ${atRisk ? "is-risk" : blocked ? "is-blocked" : ""}`}>
+      <div className="account-summary">
+        <header className="account-heading">
+          <span className="account-vendor" style={{ borderColor: color }}>
+            <VendorMark plugin={account.provider} size={19} />
+          </span>
+          <div className="account-identity">
+            <h3 className="account-name" title={name}>{name}</h3>
+            <p className="account-meta">
+              {vendorName(account.provider)}
+              {account.codebuddy_site && ` · ${account.codebuddy_site === "china" ? "国内站" : "国际站"}`}
+              {plan && ` · ${plan}`}
+            </p>
           </div>
+          {stateLabel && <span className={`health ${blocked && !atRisk ? "warn" : health}`}>{stateLabel}</span>}
+        </header>
 
-          <div className="account-actions">
+        {status.logged_in && hasWindows && (
+          <div className="account-meters">
+            {windows.map((w) => <QuotaMeter key={w.name} window={w} reached={status.limit_reached} mode={meterMode} />)}
+            {extraGroups.map((g) => g.windows.map((w) => (
+              <QuotaMeter key={`${g.id}-${w.name}`} window={w} reached={g.reached} mode={meterMode} group={g.name ?? g.model ?? g.id} />
+            )))}
+          </div>
+        )}
+        {status.logged_in && !hasWindows && (
+          <div className="account-missing">
+            <span>{status.note ? "额度暂不可用" : "暂无额度数据"}</span>
+            {models.length > 0 && <span className="muted small">{models.length} 个可用模型</span>}
+          </div>
+        )}
+        {status.logged_in && balance != null && (
+          <div className="account-balance" title="限额用完后从额外额度扣费">
+            <span>额外额度</span><strong>{balance}</strong>
+          </div>
+        )}
+
+        <footer className="account-summary-footer">
+          <span className="muted small">{quota.agents.length} 个智能体</span>
+          <button
+            className="ghost small account-who"
+            type="button"
+            aria-expanded={open}
+            aria-controls={open ? detailId : undefined}
+            onClick={onToggle}
+          >
+            {open ? "收起详情" : "账号详情"}
+            <span className={`disclose ${open ? "open" : ""}`}><Icon name="chevron" size={13} /></span>
+          </button>
+        </footer>
+      </div>
+
+      {open && (
+        <div className="account-detail" id={detailId}>
+          <div className="account-detail-heading">
+            <h4>账号管理</h4>
             <button
               className="ghost small"
               onClick={startLogin}
               disabled={!!atRisk}
-              aria-disabled={atRisk ? true : undefined}
-              title={atRisk ? "账号已因风控信号暂停：现在重新登录等于再试一次，只会让厂家更怀疑。先处理验证，再由人解除暂停" : status.logged_in ? "重新登录" : "登录"}
+              title={atRisk ? "账号因风控暂停，请先完成厂商验证，再手动解除暂停" : undefined}
             >
               {status.logged_in ? "重新登录" : "登录"}
             </button>
             <button
               className={`ghost small danger ${remove.armed ? "armed" : ""}`}
               onClick={() => remove.click(() => api.deleteAccount(account.id).then(onChange, (err) => setError(errorText(err))))}
-              title="只是不再管理它；账号目录里的文件不会删除"
+              title="从 CrossAgents 移除账号，保留账号目录里的文件"
             >
               {remove.armed ? "再点一次移除" : "移除"}
             </button>
-            <button className="icon-btn" onClick={onToggle} aria-label={open ? "收起详情" : "展开详情"} title={open ? "收起详情" : "详情"}>
-              <span className={`disclose ${open ? "open" : ""}`}>
-                <Icon name="chevron" size={14} />
-              </span>
-            </button>
           </div>
-        </div>
-
-        <div className="account-meters">
-          {!status.logged_in ? (
-            <div className="account-empty-meter warn">
-              <span className="chip warn">未登录</span>
-              {status.note && <span className="muted small">{status.note}</span>}
-            </div>
-          ) : windows.length ? (
-            <>
-              {windows.map((w, i) => (
-                <PowerCellMeter key={w.name} window={w} tone={levels[i]} meterMode={meterMode} />
-              ))}
-              {extraGroups.map((g) =>
-                g.windows.map((w) => (
-                  <PowerCellMeter
-                    key={`${g.id}-${w.name}`}
-                    window={w}
-                    tone={level(w.used_percent, g.reached && w.used_percent >= 100)}
-                    meterMode={meterMode}
-                    prefix={g.name ?? g.model ?? g.id}
-                  />
-                )),
-              )}
-              {credits && (credits.has_credits || credits.unlimited) && (
-                <div className="account-perk-pill" title="限额用完后从额外额度扣费">
-                  <span className="perk-icon">⚡</span>
-                  <span>备用金 {credits.unlimited ? "不限" : creditText(credits.balance) ?? "—"}</span>
-                </div>
-              )}
-              {availableResets.length > 0 && (
-                <div className="account-perk-pill" title="可用额度重置券清零限额">
-                  <span className="perk-icon">🎟</span>
-                  <span>重置券 ×{availableResets.length}</span>
-                </div>
-              )}
-            </>
-          ) : (
-            <div className="account-empty-meter">
-              <span className="muted small" title={status.note ?? undefined}>
-                {account.provider === "antigravity" && status.note ? "额度查询失败" : status.note ? `无固定限额 · ${status.note}` : "暂无额度数据"}
+          {atRisk && (
+            <div className="account-alert danger">
+              <span className="account-alert-title">
+                <span aria-hidden="true">✕</span> 风控暂停
               </span>
-              {models.length > 0 && (
-                <span className="account-model-count chip small">{models.length} 个可用模型</span>
+              <span className="account-alert-text">{atRisk}</span>
+              <span className="account-alert-hint">
+                CrossAgents 不会自动重试这个账号——重试只会让厂家更怀疑。要恢复：先在厂家那边完成身份验证或人机校验，再由人手动解除暂停；界面目前还没有解除按钮。
+                {quota.agents.length > 0 && ` 绑在它上面的 ${quota.agents.length} 个智能体已经停下。`}
+              </span>
+            </div>
+          )}
+          {blocked && (
+            <div className="account-alert warn">
+              <span className="account-alert-title">
+                <span aria-hidden="true">!</span> 出口变了 · 等你确认
+              </span>
+              <span className="account-alert-text">{blocked}</span>
+              <span className="account-alert-hint">确认前不会用这个出口启动会话。在通知里选「允许」，再重新启动就能解开。</span>
+            </div>
+          )}
+
+          {login && (
+            <div className="notice">
+              {login.manual ? (
+                <>
+                  这个账号要在终端里登录：
+                  {login.manual.map((step, i) => (
+                    <span key={step}>
+                      {i === 0 ? "运行 " : "，再输入 "}
+                      <code>{step}</code>
+                    </span>
+                  ))}
+                  。登录好后这里会在一分钟内变成已登录。
+                </>
+              ) : login.url ? (
+                <>
+                  在浏览器里完成登录：
+                  <a href={login.url} target="_blank" rel="noreferrer">
+                    打开登录页
+                  </a>
+                  ，登录好后这里会自动变成已登录。
+                </>
+              ) : (
+                <span title={login.command}>
+                  已在你的浏览器里打开授权页，完成授权后这里会自动变成已登录。
+                </span>
               )}
             </div>
           )}
-        </div>
-      </div>
-
-      {/* Always shown, even when there is nothing to report: an absent exit line would read
-          as "nothing to see" rather than "never confirmed" (docs/ACCOUNT-RISK.md「出口指纹」). */}
-      <div className={`account-egress ${egress.route}`}>
-        <span className="account-egress-label" title="最后一次确认到的出口；采集不到时不写新记录，所以它可能来自上一次启动，而不是此刻正在用的">出口</span>
-        {egress.known ? (
-          <>
-            <code className="egress-value" title="出口 IP">{egress.ip}</code>
-            <span className="egress-value" title="国家">{egress.country}</span>
-            <span className="egress-value muted egress-asn" title="ASN">{egress.asn}</span>
-            <span className={`egress-route ${egress.route}`} title={egress.route === "unknown" ? "代理出口无法确认：allow_direct 可能回退直连，NO_PROXY 也可能绕过代理" : undefined}>
-              {egress.routeLabel}
-            </span>
-            <span className="muted egress-time" title={egress.changed ? `上次变化 ${egress.changed}` : "上次变化时间未知"}>
-              {egress.changed ?? "时间未知"}
-            </span>
-          </>
-        ) : (
-          <span className="muted" title="还没有记录到出口；下一次经代理启动会话时会采一次。">未记录（下次启动采集）</span>
-        )}
-        <div className="spacer" />
-        <EgressPicker
-          compact
-          value={account.proxy ?? null}
-          defaultLabel="默认代理"
-          onChange={(next) => {
-            setError(undefined);
-            api
-              .setAccountEgress(account.id, { proxy: next })
-              .then(onChange, (err) => setError(errorText(err)));
-          }}
-        />
-      </div>
-
-      {/* The two states that stop work, as blocks rather than a grey line: the reason and
-          what the person has to do are both here (the repo's rule for disabled entries). */}
-      {atRisk && (
-        <div className="account-alert danger">
-          <span className="account-alert-title">
-            <span aria-hidden="true">✕</span> 风控暂停
-          </span>
-          <span className="account-alert-text">{atRisk}</span>
-          <span className="account-alert-hint">
-            CrossAgents 不会自动重试这个账号——重试只会让厂家更怀疑。要恢复：先在厂家那边完成身份验证或人机校验，再由人手动解除暂停；界面目前还没有解除按钮。
-            {quota.agents.length > 0 && ` 绑在它上面的 ${quota.agents.map((n) => `@${n}`).join(" ")} 已经停下。`}
-          </span>
-        </div>
-      )}
-      {blocked && (
-        <div className="account-alert warn">
-          <span className="account-alert-title">
-            <span aria-hidden="true">!</span> 出口变了 · 等你确认
-          </span>
-          <span className="account-alert-text">{blocked}</span>
-          <span className="account-alert-hint">确认前不会用这个出口启动会话。在通知里选「允许」，再重新启动就能解开。</span>
-        </div>
-      )}
-
-      {login && (
-        <div className="notice">
-          {login.manual ? (
-            <>
-              这个账号要在终端里登录：
-              {login.manual.map((step, i) => (
-                <span key={step}>
-                  {i === 0 ? "运行 " : "，再输入 "}
-                  <code>{step}</code>
+          <ErrorBox error={error} />
+          {status.email && <p className="account-detail-note">{status.email}</p>}
+          <div className={`account-egress ${egress.route}`}>
+            <span className="account-egress-label" title="最后一次确认到的出口；采集不到时不写新记录，所以它可能来自上一次启动，而不是此刻正在用的">出口</span>
+            {egress.known ? (
+              <>
+                <code className="egress-value" title="出口 IP">{egress.ip}</code>
+                <span className="egress-value" title="国家">{egress.country}</span>
+                <span className="egress-value muted egress-asn" title="ASN">{egress.asn}</span>
+                <span className={`egress-route ${egress.route}`} title={egress.route === "unknown" ? "代理出口无法确认：allow_direct 可能回退直连，NO_PROXY 也可能绕过代理" : undefined}>
+                  {egress.routeLabel}
                 </span>
-              ))}
-              。登录好后这里会在一分钟内变成已登录。
-            </>
-          ) : login.url ? (
-            <>
-              在浏览器里完成登录：
-              <a href={login.url} target="_blank" rel="noreferrer">
-                打开登录页
-              </a>
-              ，登录好后这里会自动变成已登录。
-            </>
-          ) : (
-            <span title={login.command}>
-              已在你的浏览器里打开授权页，完成授权后这里会自动变成已登录。
-            </span>
-          )}
-        </div>
-      )}
-      <ErrorBox error={error} />
-
-      {open && (
-        <div className="account-detail">
-          {windows.length > 0 && (
-            <div className="quota">
-              <div className="quota-title">
-                {windows.some((w) => w.total != null) ? `积分 · 剩 ${creditNumber(windows.reduce((s, w) => s + (w.remaining ?? 0), 0))}` : "用量限额"}
-                {status.email ? ` · ${status.email}` : ""}
+                <span className="muted egress-time" title={egress.changed ? `上次变化 ${egress.changed}` : "上次变化时间未知"}>
+                  {egress.changed ?? "时间未知"}
+                </span>
+              </>
+            ) : (
+              <span className="muted" title="还没有记录到出口；下一次经代理启动会话时会采一次。">未记录（下次启动采集）</span>
+            )}
+            <EgressPicker
+              value={account.proxy ?? null}
+              defaultLabel="默认代理"
+              onChange={(next) => {
+                setError(undefined);
+                api
+                  .setAccountEgress(account.id, { proxy: next })
+                  .then(onChange, (err) => setError(errorText(err)));
+              }}
+            />
+          </div>
+          {quota.agents.length > 0 && (
+            <div className="account-members">
+              <h4>绑定的智能体</h4>
+              <div className="models">
+                {quota.agents.map((agent) => <span key={agent} className="chip">@{agent}</span>)}
               </div>
-              {windows.map((w) => (
-                <WindowRow key={w.name} window={w} reached={status.limit_reached} />
-              ))}
             </div>
           )}
-          {/* Separate limits beyond the main one, e.g. one per model. */}
-          {status.limits.slice(1).map((group) => (
-            <div key={group.id} className="quota">
-              <div className="quota-title">
-                {group.name ?? group.model ?? group.id} 的限额
-                {group.model && group.name && <span className="muted"> · {group.model}</span>}
-              </div>
-              {group.windows.map((w) => (
-                <WindowRow key={w.name} window={w} reached={group.reached} />
-              ))}
-            </div>
-          ))}
           <ResetCredits credits={status.reset_credits} />
-          {credits && (credits.has_credits || credits.unlimited) && (
-            <div className="quota-row plain">
-              <div className="quota-label">
-                额外额度
-                <div className="quota-sub">限额用完后从这里扣</div>
-              </div>
-              <div className="quota-value">{credits.unlimited ? "不限" : `余额 ${creditText(credits.balance) ?? "—"}`}</div>
-            </div>
-          )}
-          <TokenUsage id={account.id} />
           {models.length > 0 && (
-            <div className="models">
-              可用模型：
-              {models.map((m) => (
-                <span key={m.id} className="chip" title={m.description ?? undefined}>
-                  {cursor ? prettyModel(cursorMode(m.id).base) : m.name || m.id}
-                  {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
-                  {m.credit_multiplier != null && <span className="muted"> · ×{m.credit_multiplier}</span>}
-                </span>
-              ))}
-            </div>
+            <details className="account-models">
+              <summary>{models.length} 个可用模型</summary>
+              <div className="models">
+                {models.map((m) => (
+                  <span key={m.id} className="chip" title={m.description ?? undefined}>
+                    {cursor ? prettyModel(cursorMode(m.id).base) : m.name || m.id}
+                    {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
+                    {m.credit_multiplier != null && <span className="muted"> · ×{m.credit_multiplier}</span>}
+                  </span>
+                ))}
+              </div>
+            </details>
           )}
           <div className="account-foot">
             <span>
               {status.source === "live" ? "实时" : status.source === "snapshot" ? "来自本地会话记录" : "暂无额度数据"}
               {status.as_of ? ` · ${ago(status.as_of)}更新` : ""}
             </span>
-            {status.note && <span title={status.note}>· {status.note}</span>}
-            {quota.agents.length > 0 && <span>· 使用中：{quota.agents.map((n) => `@${n}`).join(" ")}</span>}
+            {status.note && <p className="account-detail-note">{status.note}</p>}
           </div>
+          <TokenUsage id={account.id} />
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
@@ -663,52 +449,18 @@ function ResetCredits({ credits }: { credits: ResetCredit[] }) {
     .sort()[0];
   const date = soonest ? new Date(soonest) : undefined;
   return (
-    <div className="quota-row plain" title={available.map((c) => `${c.title}${c.description ? ` — ${c.description}` : ""}`).join("\n")}>
-      <div className="quota-label">
+    <div className="account-balance" title={available.map((c) => `${c.title}${c.description ? ` — ${c.description}` : ""}`).join("\n")}>
+      <div>
         额度重置券
         <div className="quota-sub">用一张可以把限额清零，在 Codex 里使用</div>
       </div>
-      <div className="quota-value">
+      <strong>
         {available.length} 张可用{date ? ` · 最早 ${date.getMonth() + 1}月${date.getDate()}日过期` : ""}
-      </div>
+      </strong>
     </div>
   );
 }
 
-/** Quota health in words and a glyph, never colour alone. */
-const HEALTH = {
-  ok: { label: "充足", glyph: "✓" },
-  warn: { label: "偏紧", glyph: "!" },
-  danger: { label: "快用完", glyph: "✕" },
-} as const;
-
-/** "剩 466 / 500" for a pool of credits (CodeBuddy); undefined for a time window. */
-function poolText(w: RateWindow): string | undefined {
-  return w.total != null ? `剩 ${creditNumber(w.remaining ?? 0)} / ${creditNumber(w.total)}` : undefined;
-}
-
-function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolean }) {
-  const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
-  const tone = level(w.used_percent, reached && pct >= 100);
-  return (
-    <div className="quota-row">
-      <div className="quota-label">
-        {windowLabel(w)}
-        {w.resets_at && <div className="quota-sub">{resetText(w.resets_at)}</div>}
-      </div>
-      <div className={`quota-bar ${tone}`} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-        <span style={{ width: `${pct}%` }} />
-      </div>
-      <div className="quota-value">
-        <span className={`health ${tone}`}>
-          <span aria-hidden="true">{HEALTH[tone].glyph}</span>
-          {pct >= 100 ? "已用完" : HEALTH[tone].label}
-        </span>
-        {poolText(w) ?? `${pct}% 已用`}
-      </div>
-    </div>
-  );
-}
 
 const USAGE_GROUPS: { by: AccountUsageGroup; label: string }[] = [
   { by: "day", label: "按天" },

@@ -217,17 +217,26 @@ export const SCENARIOS: Scenario[] = [
   { key: "cursor-account", label: "Cursor 账号", hint: "登录后读状态、邮箱和模型；额度留空，显示暂无额度数据", build: () => {
     const state = usageScene();
     return { state, route: "#/usage", script: [
-      { at: 700, act: () => [...document.querySelectorAll<HTMLButtonElement>(".account-who")].find((b) => b.textContent?.includes("Cursor"))?.click() },
+      { at: 700, act: () => [...document.querySelectorAll(".account-row")].find((row) =>
+        row.querySelector(".account-name")?.textContent?.includes("Cursor"),
+      )?.querySelector<HTMLButtonElement>(".account-who")?.click() },
     ] };
   } },
-  { key: "accounts-risk", label: "账号：出口变了与 at-risk", hint: "每行都有出口（IP、国家、ASN、经代理/直连/无法确认、上次变化）；换国家被拦住等人确认；风控暂停的账号显眼，重新登录被禁用并写明原因", build: () => {
+  { key: "accounts-risk", label: "账号：出口待确认与风控暂停", hint: "卡片标出出口待确认与风控暂停，展开详情查看原因、出口信息及登录限制。", build: () => {
     const state = accountsRiskScene();
     return { state, route: "#/usage", script: [
       { at: 600, act: () => {
-        const rows = document.querySelectorAll(".account-egress").length;
-        if (rows !== state.quota.accounts.length) throw new Error(`exit line missing: ${rows}/${state.quota.accounts.length}`);
-        if (!document.querySelector(".account-alert.danger")) throw new Error("at-risk block missing");
+        if (document.querySelector(".account-egress")) throw new Error("exit line should only show in account details");
+        if (!document.querySelector(".account-row.is-blocked .health")) throw new Error("exit held badge missing");
+        document.querySelector<HTMLButtonElement>(".account-row.is-blocked .account-who")?.click();
+      } },
+      { at: 850, act: () => {
         if (!document.querySelector(".account-alert.warn")) throw new Error("exit held block missing");
+        document.querySelector<HTMLButtonElement>(".account-row.is-risk .account-who")?.click();
+      } },
+      { at: 1100, act: () => {
+        if (!document.querySelector(".account-alert.danger")) throw new Error("at-risk block missing");
+        if (!document.querySelector(".account-row.is-risk .account-egress")) throw new Error("exit line missing from account details");
         if (!document.querySelector<HTMLButtonElement>(".account-alert.danger")?.closest(".account-row")?.querySelector("button[disabled]")) throw new Error("re-login should be disabled for the at-risk account");
         document.querySelector(".account-alert.danger")?.scrollIntoView({ block: "center" });
       } },
