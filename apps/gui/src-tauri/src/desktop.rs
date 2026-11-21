@@ -98,6 +98,10 @@ pub struct Zoom(Mutex<i32>);
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WindowAction {
+    Drag,
+    Minimize,
+    Maximize,
+    Close,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -114,6 +118,12 @@ pub fn window_command(
     action: WindowAction,
 ) -> Result<(), String> {
     let result = match action {
+        WindowAction::Drag => window.start_dragging(),
+        WindowAction::Minimize => window.minimize(),
+        WindowAction::Maximize => window
+            .is_maximized()
+            .and_then(|max| if max { window.unmaximize() } else { window.maximize() }),
+        WindowAction::Close => window.close(),
         WindowAction::Reload => window.reload(),
         WindowAction::Fullscreen => window
             .is_fullscreen()

@@ -222,7 +222,7 @@ export interface CrossAgentsBridge {
     onState(listener: (state: UpdateState) => void): () => void;
   };
   /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
-  command?(name: "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
+  command?(name: "drag" | "minimize" | "maximize" | "close" | "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
   /** This machine's Tailscale state and peers (electron/tailscale.cts). Electron only. */
   tailscale?: { status(): Promise<TailscaleStatus> };
 }

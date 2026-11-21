@@ -71,7 +71,7 @@ jobs:
       - name: 包里有 crossagents-link
         working-directory: apps/gui/src-tauri/target/release/bundle/macos
         run: |
-          bin="CrossAgents Tauri.app/Contents/MacOS/crossagents-link"
+          bin="CrossAgents.app/Contents/MacOS/crossagents-link"
           test -x "$bin" || { echo "缺 $bin"; exit 1; }
           "$bin" --version
 

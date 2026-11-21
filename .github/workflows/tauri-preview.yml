@@ -43,7 +43,7 @@ jobs:
         shell: bash
         run: |
           test "$(uname -m)" = arm64
-          app="apps/gui/src-tauri/target/release/bundle/macos/CrossAgents Tauri.app/Contents/MacOS"
+          app="apps/gui/src-tauri/target/release/bundle/macos/CrossAgents.app/Contents/MacOS"
           "$app/crossagents" --version
           "$app/crossagents-link" --version
       - uses: actions/upload-artifact@v4

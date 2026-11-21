@@ -1586,8 +1586,16 @@ button.account-who { display: inline-flex; align-items: center; gap: 4px; }
   position: relative; z-index: 50;
 }
 .titlebar.mac { padding-left: 80px; }
+.titlebar:has(.titlebar-controls) { padding-right: 0; }
 .titlebar button { -webkit-app-region: no-drag; }
 .titlebar-nav { display: flex; align-items: center; gap: 2px; }
+.titlebar-controls { margin-left: auto; display: flex; align-items: stretch; height: 100%; }
+.titlebar-win-btn {
+  display: grid; place-items: center; width: 46px; height: 100%; padding: 0; border: none;
+  background: transparent; color: var(--text-2); border-radius: 0;
+}
+.titlebar-win-btn:hover { background: var(--hover); color: var(--text); }
+.titlebar-win-btn.close:hover { background: #e81123; color: #fff; }
 .tb-btn { display: grid; place-items: center; width: 30px; height: 28px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-2); }
 .tb-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .tb-btn:disabled { opacity: 0.3; }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CrossAgents Tauri",
+  "productName": "CrossAgents",
   "version": "../package.json",
   "identifier": "dev.crossagents.tauri-prototype",
   "build": { "frontendDist": "../dist-tauri" },

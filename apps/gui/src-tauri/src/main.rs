@@ -370,11 +370,18 @@ fn main() {
             app.manage(file_preview::Previews::new(&app_handle)?);
             chrome::Chrome::setup(&app_handle)?;
             remote::Remote::start(&app_handle);
-            WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("CrossAgents · Tauri 预览")
+            let builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+                .title("CrossAgents")
                 .inner_size(1280.0, 900.0)
                 .visible(false)
-                .disable_drag_drop_handler()
+                .disable_drag_drop_handler();
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+            #[cfg(not(target_os = "macos"))]
+            let builder = builder.decorations(false);
+            builder
                 .on_page_load(|window, event| {
                     if event.event() == tauri::webview::PageLoadEvent::Started {
                         browser::close_all(window.app_handle());
