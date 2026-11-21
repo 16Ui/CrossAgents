@@ -167,6 +167,25 @@ impl Remote {
         self.state.lock().expect("remote state").saved.remote
     }
 
+    pub fn remote_summary(&self) -> Option<(String, bool)> {
+        let state = self.state.lock().expect("remote state");
+        if !state.saved.remote {
+            return None;
+        }
+        let target = state
+            .saved
+            .pairing
+            .as_ref()
+            .map(|pairing| pairing.target.host.clone())
+            .filter(|host| !host.is_empty())
+            .unwrap_or_else(|| "远程".into());
+        let connected = state
+            .tunnel
+            .as_ref()
+            .is_some_and(|tunnel| tunnel.status == "connected");
+        Some((target, connected))
+    }
+
     pub fn workspace_key(&self) -> Option<String> {
         let state = self.state.lock().expect("remote state");
         if state.saved.remote {

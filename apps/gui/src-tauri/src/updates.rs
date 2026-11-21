@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
-use tauri::{AppHandle, State, ipc::Channel};
+use tauri::{AppHandle, Manager, State, ipc::Channel};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 #[derive(Default)]
@@ -39,9 +39,16 @@ fn state(app: &AppHandle, updates: &Updates) -> Value {
     }
 }
 
-fn publish(updates: &Updates, events: &Channel<Value>, value: Value) -> Value {
+pub fn current_state(app: &AppHandle) -> Value {
+    state(app, &app.state::<Updates>())
+}
+
+fn publish(app: &AppHandle, updates: &Updates, events: Option<&Channel<Value>>, value: Value) -> Value {
     *updates.current.lock().expect("update state") = value.clone();
-    let _ = events.send(value.clone());
+    if let Some(channel) = events {
+        let _ = channel.send(value.clone());
+    }
+    crate::desktop::refresh_tray(app);
     value
 }
 
@@ -50,25 +57,21 @@ pub fn updates_get(app: AppHandle, updates: State<'_, Updates>) -> Value {
     state(&app, &updates)
 }
 
-#[tauri::command]
-pub async fn updates_check(
-    app: AppHandle,
-    updates: State<'_, Updates>,
-    events: Channel<Value>,
-) -> Result<Value, String> {
-    if !configured(&app) {
-        return Ok(state(&app, &updates));
+async fn run_check(app: &AppHandle, updates: &Updates, events: Option<&Channel<Value>>) -> Value {
+    if !configured(app) {
+        return state(app, updates);
     }
     let Ok(_operation) = updates.operation.try_lock() else {
-        return Ok(state(&app, &updates));
+        return state(app, updates);
     };
     if updates.ready.lock().expect("downloaded update").is_some() {
-        return Ok(state(&app, &updates));
+        return state(app, updates);
     }
     let current = app.package_info().version.to_string();
     publish(
-        &updates,
-        &events,
+        app,
+        updates,
+        events,
         json!({ "state": "checking", "current": current }),
     );
     let result = async {
@@ -76,35 +79,52 @@ pub async fn updates_check(
             return Ok(json!({ "state": "latest", "current": current, "checked_at": now() }));
         };
         let version = update.version.clone();
-        publish(&updates, &events, json!({ "state": "downloading", "current": current, "version": version, "percent": 0 }));
+        publish(
+            app,
+            updates,
+            events,
+            json!({ "state": "downloading", "current": current, "version": version, "percent": 0 }),
+        );
         let mut downloaded = 0_u64;
         let mut previous = 0;
-        let bytes = update.download(|length, total| {
-            downloaded += length as u64;
-            if let Some(total) = total.filter(|total| *total > 0) {
-                let percent = (100 * downloaded / total).min(100);
-                if percent != previous {
-                    previous = percent;
-                    publish(&updates, &events, json!({ "state": "downloading", "current": current, "version": version, "percent": percent }));
-                }
-            }
-        }, || {}).await?;
+        let bytes = update
+            .download(
+                |length, total| {
+                    downloaded += length as u64;
+                    if let Some(total) = total.filter(|total| *total > 0) {
+                        let percent = (100 * downloaded / total).min(100);
+                        if percent != previous {
+                            previous = percent;
+                            publish(
+                                app,
+                                updates,
+                                events,
+                                json!({ "state": "downloading", "current": current, "version": version, "percent": percent }),
+                            );
+                        }
+                    }
+                },
+                || {},
+            )
+            .await?;
         *updates.ready.lock().expect("downloaded update") = Some((update, bytes));
-        Ok::<_, tauri_plugin_updater::Error>(json!({ "state": "ready", "current": current, "version": version }))
-    }.await;
+        Ok::<_, tauri_plugin_updater::Error>(
+            json!({ "state": "ready", "current": current, "version": version }),
+        )
+    }
+    .await;
     let next = result.unwrap_or_else(|error| {
         json!({
             "state": "error", "current": current, "message": error.to_string(), "checked_at": now(),
         })
     });
-    Ok(publish(&updates, &events, next))
+    publish(app, updates, events, next)
 }
 
-#[tauri::command]
-pub async fn updates_install(
-    app: AppHandle,
-    updates: State<'_, Updates>,
-    events: Channel<Value>,
+async fn run_install(
+    app: &AppHandle,
+    updates: &Updates,
+    events: Option<&Channel<Value>>,
 ) -> Result<(), String> {
     let _operation = updates
         .operation
@@ -121,8 +141,9 @@ pub async fn updates_install(
         .map_err(|err| err.to_string())?;
     if let Err(error) = result {
         publish(
-            &updates,
-            &events,
+            app,
+            updates,
+            events,
             json!({
                 "state": "error", "current": app.package_info().version.to_string(), "message": error.to_string(), "checked_at": now(),
             }),
@@ -130,4 +151,36 @@ pub async fn updates_install(
         return Err(error.to_string());
     }
     app.restart();
+}
+
+#[tauri::command]
+pub async fn updates_check(
+    app: AppHandle,
+    updates: State<'_, Updates>,
+    events: Channel<Value>,
+) -> Result<Value, String> {
+    Ok(run_check(&app, &updates, Some(&events)).await)
+}
+
+#[tauri::command]
+pub async fn updates_install(
+    app: AppHandle,
+    updates: State<'_, Updates>,
+    events: Channel<Value>,
+) -> Result<(), String> {
+    run_install(&app, &updates, Some(&events)).await
+}
+
+pub fn check_from_tray(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let updates = app.state::<Updates>();
+        let _ = run_check(&app, &updates, None).await;
+    });
+}
+
+pub fn install_from_tray(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let updates = app.state::<Updates>();
+        let _ = run_install(&app, &updates, None).await;
+    });
 }

@@ -158,44 +158,139 @@ pub fn window_command(
     result.map_err(|err| err.to_string())
 }
 
-pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::{
-        menu::{Menu, MenuItem},
-        tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+fn build_tray_menu(app: &AppHandle, stopping: bool) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let remote_summary = app.state::<Remote>().remote_summary();
+    let status_label = match &remote_summary {
+        Some((target, connected)) => format!(
+            "远程：{target}（{}）",
+            if *connected { "已连接" } else { "未连接" }
+        ),
+        None if stopping => "正在停止后台…".into(),
+        None => {
+            let running = crate::hub_home()
+                .map(|home| home.join("hub.json").exists())
+                .unwrap_or(false);
+            if running { "后台运行中" } else { "后台未运行" }.into()
+        }
     };
 
-    let show = MenuItem::with_id(app, "show", "打开 CrossAgents", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出界面", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
-    #[cfg(feature = "bundled-hub")]
-    {
-        let stop = MenuItem::with_id(app, "stop-background", "停止后台并退出", true, None::<&str>)?;
-        menu.append(&stop)?;
+    let menu = Menu::new(app)?;
+    let status = MenuItem::with_id(app, "status", status_label, false, None::<&str>)?;
+    let sep1 = PredefinedMenuItem::separator(app)?;
+    let show = MenuItem::with_id(app, "show", "打开 CrossAgents", !stopping, None::<&str>)?;
+    menu.append(&status)?;
+    menu.append(&sep1)?;
+    menu.append(&show)?;
+
+    let update_state = crate::updates::current_state(app);
+    let update_kind = update_state["state"].as_str().unwrap_or("idle");
+    if update_kind != "manual" {
+        let (id, label, enabled) = match update_kind {
+            "ready" => {
+                let version = update_state["version"].as_str().unwrap_or("");
+                ("update-install", format!("重启并更新到 {version}"), !stopping)
+            }
+            "downloading" => {
+                let version = update_state["version"].as_str().unwrap_or("");
+                let percent = update_state["percent"].as_u64().unwrap_or(0);
+                ("update-status", format!("正在下载 {version}（{percent}%）"), false)
+            }
+            "checking" => ("update-status", "正在检查更新…".into(), false),
+            _ => {
+                let current = update_state["current"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| app.package_info().version.to_string());
+                ("update-check", format!("检查更新（当前 {current}）"), !stopping)
+            }
+        };
+        let item = MenuItem::with_id(app, id, label, enabled, None::<&str>)?;
+        menu.append(&item)?;
     }
+
+    let safe_mode = MenuItem::with_id(app, "safe-mode", "以安全模式重启", !stopping, None::<&str>)?;
+    let sep2 = PredefinedMenuItem::separator(app)?;
+    menu.append(&safe_mode)?;
+    menu.append(&sep2)?;
+
+    if remote_summary.is_some() {
+        let quit = MenuItem::with_id(app, "quit", "退出界面", true, None::<&str>)?;
+        menu.append(&quit)?;
+    } else {
+        let quit = MenuItem::with_id(
+            app,
+            "quit",
+            "退出界面（后台继续运行）",
+            !stopping,
+            None::<&str>,
+        )?;
+        menu.append(&quit)?;
+        #[cfg(feature = "bundled-hub")]
+        {
+            let stop = MenuItem::with_id(app, "stop-background", "停止后台并退出", !stopping, None::<&str>)?;
+            menu.append(&stop)?;
+        }
+    }
+    Ok(menu)
+}
+
+pub fn refresh_tray(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("main") {
+        if let Ok(menu) = build_tray_menu(app, false) {
+            let _ = tray.set_menu(Some(menu));
+        }
+        let update_state = crate::updates::current_state(app);
+        if update_state["state"].as_str() == Some("ready")
+            && let Some(version) = update_state["version"].as_str()
+        {
+            let _ = tray.set_tooltip(Some(&format!("CrossAgents：{version} 已下载，退出时安装")));
+        }
+    }
+}
+
+fn restart_safe_mode(app: &AppHandle) {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--safe-mode").spawn();
+        app.exit(0);
+    }
+}
+
+pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let menu = build_tray_menu(app, false)?;
     let mut tray = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .show_menu_on_left_click(cfg!(target_os = "macos"))
         .tooltip("CrossAgents")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_window(app),
+            "update-check" => crate::updates::check_from_tray(app.clone()),
+            "update-install" => crate::updates::install_from_tray(app.clone()),
+            "safe-mode" => restart_safe_mode(app),
             "quit" => app.exit(0),
             #[cfg(feature = "bundled-hub")]
             "stop-background" => stop_background(app),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if cfg!(not(target_os = "macos"))
-                && matches!(
-                    event,
-                    TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    }
-                )
-            {
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } if cfg!(not(target_os = "macos")) => {
                 show_window(tray.app_handle());
             }
+            TrayIconEvent::Click {
+                button: MouseButton::Right,
+                button_state: MouseButtonState::Down,
+                ..
+            } => {
+                refresh_tray(tray.app_handle());
+            }
+            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
