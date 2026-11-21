@@ -133,24 +133,37 @@ mkdir "$lock" 2>/dev/null || die "另一个更新在跑（不是的话删掉 $lo
 work=$(mktemp -d)
 trap 'rm -rf "$work" "$lock"' EXIT
 
+tarball="CrossAgents-Tauri-$latest-arm64.app.tar.gz"
 zip="CrossAgents-$latest-arm64.zip"
-say "下载 $zip"
-code=$(curl -sSL --retry 3 --connect-timeout 15 -o "$work/$zip" -w '%{http_code}' \
-  "https://github.com/$REPO/releases/download/v$latest/$zip") || die "下载失败"
-if [ "$code" = 404 ]; then
-  # 发版时 Windows 包先上，Mac 包由 GitHub Actions 晚几分钟补上。
-  say "v$latest 还没有 Mac 包（CI 可能还在打），下次再试"
-  exit 0
+say "下载 $tarball"
+code=$(curl -sSL --retry 3 --connect-timeout 15 -o "$work/$tarball" -w '%{http_code}' \
+  "https://github.com/$REPO/releases/download/v$latest/$tarball") || die "下载失败"
+if [ "$code" = 200 ]; then
+  mkdir -p "$work/new"
+  tar -xzf "$work/$tarball" -C "$work/new"
+  new="$work/new/CrossAgents Tauri.app"
+  [ -d "$new" ] || new="$work/new/CrossAgents.app"
+  [ -d "$new" ] || die "压缩包里没有 CrossAgents Tauri.app"
+  link_bin="$new/Contents/MacOS/crossagents-link"
+else
+  say "下载 $zip"
+  code=$(curl -sSL --retry 3 --connect-timeout 15 -o "$work/$zip" -w '%{http_code}' \
+    "https://github.com/$REPO/releases/download/v$latest/$zip") || die "下载失败"
+  if [ "$code" = 404 ]; then
+    # 发版时 Windows 包先上，Mac 包由 GitHub Actions 晚几分钟补上。
+    say "v$latest 还没有 Mac 包（CI 可能还在打），下次再试"
+    exit 0
+  fi
+  [ "$code" = 200 ] || die "下载返回 HTTP $code"
+  ditto -x -k "$work/$zip" "$work/new"
+  new="$work/new/CrossAgents.app"
+  [ -d "$new" ] || die "zip 里没有 CrossAgents.app"
+  link_bin="$new/Contents/Resources/bin/crossagents-link"
 fi
-[ "$code" = 200 ] || die "下载返回 HTTP $code"
-
-ditto -x -k "$work/$zip" "$work/new"
-new="$work/new/CrossAgents.app"
-[ -d "$new" ] || die "zip 里没有 CrossAgents.app"
 got=$(defaults read "$new/Contents/Info" CFBundleShortVersionString)
-[ "$got" = "$latest" ] || die "zip 里的版本是 $got，不是 $latest"
+[ "$got" = "$latest" ] || die "包里的版本是 $got，不是 $latest"
 codesign --verify --deep --strict "$new" || die "签名校验没过，不装"
-[ -x "$new/Contents/Resources/bin/crossagents-link" ] || die "包里缺 crossagents-link，不装"
+[ -x "$link_bin" ] || die "包里缺 crossagents-link，不装"
 
 # ------------------------------------------------------------------ 替换
 if [ "$running" = yes ]; then
