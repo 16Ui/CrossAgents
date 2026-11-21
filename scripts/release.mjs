@@ -205,7 +205,7 @@ try {
 }
 
 const nsisDir = fileURLToPath(new URL("../apps/gui/src-tauri/target/release/bundle/nsis", import.meta.url));
-const nsisExe = readdirSync(nsisDir).find((f) => f.endsWith(".exe"));
+const nsisExe = readdirSync(nsisDir).find((f) => f.endsWith(`_${version}_x64-setup.exe`));
 if (!nsisExe || !existsSync(join(nsisDir, `${nsisExe}.sig`))) {
   die(`在 ${nsisDir} 找不到签名后的 NSIS 安装包或 .sig 文件`);
 }
