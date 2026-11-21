@@ -10,11 +10,16 @@
 // 删掉本地 tag 重来即可；反过来先 push 的话，远端会留下一个没有对应安装包的 tag。
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const RELEASES_REPO = "L1nkkkk/CrossAgents-releases";
+const TAURI_UPDATE_ENDPOINT = `https://github.com/${RELEASES_REPO}/releases/latest/download/latest.json`;
+const TAURI_UPDATE_PUBKEY =
+  "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVEMDE3NTNCN0RGODYzRjgKUldUNFkvaDlPM1VCN1FJOGlSaVczK2dHNzluVEdoYzFsZ2QwcTI3UUE5cjloL2dndW0wL1JnS08K";
 
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
@@ -174,17 +179,66 @@ try {
   );
 }
 
-step("打包并发到 " + RELEASES_REPO + "（几分钟）");
+step("打包 Tauri 并生成更新清单（几分钟）");
+const signingKeyPath = join(homedir(), ".tauri", "crossagents.key");
+const signingKey = process.env.TAURI_SIGNING_PRIVATE_KEY ?? (existsSync(signingKeyPath) ? readFileSync(signingKeyPath, "utf8").trim() : "");
+if (!signingKey) {
+  die(`找不到 Tauri 签名私钥（TAURI_SIGNING_PRIVATE_KEY 或 ${signingKeyPath}）`);
+}
+const tauriEnv = {
+  ...buildEnv,
+  CROSSAGENTS_TAURI_UPDATE_ENDPOINT: TAURI_UPDATE_ENDPOINT,
+  CROSSAGENTS_TAURI_UPDATE_PUBKEY: process.env.CROSSAGENTS_TAURI_UPDATE_PUBKEY ?? TAURI_UPDATE_PUBKEY,
+  TAURI_SIGNING_PRIVATE_KEY: signingKey,
+};
 try {
-  runLoud("npm run electron:release", {
+  runLoud("npm run tauri:bundle", {
     cwd: new URL("../apps/gui", import.meta.url),
-    env: { ...buildEnv, GH_TOKEN: token },
+    env: tauriEnv,
   });
 } catch {
   die(
-    `打包或上传失败。远端还没有被改动过，本地回到发版前：\n` +
+    `打包失败。远端还没有被改动过，本地回到发版前：\n` +
       `  git tag -d ${tag} && git reset --hard HEAD~1\n` +
       `修好之后重跑 node scripts/release.mjs ${version}`,
+  );
+}
+
+const nsisDir = fileURLToPath(new URL("../apps/gui/src-tauri/target/release/bundle/nsis", import.meta.url));
+const nsisExe = readdirSync(nsisDir).find((f) => f.endsWith(".exe"));
+if (!nsisExe || !existsSync(join(nsisDir, `${nsisExe}.sig`))) {
+  die(`在 ${nsisDir} 找不到签名后的 NSIS 安装包或 .sig 文件`);
+}
+const assetName = `CrossAgents-Tauri-${version}-x64-setup.exe`;
+const assetPath = join(nsisDir, assetName);
+const sigPath = `${assetPath}.sig`;
+if (nsisExe !== assetName) {
+  copyFileSync(join(nsisDir, nsisExe), assetPath);
+  copyFileSync(join(nsisDir, `${nsisExe}.sig`), sigPath);
+}
+const manifestPath = join(nsisDir, "latest.json");
+const manifest = execFileSync(
+  process.execPath,
+  [
+    "scripts/tauri-update-manifest.mjs",
+    `https://github.com/${RELEASES_REPO}/releases/download/${tag}/`,
+    `windows-x86_64=${assetPath}`,
+  ],
+  { cwd: fileURLToPath(new URL("../apps/gui", import.meta.url)), encoding: "utf8" },
+);
+writeFileSync(manifestPath, manifest);
+
+step("上传到 " + RELEASES_REPO);
+try {
+  execFileSync(
+    "gh",
+    ["release", "upload", tag, assetPath, sigPath, manifestPath, "--repo", RELEASES_REPO, "--clobber"],
+    { stdio: "inherit", env: ghEnv },
+  );
+} catch {
+  die(
+    `上传失败。远端还没有推 main/tag，本地回到发版前：\n` +
+      `  git tag -d ${tag} && git reset --hard HEAD~1`,
   );
 }
 
@@ -200,18 +254,10 @@ const view = execFileSync(
 const release = JSON.parse(view);
 for (const a of release.assets) console.log(`  · ${a.name} (${(a.size / 1048576).toFixed(1)} MB)`);
 
-// 一个完整的 release 是这三样。少任何一样都算没发好，所以这里是硬失败而不是提醒：
-// 缺 latest.yml 时已装的 GUI 不会发现新版本，而 release 页面看上去是好的，最容易漏掉。
-const want = [`${name(version)}.exe`, `${name(version)}.exe.blockmap`, "latest.yml"];
+const want = [assetName, `${assetName}.sig`, "latest.json"];
 const missing = want.filter((w) => !release.assets.some((a) => a.name === w));
 if (missing.length) {
-  die(
-    `release 缺少：${missing.join("、")}\n` +
-      `  产物在 apps/gui/release/，补传：\n` +
-      `  gh release upload ${tag} <文件> --repo ${RELEASES_REPO} --clobber\n` +
-      `  （latest.yml 若没生成，照 electron-builder 的格式写：version / files[url,sha512,size] / path / sha512 / releaseDate，\n` +
-      `   sha512 是安装包的 base64 摘要）`,
-  );
+  die(`release 缺少：${missing.join("、")}`);
 }
 if (release.isDraft) {
   die(`还是草稿，没人能下载：gh release edit ${tag} --repo ${RELEASES_REPO} --draft=false`);
@@ -222,13 +268,6 @@ runLoud(`git push origin main ${tag}`);
 
 console.log(`\n\x1b[32m✓ ${version} 发完了\x1b[0m`);
 console.log(`  https://github.com/${RELEASES_REPO}/releases/tag/${tag}`);
-
-// ---------------------------------------------------------------------------- 小工具
-
-/** 安装包在 release 上的名字：electron-builder 上传时把产物名里的空格换成连字符。 */
-function name(v) {
-  return `CrossAgents-Setup-${v}`;
-}
 
 function bumpPatch(v) {
   const [major, minor, patch] = v.split(".").map(Number);

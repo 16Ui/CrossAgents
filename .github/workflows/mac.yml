@@ -58,31 +58,41 @@ jobs:
 
       - run: npm --prefix apps/gui ci
 
-      - name: 打包（arm64）
+      - name: 打包（Tauri arm64）
         working-directory: apps/gui
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CROSSAGENTS_TAURI_UPDATE_ENDPOINT: https://github.com/L1nkkkk/CrossAgents-releases/releases/latest/download/latest.json
+          CROSSAGENTS_TAURI_UPDATE_PUBKEY: dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVEMDE3NTNCN0RGODYzRjgKUldUNFkvaDlPM1VCN1FJOGlSaVczK2dHNzluVEdoYzFsZ2QwcTI3UUE5cjloL2dndW0wL1JnS08K
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          cargo build --release -p crossagents-link
-          node scripts/check-version.mjs --without-hub
-          npm run build
-          npm run electron:compile
-          npx electron-builder --mac dmg:arm64 zip:arm64 --publish never
-          ls -la release
+          npm run tauri:bundle
+          ls -la src-tauri/target/release/bundle/dmg src-tauri/target/release/bundle/macos
 
       - name: 包里有 crossagents-link
-        working-directory: apps/gui/release
+        working-directory: apps/gui/src-tauri/target/release/bundle/macos
         run: |
-          bin=mac-arm64/CrossAgents.app/Contents/Resources/bin/crossagents-link
+          bin="CrossAgents Tauri.app/Contents/MacOS/crossagents-link"
           test -x "$bin" || { echo "缺 $bin"; exit 1; }
           "$bin" --version
+
+      - name: 整理 Mac 产物名
+        working-directory: apps/gui/src-tauri/target/release/bundle
+        run: |
+          mkdir -p upload
+          dmg=$(find dmg -maxdepth 1 -name '*.dmg' | head -n 1)
+          test -f "$dmg"
+          cp "$dmg" "upload/CrossAgents-Tauri-${TAG#v}-arm64.dmg"
+          tar=$(find macos -maxdepth 1 -name '*.app.tar.gz' | head -n 1)
+          if [ -n "$tar" ] && [ -f "$tar" ] && [ -f "${tar}.sig" ]; then
+            cp "$tar" "upload/CrossAgents-Tauri-${TAG#v}-arm64.app.tar.gz"
+            cp "${tar}.sig" "upload/CrossAgents-Tauri-${TAG#v}-arm64.app.tar.gz.sig"
+          fi
+          ls -la upload
 
       - uses: actions/upload-artifact@v4
         with:
           name: CrossAgents-${{ env.TAG }}-mac-arm64
-          path: |
-            apps/gui/release/*.dmg
-            apps/gui/release/*.zip
+          path: apps/gui/src-tauri/target/release/bundle/upload/*
           if-no-files-found: error
 
       - name: 传到 CrossAgents-releases
@@ -95,7 +105,25 @@ jobs:
           fi
           gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1 \
             || { echo "$RELEASES_REPO 还没有 $TAG：先跑 node scripts/release.mjs"; exit 1; }
-          gh release upload "$TAG" apps/gui/release/*.dmg apps/gui/release/*.zip --repo "$RELEASES_REPO" --clobber
+          gh release upload "$TAG" apps/gui/src-tauri/target/release/bundle/upload/* --repo "$RELEASES_REPO" --clobber
+          tar_asset="apps/gui/src-tauri/target/release/bundle/upload/CrossAgents-Tauri-${TAG#v}-arm64.app.tar.gz"
+          if [ -f "$tar_asset" ]; then
+            node apps/gui/scripts/tauri-update-manifest.mjs \
+              "https://github.com/$RELEASES_REPO/releases/download/$TAG/" \
+              "darwin-aarch64=$tar_asset" > "$RUNNER_TEMP/mac-latest.json"
+            if gh release download "$TAG" --repo "$RELEASES_REPO" -p latest.json -O "$RUNNER_TEMP/win-latest.json" 2>/dev/null; then
+              node -e '
+                const fs = require("fs");
+                const win = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                const mac = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+                win.platforms = { ...win.platforms, ...mac.platforms };
+                fs.writeFileSync(process.argv[3], JSON.stringify(win, null, 2) + "\n");
+              ' "$RUNNER_TEMP/win-latest.json" "$RUNNER_TEMP/mac-latest.json" "$RUNNER_TEMP/latest.json"
+            else
+              cp "$RUNNER_TEMP/mac-latest.json" "$RUNNER_TEMP/latest.json"
+            fi
+            gh release upload "$TAG" "$RUNNER_TEMP/latest.json" --repo "$RELEASES_REPO" --clobber
+          fi
           echo "UPLOADED=yes" >> "$GITHUB_ENV"
 
       # 端到端测一遍 scripts/mac-update.sh：在这台干净的 runner 上从发布页装刚传上去的版本。
