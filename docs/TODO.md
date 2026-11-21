@@ -522,3 +522,9 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 在 Windows 或 macOS 本机执行 `npm run tauri:bundle` 可以打带 Hub 的预览安装包。产物放在 `apps/gui/src-tauri/target/release/bundle`。Windows 已验证构建，macOS 仍待构建和验收。
 
 正式更新包需要 `CROSSAGENTS_TAURI_UPDATE_ENDPOINT`、`CROSSAGENTS_TAURI_UPDATE_PUBKEY` 和 `TAURI_SIGNING_PRIVATE_KEY`。Windows 预览包默认使用手动更新。签名安装包生成后，可用 `npm run tauri:update-manifest` 生成更新清单。
+
+## 三十五、Mac 验收与客户端节点化落地顺序（2026-11-21）
+
+- [ ] **修通 macOS CI 构建与实机验收**：排查 `Tauri preview` 中 `macos-latest` 在 `cargo check --workspace --locked` 阶段的编译失败，打出 Apple 芯片 `.dmg` 并在 Mac 上实测启动、内置浏览器截图、系统托盘与 `crossagents-link` 穿透。
+- [ ] **切换正式发布到 Tauri**：配置 `CROSSAGENTS_TAURI_UPDATE_ENDPOINT`、`CROSSAGENTS_TAURI_UPDATE_PUBKEY`、`TAURI_SIGNING_PRIVATE_KEY`，更新 `scripts/release.mjs` 与 `.github/workflows/mac.yml` 发布 Windows/Mac 签名安装包及更新清单。
+- [ ] **推进客户端节点化（接续 §八 B1）**：在 Mac 穿透与单机底座实测通过后，将各端（含 Mac 客户端）落地为可挂载到中心 Hub 的节点代理——中心 Hub 只负责调度与指令/事件中转，CLI 拉起与内置终端 PTY 下沉到节点本机执行，并补齐可信节点授权边界。

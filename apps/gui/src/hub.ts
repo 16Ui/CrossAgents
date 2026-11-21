@@ -232,17 +232,20 @@ export function useHubData<T>(
   load: () => Promise<T>,
   deps: unknown[],
   relevant: (event: HubEvent) => boolean,
+  canLoad?: () => boolean,
 ): Loaded<T> {
   const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
   const relevantRef = useRef(relevant);
   relevantRef.current = relevant;
+  const canLoadRef = useRef(canLoad);
+  canLoadRef.current = canLoad;
   // Requests are numbered; a response is applied unless a newer one already was. (Dropping
   // every response but the latest starves the view while events keep arriving.)
   const generation = useRef(0);
   const applied = useRef(0);
 
   const reload = useCallback(() => {
-    if (status !== "connected") return;
+    if (status !== "connected" || canLoadRef.current?.() === false) return;
     const mine = ++generation.current;
     const epoch = connectionEpoch;
     const fresh = () => status === "connected" && epoch === connectionEpoch && mine > applied.current && ((applied.current = mine), true);

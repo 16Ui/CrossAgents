@@ -3,6 +3,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { api } from "../src/api";
 import { startEvents, useHubData, usePlugins } from "../src/hub";
+import { useQuota } from "../src/views/Quota";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const delay = (ms = 0) => new Promise((r) => setTimeout(r, ms));
@@ -12,6 +13,7 @@ let status!: (value: string) => void;
 let identity!: (value: unknown) => void;
 let event!: (value: string) => void;
 let name = "A", reads = 0, dataReads = 0;
+let quotaReads = 0;
 let pending: ReturnType<typeof deferred<{ plugins: never[] }>> | undefined;
 let infoPending: ReturnType<typeof deferred<{ api: string }>> | undefined;
 let oldData: ReturnType<typeof deferred<string>> | undefined;
@@ -25,6 +27,7 @@ Object.assign(window, { crossagents: {
 Object.assign(api, {
   info: () => infoPending?.promise ?? Promise.resolve({ api: "v2" }),
   listPlugins: () => { reads++; return pending?.promise ?? Promise.resolve({ plugins: [name] }); },
+  quota: () => { quotaReads++; return Promise.resolve({ accounts: [], providers: [] }); },
 });
 let catalogs: ReturnType<typeof usePlugins>[] = [];
 let resource: ReturnType<typeof useHubData<string>>;
@@ -33,6 +36,11 @@ function Probe({ index }: { index: number }) {
   catalogs[index] = usePlugins();
   resource = useHubData(load, [], () => true);
   return <span>{JSON.stringify(catalogs[index].data)}</span>;
+}
+let quota: ReturnType<typeof useQuota>;
+function QuotaProbe() {
+  quota = useQuota();
+  return null;
 }
 let root = createRoot(document.getElementById("root")!);
 const tick = async (ms = 0) => { await act(async () => { await delay(ms); }); };
@@ -113,6 +121,27 @@ async function run() {
   checkCatalog("revalidated");
   checks.push("expired remount revalidates / usable list retained");
   await act(async () => root.unmount());
+
+  let focused = false;
+  let visibility = "visible";
+  Object.defineProperty(document, "hasFocus", { configurable: true, value: () => focused });
+  Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  root = createRoot(document.getElementById("root")!);
+  await act(async () => root.render(<QuotaProbe />));
+  await emit("account.quota_updated"); await tick(300);
+  assert(quotaReads === 0, "an unfocused window skips quota on mount and account events");
+  focused = true;
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+  assert(quotaReads === 1 && quota.data, "focusing the window refreshes quota");
+  visibility = "hidden";
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); quota.reload(); });
+  await emit("account.quota_updated"); await tick(300);
+  assert(quotaReads === 1 && quota.data, "a hidden window keeps its quota data and skips reloads");
+  visibility = "visible";
+  await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+  assert(quotaReads === 2, "restoring the visible window refreshes quota");
+  await act(async () => root.unmount());
+  checks.push("background quota requests paused / foreground quota refresh resumes");
   return { checks, reads, dataReads };
 }
 Object.assign(window, { regression: run().then((result) => ({ ok: true, ...result }), (error) => ({ ok: false, error: String(error), checks })) });

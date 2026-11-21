@@ -22,11 +22,23 @@ import { useArmed } from "../parts";
 /** Live figures are cached by the hub for a minute; re-read about as often. */
 const REFRESH_MS = 60_000;
 
+function quotaWindowActive() {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
+
 export function useQuota() {
-  const quota = useHubData(() => api.quota(), [], (e) => e.type.startsWith("account."));
+  // Even the sidebar's quota summary can start vendor CLIs through the hub.
+  const quota = useHubData(() => api.quota(), [], (e) => e.type.startsWith("account."), quotaWindowActive);
   useEffect(() => {
-    const timer = setInterval(quota.reload, REFRESH_MS);
-    return () => clearInterval(timer);
+    const reload = quota.reload;
+    const timer = setInterval(reload, REFRESH_MS);
+    window.addEventListener("focus", reload);
+    document.addEventListener("visibilitychange", reload);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", reload);
+      document.removeEventListener("visibilitychange", reload);
+    };
   }, [quota.reload]);
   return quota;
 }
