@@ -211,10 +211,12 @@ impl AntigravityAccounts {
         let models: Vec<ModelInfo> = parse_models(&stdout)
             .into_iter()
             .map(|id| ModelInfo {
+                context_window: crossagents_drivers::antigravity_native::context_window_for(Some(
+                    &id,
+                )),
                 name: id.clone(),
                 id,
                 description: None,
-                context_window: None,
                 credit_multiplier: None,
             })
             .collect();

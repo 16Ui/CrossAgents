@@ -183,7 +183,7 @@ struct Outcome {
 /// Runs git in `dir`; a git that says no is an outcome, not an error. Optional locks are
 /// off, so even `status` writes nothing into the repository.
 async fn run_git(dir: &Path, args: &[&str]) -> Result<Outcome, GitError> {
-    let output = Command::new("git")
+    let output = Command::new(crossagents_core::process::git_program())
         .no_window()
         .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args)

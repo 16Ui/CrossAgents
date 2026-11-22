@@ -635,8 +635,10 @@ fn hostname() -> String {
     .filter(|v| !v.is_empty());
     from_env
         .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
+            use crossagents_core::process::NoWindow;
+            let mut cmd = std::process::Command::new("hostname");
+            cmd.no_window();
+            cmd.output()
                 .ok()
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())

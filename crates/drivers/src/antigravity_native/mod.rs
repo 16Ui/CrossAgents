@@ -249,6 +249,31 @@ struct Live {
     stderr: StderrTail,
 }
 
+/// Best-known context window (in tokens) for an Antigravity model slug, or `None` when the
+/// model family is unknown so the UI does not fabricate a percentage.
+pub fn context_window_for(model: Option<&str>) -> Option<u64> {
+    let m = model?.trim().to_ascii_lowercase();
+    if m.is_empty() || m == "auto" {
+        return None;
+    }
+    if m.contains("gemini") {
+        return Some(1_000_000);
+    }
+    if m.contains("claude") {
+        return Some(if m.contains("1m") { 1_000_000 } else { 200_000 });
+    }
+    if m.starts_with("gpt-4.1") {
+        return Some(1_000_000);
+    }
+    if m.starts_with("gpt-5") || m.contains("codex") {
+        return Some(272_000);
+    }
+    if m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-4") {
+        return Some(200_000);
+    }
+    None
+}
+
 pub struct AntigravitySession {
     id: String,
     /// The CLI's conversation id, once it has said it.
@@ -258,10 +283,14 @@ pub struct AntigravitySession {
     cwd: PathBuf,
     env: Vec<(String, String)>,
     model: Mutex<Option<String>>,
+    /// The concrete model the CLI reported in `init` (resolves `"auto"`).
+    resolved_model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
     permission: PermissionPolicy,
     instructions: Mutex<Option<String>>,
     tokens: Mutex<TokenUsage>,
+    /// Single-step prompt/context size from the latest `step_update.usage`.
+    context_used: std::sync::atomic::AtomicU64,
     /// Tool calls already announced, so a `DONE` step updates instead of adding another.
     tools: Mutex<HashSet<String>>,
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -308,10 +337,12 @@ impl AntigravitySession {
             cwd: spec.agent.cwd,
             env: spec.env,
             model: Mutex::new(spec.agent.model.filter(|m| !m.is_empty())),
+            resolved_model: Mutex::new(None),
             effort: Mutex::new(None),
             permission: spec.permission,
             instructions: Mutex::new(spec.instructions),
             tokens: Mutex::new(TokenUsage::default()),
+            context_used: std::sync::atomic::AtomicU64::new(0),
             tools: Mutex::new(HashSet::new()),
             events: spec.events,
             turn: tokio::sync::Mutex::new(()),
@@ -459,6 +490,16 @@ impl AntigravitySession {
         if let Some(id) = &step.conversation_id {
             self.remember(id);
         }
+        if let Some(usage) = step.usage {
+            let step_ctx = if usage.input > 0 {
+                usage.input.saturating_add(usage.output)
+            } else {
+                usage.total
+            };
+            if step_ctx > 0 {
+                self.context_used.store(step_ctx, Ordering::Relaxed);
+            }
+        }
         if step.is_answer() {
             if let Some(delta) = step.text_delta.as_deref().filter(|d| !d.is_empty()) {
                 self.emit(SessionEventKind::Output {
@@ -535,6 +576,14 @@ impl AntigravitySession {
         }
     }
 
+    fn context_window(&self) -> u64 {
+        let resolved = self.resolved_model.lock().expect("resolved model").clone();
+        let configured = self.model.lock().expect("model").clone();
+        context_window_for(resolved.as_deref())
+            .or_else(|| context_window_for(configured.as_deref()))
+            .unwrap_or(0)
+    }
+
     /// The `result` event: the conversation, the answer when it never streamed, and the
     /// session's cumulative token counts.
     fn on_result(&self, result: &wire::Result) {
@@ -551,9 +600,17 @@ impl AntigravitySession {
                 totals.total = usage.total;
                 totals.clone()
             };
+            let step_ctx = self.context_used.load(Ordering::Relaxed);
+            let used = if step_ctx > 0 {
+                step_ctx
+            } else if usage.input > 0 {
+                usage.input.saturating_add(usage.output)
+            } else {
+                usage.total
+            };
             self.emit(SessionEventKind::Usage {
-                used: usage.total,
-                size: 0,
+                used,
+                size: self.context_window(),
                 cost_usd: None,
                 tokens: Some(tokens),
             });
@@ -622,6 +679,9 @@ impl AntigravitySession {
                 Some(Event::Init(init)) => {
                     if let Some(id) = &init.conversation_id {
                         self.remember(id);
+                    }
+                    if let Some(model) = &init.model {
+                        *self.resolved_model.lock().expect("resolved model") = Some(model.clone());
                     }
                 }
                 Some(Event::Step(step)) => {

@@ -408,7 +408,7 @@ pub fn last_commit(l: &Lesson) -> Option<&str> {
 pub async fn changed_since(dir: &Path, commit: &str) -> Vec<String> {
     use crossagents_core::process::NoWindow;
     let root = main_repo(dir).unwrap_or_else(|| dir.to_path_buf());
-    let output = tokio::process::Command::new("git")
+    let output = tokio::process::Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(["-c", "core.quotePath=false", "diff", "--name-only", commit])
         .current_dir(&root)

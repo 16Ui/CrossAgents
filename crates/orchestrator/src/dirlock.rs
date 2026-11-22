@@ -38,7 +38,7 @@ pub fn key(dir: &Path) -> String {
 /// The checkout `dir` is in, as one key: the top of its repository, since every directory of
 /// one working copy is the same checkout to write in; else `dir` itself.
 pub async fn checkout_key(dir: &Path) -> String {
-    let out = tokio::process::Command::new("git")
+    let out = tokio::process::Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(dir)

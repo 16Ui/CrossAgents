@@ -199,7 +199,7 @@ fn list(text: String) -> Vec<String> {
 }
 
 async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, CoreError> {
-    let mut command = tokio::process::Command::new("git");
+    let mut command = tokio::process::Command::new(crossagents_core::process::git_program());
     command.no_window().args(args).current_dir(dir);
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
