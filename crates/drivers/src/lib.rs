@@ -22,6 +22,8 @@ mod argv;
 pub mod claude_native;
 pub mod codebuddy_native;
 pub mod codex_native;
+#[cfg(windows)]
+mod conpty;
 pub mod cursor_native;
 pub mod gemini_native;
 pub mod hooks;

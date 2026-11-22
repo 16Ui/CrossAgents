@@ -1605,11 +1605,32 @@ pub struct FileSearchResponse {
     pub truncated: bool,
 }
 
+/// Visibility and ownership tier of a hub terminal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TerminalTier {
+    /// Interactive shell opened by the user in the GUI (default).
+    #[default]
+    User,
+    /// Managed terminal owned by an agent or run for long-running commands.
+    Agent,
+    /// Hidden infrastructure/driver host terminal.
+    System,
+}
+
 /// A terminal on the hub's machine (`GET /v1/terminals`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TerminalInfo {
     pub id: String,
+    /// Visibility and ownership tier (`user`, `agent`, `system`).
+    #[serde(default)]
+    pub tier: TerminalTier,
+    /// Agent id that owns this terminal, for `agent` / `system` tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner_agent: Option<String>,
     /// What the client grouped it under when creating it; the hub only keeps this.
     pub project: Option<String>,
     pub cwd: String,
@@ -1640,6 +1661,12 @@ pub struct CreateTerminalRequest {
     pub cwd: String,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub tier: Option<TerminalTier>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub owner_agent: Option<String>,
     pub cols: u16,
     pub rows: u16,
     /// Reserved for cross-node terminals: anything but none is refused for now.

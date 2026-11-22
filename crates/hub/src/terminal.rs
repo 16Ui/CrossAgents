@@ -20,15 +20,17 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
-use crossagents_api_types::{CreateTerminalRequest, TerminalFrame, TerminalInfo};
+use crossagents_api_types::{CreateTerminalRequest, TerminalFrame, TerminalInfo, TerminalTier};
 use crossagents_core::CoreError;
 use crossagents_core::process::Job;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// How many running terminals the hub keeps at once. Finished ones do not count.
+/// How many running user terminals the hub keeps at once. Finished ones do not count.
 pub const MAX_TERMINALS: usize = 16;
+/// How many running managed (`agent` / `system`) terminals the hub keeps at once.
+pub const MAX_MANAGED_TERMINALS: usize = 64;
 pub const MAX_COLS: u16 = 500;
 pub const MAX_ROWS: u16 = 200;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -90,6 +92,8 @@ struct Input {
 
 pub struct Terminal {
     id: String,
+    tier: TerminalTier,
+    owner_agent: Option<String>,
     device_id: Option<String>,
     project: Option<String>,
     cwd: PathBuf,
@@ -116,6 +120,8 @@ impl Terminal {
         let (rows, cols) = screen.parser.screen().size();
         TerminalInfo {
             id: self.id.clone(),
+            tier: self.tier,
+            owner_agent: self.owner_agent.clone(),
             project: self.project.clone(),
             cwd: self.cwd.display().to_string(),
             shell: self.shell.clone(),
@@ -295,7 +301,18 @@ impl Terminals {
     }
 
     pub fn list(&self) -> Vec<TerminalInfo> {
-        let mut all: Vec<_> = lock(&self.map).values().map(|t| t.info()).collect();
+        self.list_filtered(None, false)
+    }
+
+    pub fn list_filtered(&self, tier: Option<TerminalTier>, include_system: bool) -> Vec<TerminalInfo> {
+        let mut all: Vec<_> = lock(&self.map)
+            .values()
+            .filter(|t| match tier {
+                Some(wanted) => t.tier == wanted,
+                None => include_system || t.tier != TerminalTier::System,
+            })
+            .map(|t| t.info())
+            .collect();
         all.sort_by_key(|t| t.created_at);
         all
     }
@@ -327,10 +344,27 @@ impl Terminals {
                 req.cwd
             )));
         }
-        let running = lock(&self.map).values().filter(|t| !t.finished()).count();
-        if running >= MAX_TERMINALS {
+        let tier = req.tier.unwrap_or_default();
+        let (running, limit) = {
+            let map = lock(&self.map);
+            match tier {
+                TerminalTier::User => (
+                    map.values()
+                        .filter(|t| !t.finished() && t.tier == TerminalTier::User)
+                        .count(),
+                    MAX_TERMINALS,
+                ),
+                TerminalTier::Agent | TerminalTier::System => (
+                    map.values()
+                        .filter(|t| !t.finished() && t.tier != TerminalTier::User)
+                        .count(),
+                    MAX_MANAGED_TERMINALS,
+                ),
+            }
+        };
+        if running >= limit {
             return Err(CoreError::Conflict(format!(
-                "{MAX_TERMINALS} terminals are already running; close one first"
+                "{limit} terminals are already running; close one first"
             )));
         }
         let command = self.shell.clone().unwrap_or_else(default_shell);
@@ -553,6 +587,8 @@ fn spawn(
     let terminal = Arc::new(Terminal {
         device_id,
         id: uuid::Uuid::new_v4().to_string(),
+        tier: req.tier.unwrap_or_default(),
+        owner_agent: req.owner_agent.clone(),
         project: req.project.clone(),
         cwd: cwd.to_path_buf(),
         shell: program.clone(),

@@ -15,6 +15,7 @@ use axum::{Json, Router};
 use crossagents_api_types::{
     CreateTerminalRequest, ListTerminalsResponse, TerminalFrame, TerminalInfo,
     TerminalInputRequest, TerminalInputResponse, TerminalResizeRequest, TerminalTakeoverRequest,
+    TerminalTier,
 };
 use crossagents_core::CoreError;
 use futures::Stream;
@@ -44,9 +45,19 @@ async fn blocking<T: Send + 'static>(
         .map_err(|err| CoreError::Agent(format!("terminal task failed: {err}")))?
 }
 
-async fn list_terminals(State(state): State<Arc<AppState>>) -> Json<ListTerminalsResponse> {
+#[derive(Deserialize, Default)]
+struct ListTerminalsQuery {
+    tier: Option<TerminalTier>,
+    #[serde(default)]
+    include_system: bool,
+}
+
+async fn list_terminals(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListTerminalsQuery>,
+) -> Json<ListTerminalsResponse> {
     Json(ListTerminalsResponse {
-        terminals: state.terminals.list(),
+        terminals: state.terminals.list_filtered(query.tier, query.include_system),
     })
 }
 

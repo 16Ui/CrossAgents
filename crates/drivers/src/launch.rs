@@ -234,6 +234,19 @@ impl Killer for DirectKiller {
 }
 
 fn direct(spec: LaunchSpec) -> Result<Launched, CoreError> {
+    #[cfg(windows)]
+    {
+        match crate::conpty::spawn(&spec) {
+            Ok(launched) => return Ok(launched),
+            Err(err) => {
+                tracing::debug!(
+                    %err,
+                    program = %spec.program.display(),
+                    "hidden ConPTY unavailable; falling back to CREATE_NO_WINDOW"
+                );
+            }
+        }
+    }
     let mut command = Command::new(&spec.program);
     command.args(&spec.args).current_dir(&spec.cwd);
     for key in &spec.env_remove {

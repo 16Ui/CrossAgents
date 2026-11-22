@@ -61,6 +61,7 @@ pub struct Turn {
     /// An `error` event with `severity: "error"` was seen, so a failed `result` need
     /// not repeat its message.
     failed: bool,
+    tool_kinds: std::collections::HashMap<String, &'static str>,
 }
 
 impl Turn {
@@ -90,20 +91,27 @@ impl Turn {
             "tool_use" => {
                 if let Some(id) = text(&raw, "tool_id") {
                     let name = text(&raw, "tool_name").unwrap_or_else(|| "tool".into());
+                    let kind = tool_kind(&name);
+                    let command = command_of(&raw["parameters"]);
+                    let title = tool_title(&name, kind, &raw["parameters"], command.as_deref());
+                    self.tool_kinds.insert(id.clone(), kind);
                     events.push(SessionEventKind::ToolCall {
                         tool_call_id: id.clone(),
-                        title: name.clone(),
-                        kind: Some(tool_kind(&name).into()),
+                        title,
+                        kind: Some(kind.into()),
                         status: ToolStatus::InProgress,
                     });
                     events.push(SessionEventKind::ToolDetail {
                         tool_call_id: id,
                         detail: ToolDetail {
-                            command: command_of(&raw["parameters"]),
-                            arguments: raw
-                                .get("parameters")
-                                .filter(|p| !p.is_null())
-                                .map(json_text),
+                            command,
+                            arguments: if kind == "execute" {
+                                None
+                            } else {
+                                raw.get("parameters")
+                                    .filter(|p| !p.is_null())
+                                    .map(json_text)
+                            },
                             ..ToolDetail::default()
                         },
                     });
@@ -111,6 +119,7 @@ impl Turn {
             }
             "tool_result" => {
                 if let Some(id) = text(&raw, "tool_id") {
+                    let kind = self.tool_kinds.remove(&id).unwrap_or("other");
                     let failed = raw["status"] == "error";
                     let output = raw["output"].as_str().unwrap_or_default();
                     let error = raw["error"]["message"]
@@ -126,7 +135,10 @@ impl Turn {
                     events.push(SessionEventKind::ToolDetail {
                         tool_call_id: id.clone(),
                         detail: ToolDetail {
-                            result: (!output.is_empty()).then(|| output.to_owned()),
+                            output: (kind == "execute" && !output.is_empty())
+                                .then(|| output.to_owned()),
+                            result: (kind != "execute" && !output.is_empty())
+                                .then(|| output.to_owned()),
                             error: error.clone(),
                             ..ToolDetail::default()
                         },
@@ -192,7 +204,32 @@ fn tool_kind(name: &str) -> &'static str {
 
 /// A shell tool's command line, for the tool card.
 fn command_of(parameters: &Value) -> Option<String> {
-    parameters["command"].as_str().map(str::to_owned)
+    parameters["command"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn tool_title(name: &str, kind: &str, parameters: &Value, command: Option<&str>) -> String {
+    if kind == "execute"
+        && let Some(cmd) = command
+    {
+        return cmd.lines().next().unwrap_or(cmd).trim().to_owned();
+    }
+    if let Some(path) = ["file_path", "path", "dir_path"]
+        .iter()
+        .find_map(|k| parameters.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        match kind {
+            "read" => return format!("Read {path}"),
+            "edit" => return format!("Edit {path}"),
+            _ => {}
+        }
+    }
+    name.to_owned()
 }
 
 /// The ids `gemini --list-models` prints, one `id (Display Name)` line each.
@@ -329,13 +366,13 @@ mod tests {
         assert!(matches!(
             &started[0].kind,
             SessionEventKind::ToolCall { tool_call_id, title, kind: Some(kind), status: ToolStatus::InProgress }
-                if tool_call_id == "t1" && title == "run_shell_command" && kind == "execute"
+                if tool_call_id == "t1" && title == "ls -la" && kind == "execute"
         ));
         let SessionEventKind::ToolDetail { detail, .. } = &started[1].kind else {
             panic!("detail");
         };
         assert_eq!(detail.command.as_deref(), Some("ls -la"));
-        assert_eq!(detail.arguments.as_deref(), Some(r#"{"command":"ls -la"}"#));
+        assert!(detail.arguments.is_none());
 
         let Line::Events(done) = turn.line(
             r#"{"type":"tool_result","tool_id":"t1","status":"error","output":"","error":{"type":"X","message":"boom"}}"#,

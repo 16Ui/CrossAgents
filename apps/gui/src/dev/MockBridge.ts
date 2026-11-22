@@ -444,9 +444,9 @@ export class MockBridge implements CrossAgentsBridge {
   private terminalRoute(method: string, p: string, body: unknown): HubResponse | undefined {
     if (p === "/v1/terminals" && method === "GET") return json(200, { terminals: [...this.terminals.values()].map((t) => t.info) });
     if (p === "/v1/terminals" && method === "POST") {
-      const req = body as { cwd: string; project?: string; cols: number; rows: number };
+      const req = body as { cwd: string; project?: string; tier?: "user" | "agent" | "system"; owner_agent?: string; cols: number; rows: number };
       const id = crypto.randomUUID();
-      const info = { id, project: req.project ?? null, cwd: req.cwd, shell: "mock", cols: req.cols, rows: req.rows, created_at: new Date().toISOString(), exited: false, exit_code: null, connections: 0, node: null };
+      const info = { id, tier: req.tier ?? "user", owner_agent: req.owner_agent, project: req.project ?? null, cwd: req.cwd, shell: "mock", cols: req.cols, rows: req.rows, created_at: new Date().toISOString(), exited: false, exit_code: null, connections: 0, node: null };
       const prompt = `${req.cwd}> `;
       this.terminals.set(id, { info, log: `\x1b[2mmock 终端：只回显，不执行。输入 exit 退出。\x1b[m\r\n${prompt}`, line: "", relayed: false });
       return json(201, info);

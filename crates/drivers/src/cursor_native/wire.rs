@@ -153,11 +153,59 @@ impl Turn {
         let kind = match variant.as_str() {
             "readToolCall" => "read",
             "writeToolCall" => "edit",
+            "shellToolCall" | "runTerminalCommand" | "run_terminal_command" => "execute",
+            _ if matches!(name, "run_terminal_cmd" | "run_terminal_command" | "Bash" | "bash" | "shell") => "execute",
             _ => "other",
         };
         let args = body.get("args").or_else(|| body.get("arguments"));
         let result = body.get("result").or_else(|| raw.get("result"));
-        let failed = result.is_some_and(|r| r.get("error").is_some() || r["is_error"] == true);
+        let command = (kind == "execute").then(|| {
+            args.and_then(|a| {
+                ["command", "commandLine", "CommandLine", "cmd"]
+                    .iter()
+                    .find_map(|k| a.get(*k).and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+        }).flatten();
+        let exit_code = (kind == "execute").then(|| {
+            result.and_then(|r| {
+                r.get("exitCode")
+                    .or_else(|| r.get("exit_code"))
+                    .or_else(|| r.get("success").and_then(|s| s.get("exitCode").or_else(|| s.get("exit_code"))))
+                    .and_then(Value::as_i64)
+                    .map(|c| c as i32)
+            })
+        }).flatten();
+        let shell_output = (kind == "execute").then(|| {
+            result.and_then(|r| {
+                r.get("stdout")
+                    .or_else(|| r.get("output"))
+                    .or_else(|| r.get("success").and_then(|s| s.get("stdout").or_else(|| s.get("output"))))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        }).flatten();
+        let title = if let Some(cmd) = &command {
+            cmd.lines().next().unwrap_or(cmd).trim().to_owned()
+        } else if let Some(path) = args.and_then(|a| {
+            ["path", "targetFile", "file_path"]
+                .iter()
+                .find_map(|k| a.get(*k).and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        }) {
+            match kind {
+                "read" => format!("Read {path}"),
+                "edit" => format!("Edit {path}"),
+                _ => name.into(),
+            }
+        } else {
+            name.into()
+        };
+        let failed = result.is_some_and(|r| r.get("error").is_some() || r["is_error"] == true)
+            || exit_code.is_some_and(|c| c != 0);
         let status = if started {
             ToolStatus::InProgress
         } else if failed {
@@ -168,22 +216,29 @@ impl Turn {
         let mut events = vec![if started {
             SessionEventKind::ToolCall {
                 tool_call_id: id.into(),
-                title: name.into(),
+                title,
                 kind: Some(kind.into()),
                 status,
             }
         } else {
             SessionEventKind::ToolCallUpdated {
                 tool_call_id: id.into(),
-                title: Some(name.into()),
+                title: Some(title),
                 status: Some(status),
             }
         }];
         events.push(SessionEventKind::ToolDetail {
             tool_call_id: id.into(),
             detail: ToolDetail {
-                arguments: args.map(json_text),
-                result: result.map(json_text),
+                command,
+                exit_code,
+                output: shell_output.clone(),
+                arguments: if kind == "execute" { None } else { args.map(json_text) },
+                result: if kind == "execute" && shell_output.is_some() {
+                    None
+                } else {
+                    result.map(json_text)
+                },
                 error: failed.then(|| result.map(json_text).unwrap_or_default()),
                 ..ToolDetail::default()
             },
@@ -351,5 +406,44 @@ mod tests {
             .collect();
         assert_eq!(text, "I'll read README.md. Done!");
         assert_eq!(turn.stop_reason, Some(StopReason::EndTurn));
+    }
+
+    #[test]
+    fn shell_tool_call_extracts_command_output_and_exit_code() {
+        let mut turn = Turn::default();
+        let started = json!({
+            "type": "tool_call",
+            "subtype": "started",
+            "call_id": "sh-1",
+            "tool_call": { "shellToolCall": { "args": { "command": "cargo test" } } }
+        });
+        let Line::Events(ev) = turn.line(&started.to_string()) else {
+            panic!("started events");
+        };
+        assert!(matches!(
+            &ev[0].kind,
+            SessionEventKind::ToolCall { title, kind: Some(k), .. }
+            if title == "cargo test" && k == "execute"
+        ));
+        let completed = json!({
+            "type": "tool_call",
+            "subtype": "completed",
+            "call_id": "sh-1",
+            "tool_call": {
+                "shellToolCall": {
+                    "args": { "command": "cargo test" },
+                    "result": { "success": { "stdout": "ok\n", "exitCode": 0 } }
+                }
+            }
+        });
+        let Line::Events(ev) = turn.line(&completed.to_string()) else {
+            panic!("completed events");
+        };
+        let SessionEventKind::ToolDetail { detail, .. } = &ev[1].kind else {
+            panic!("detail");
+        };
+        assert_eq!(detail.command.as_deref(), Some("cargo test"));
+        assert_eq!(detail.output.as_deref(), Some("ok\n"));
+        assert_eq!(detail.exit_code, Some(0));
     }
 }

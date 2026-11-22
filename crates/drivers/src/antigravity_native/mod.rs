@@ -779,7 +779,8 @@ impl AntigravitySession {
 fn tool_kind(name: &str) -> &'static str {
     match name {
         "run_command" => "execute",
-        "write_to_file" | "replace_file_content" | "multi_replace_file_content" => "edit",
+        "write_file" | "edit_file" | "write_to_file" | "replace_file_content"
+        | "multi_replace_file_content" => "edit",
         "read_file" | "list_directory" | "find_by_name" | "view_file" => "read",
         "search" | "grep_search" | "codebase_search" | "google_web_search" => "search",
         "web_fetch" | "browser_navigate" => "fetch",
@@ -802,6 +803,13 @@ fn tool_title(name: &str, info: Option<&wire::ToolInfo>) -> String {
         }
         if let Some(summary) = param_str(info, &["toolSummary"]) {
             return summary.to_owned();
+        }
+    }
+    if let Some(path) = param_str(info, &["Path", "path", "TargetFile", "file_path"]) {
+        match tool_kind(name) {
+            "read" => return format!("Read {path}"),
+            "edit" => return format!("Edit {path}"),
+            _ => {}
         }
     }
     name.to_owned()
