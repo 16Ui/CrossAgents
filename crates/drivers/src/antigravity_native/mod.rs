@@ -444,17 +444,34 @@ impl AntigravitySession {
             .or_else(|| info.and_then(|i| i.name.clone()))
             .unwrap_or_else(|| "tool".to_owned());
         let kind = tool_kind(&name);
+        let title = tool_title(&name, info);
+        let detail = tool_detail(&name, step);
         if step.running() {
-            self.tools.lock().expect("tools").insert(id.clone());
-            self.emit(SessionEventKind::ToolCall {
-                tool_call_id: id,
-                title: name,
-                kind: Some(kind.to_owned()),
-                status: ToolStatus::InProgress,
-            });
+            let first_sight = self.tools.lock().expect("tools").insert(id.clone());
+            if first_sight {
+                self.emit(SessionEventKind::ToolCall {
+                    tool_call_id: id.clone(),
+                    title,
+                    kind: Some(kind.to_owned()),
+                    status: ToolStatus::InProgress,
+                });
+            } else {
+                self.emit(SessionEventKind::ToolCallUpdated {
+                    tool_call_id: id.clone(),
+                    title: (title != name).then_some(title),
+                    status: None,
+                });
+            }
+            if detail != ToolDetail::default() {
+                self.emit(SessionEventKind::ToolDetail {
+                    tool_call_id: id,
+                    detail,
+                });
+            }
             return;
         }
-        let failed = info.and_then(|i| i.error.as_ref()).is_some();
+        let failed = info.and_then(|i| i.error.as_ref()).is_some()
+            || detail.exit_code.is_some_and(|code| code != 0);
         let status = if failed {
             ToolStatus::Failed
         } else {
@@ -464,25 +481,17 @@ impl AntigravitySession {
         if first_sight {
             self.emit(SessionEventKind::ToolCall {
                 tool_call_id: id.clone(),
-                title: name,
+                title,
                 kind: Some(kind.to_owned()),
                 status,
             });
         } else {
             self.emit(SessionEventKind::ToolCallUpdated {
                 tool_call_id: id.clone(),
-                title: None,
+                title: (title != name).then_some(title),
                 status: Some(status),
             });
         }
-        let detail = ToolDetail {
-            arguments: info
-                .and_then(|i| i.parameters.as_ref())
-                .map(|parameters| parameters.to_string()),
-            result: info.and_then(|i| i.output.clone()),
-            error: info.and_then(|i| i.error.clone()),
-            ..ToolDetail::default()
-        };
         if detail != ToolDetail::default() {
             self.emit(SessionEventKind::ToolDetail {
                 tool_call_id: id,
@@ -522,6 +531,7 @@ impl AntigravitySession {
             return Err(CoreError::Agent("the session has ended".into()));
         }
         self.cancelled.store(false, Ordering::SeqCst);
+        self.tools.lock().expect("tools").clear();
         if prompt
             .attachments
             .iter()
@@ -774,6 +784,69 @@ fn tool_kind(name: &str) -> &'static str {
         "search" | "grep_search" | "codebase_search" | "google_web_search" => "search",
         "web_fetch" | "browser_navigate" => "fetch",
         _ => "tool",
+    }
+}
+
+fn param_str<'a>(info: Option<&'a wire::ToolInfo>, keys: &[&str]) -> Option<&'a str> {
+    let params = info?.parameters.as_ref()?.as_object()?;
+    keys.iter()
+        .find_map(|key| params.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn tool_title(name: &str, info: Option<&wire::ToolInfo>) -> String {
+    if name == "run_command" {
+        if let Some(cmd) = param_str(info, &["CommandLine", "command", "command_line"]) {
+            return cmd.lines().next().unwrap_or(cmd).trim().to_owned();
+        }
+        if let Some(summary) = param_str(info, &["toolSummary"]) {
+            return summary.to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+fn parse_exit_code(output: &str) -> Option<i32> {
+    for line in output.lines().take(8) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Command exited with code ") {
+            let digits = rest.trim_end_matches('.');
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn tool_detail(name: &str, step: &wire::Step) -> ToolDetail {
+    let info = step.tool_info.as_ref();
+    let duration_ms = step
+        .duration_seconds
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(|s| (s * 1000.0).round() as u64);
+    if name == "run_command" {
+        let command = param_str(info, &["CommandLine", "command", "command_line"]).map(str::to_owned);
+        let output = info.and_then(|i| i.output.clone());
+        let exit_code = output.as_deref().and_then(parse_exit_code);
+        return ToolDetail {
+            command,
+            exit_code,
+            duration_ms,
+            output,
+            error: info.and_then(|i| i.error.clone()),
+            ..ToolDetail::default()
+        };
+    }
+    ToolDetail {
+        duration_ms,
+        arguments: info
+            .and_then(|i| i.parameters.as_ref())
+            .map(|parameters| parameters.to_string()),
+        result: info.and_then(|i| i.output.clone()),
+        error: info.and_then(|i| i.error.clone()),
+        ..ToolDetail::default()
     }
 }
 
@@ -1197,5 +1270,36 @@ cat >/dev/null
         session.interrupt().await.unwrap();
         let outcome = prompt.await.unwrap().unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Cancelled);
+    }
+
+    #[test]
+    fn run_command_extracts_title_command_output_exit_code_and_duration() {
+        let step = wire::Step {
+            state: "DONE".into(),
+            step_type: "tool".into(),
+            tool_name: Some("run_command".into()),
+            duration_seconds: Some(1.25),
+            tool_info: Some(wire::ToolInfo {
+                name: Some("run_command".into()),
+                parameters: Some(serde_json::json!({
+                    "CommandLine": "cargo test -p crossagents-core",
+                    "toolSummary": "Run core tests"
+                })),
+                output: Some("Created At: 2026-11-22\nCommand exited with code 1.\n\nCommand output:\nfailed\n".into()),
+                error: None,
+            }),
+            ..wire::Step::default()
+        };
+        assert_eq!(
+            tool_title("run_command", step.tool_info.as_ref()),
+            "cargo test -p crossagents-core"
+        );
+        let detail = tool_detail("run_command", &step);
+        assert_eq!(detail.command.as_deref(), Some("cargo test -p crossagents-core"));
+        assert_eq!(detail.exit_code, Some(1));
+        assert_eq!(detail.duration_ms, Some(1250));
+        assert!(detail.output.as_deref().unwrap().contains("failed"));
+        assert!(detail.arguments.is_none());
+        assert!(detail.result.is_none());
     }
 }
