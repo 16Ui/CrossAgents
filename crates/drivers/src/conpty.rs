@@ -202,9 +202,32 @@ fn build_env_block(spec: &LaunchSpec) -> Vec<u16> {
     block
 }
 
+/// A ConPTY-attached child whose stdio remain clean anonymous pipes.
+pub(crate) struct PipedChild {
+    pub stdin: tokio::fs::File,
+    pub stdout: tokio::fs::File,
+    pub stderr: tokio::fs::File,
+    pub process: ProcessHandle,
+}
+
 /// Spawns `spec` attached to a hidden ConPTY while keeping `stdin`/`stdout`/`stderr` on clean
 /// anonymous pipes.
 pub(crate) fn spawn(spec: &LaunchSpec) -> io::Result<Launched> {
+    let piped = spawn_piped(spec, true)?;
+    let stderr = StderrTail::spawn(piped.stderr);
+    Ok(Launched {
+        stdin: Box::new(piped.stdin),
+        stdout: Box::new(piped.stdout),
+        stderr,
+        process: piped.process,
+    })
+}
+
+/// Spawns `spec` attached to a hidden ConPTY and returns raw async pipes for stdin/stdout/stderr.
+///
+/// Set `assign_job` to `false` when the caller already runs inside a kill-on-close job object
+/// (such as `host::serve`).
+pub(crate) fn spawn_piped(spec: &LaunchSpec, assign_job: bool) -> io::Result<PipedChild> {
     let (pty_in_read, pty_in_write) = io::pipe()?;
     let (mut pty_out_read, pty_out_write) = io::pipe()?;
     let (stdin_read, stdin_write) = io::pipe()?;
@@ -295,16 +318,20 @@ pub(crate) fn spawn(spec: &LaunchSpec) -> io::Result<Launched> {
         .ok();
 
     let pid = Some(pi.dwProcessId);
-    let job = Arc::new(pid.and_then(|pid| {
-        let job = Job::new().ok()?;
-        match job.assign(pid) {
-            Ok(()) => Some(job),
-            Err(err) => {
-                tracing::debug!(%err, "conpty agent process runs outside a job object");
-                None
+    let job = Arc::new(if assign_job {
+        pid.and_then(|pid| {
+            let job = Job::new().ok()?;
+            match job.assign(pid) {
+                Ok(()) => Some(job),
+                Err(err) => {
+                    tracing::debug!(%err, "conpty agent process runs outside a job object");
+                    None
+                }
             }
-        }
-    }));
+        })
+    } else {
+        None
+    });
 
     let process = Arc::new(SendHandle(pi.hProcess));
     let killed = Arc::new(AtomicBool::new(false));
@@ -340,11 +367,11 @@ pub(crate) fn spawn(spec: &LaunchSpec) -> io::Result<Launched> {
 
     let stdin = tokio::fs::File::from_std(stdin_file);
     let stdout = tokio::fs::File::from_std(stdout_file);
-    let stderr = StderrTail::spawn(tokio::fs::File::from_std(stderr_file));
+    let stderr = tokio::fs::File::from_std(stderr_file);
 
-    Ok(Launched {
-        stdin: Box::new(stdin),
-        stdout: Box::new(stdout),
+    Ok(PipedChild {
+        stdin,
+        stdout,
         stderr,
         process: ProcessHandle::new(pid, None, exit_rx, killer),
     })

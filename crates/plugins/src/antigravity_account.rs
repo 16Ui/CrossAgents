@@ -13,6 +13,7 @@
 //! session files with token counts — per-turn tokens come from the driver's event stream.
 
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -23,9 +24,13 @@ use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, Credits, DataSource, LimitGroup,
     LoginCommand, ModelInfo, RateWindow, SessionUsage,
 };
-use crossagents_drivers::antigravity_native::{prepare_query, wire::parse_models};
+#[cfg(not(windows))]
+use crossagents_drivers::antigravity_native::prepare_query;
+use crossagents_drivers::antigravity_native::wire::parse_models;
 use crossagents_drivers::locate::Cli;
-use crossagents_drivers::process::{apply_proxy_env, explicit_proxy_env, resolve_program};
+#[cfg(not(windows))]
+use crossagents_drivers::process::apply_proxy_env;
+use crossagents_drivers::process::{explicit_proxy_env, resolve_program};
 use serde_json::Value;
 
 /// Live status is refreshed at most this often.
@@ -115,30 +120,77 @@ impl AntigravityAccounts {
         let (program, rest) = command
             .split_first()
             .ok_or_else(|| "empty Antigravity command".to_owned())?;
-        let mut child = tokio::process::Command::new(resolve_program(program));
-        child
-            .args(rest)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        apply_proxy_env(&mut child, account.proxy.as_deref());
-        prepare_query(&mut child);
-        let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
+        #[cfg(windows)]
+        let (stdout, stderr, success) = {
+            let mut all_args: Vec<String> = rest.to_vec();
+            all_args.extend(args.iter().map(|s| (*s).to_owned()));
+            let mut env = explicit_proxy_env(account.proxy.as_deref());
+            env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+            let mut launched = crossagents_drivers::launch::launch(
+                crossagents_drivers::launch::LaunchSpec {
+                    program: resolve_program(program),
+                    args: all_args,
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    env,
+                    label: format!("agy {}", args.join(" ")),
+                    ..crossagents_drivers::launch::LaunchSpec::default()
+                },
+            )
             .await
-            .map_err(|_| {
-                format!(
-                    "`agy {}` did not answer in {} s",
-                    args.join(" "),
-                    CLI_TIMEOUT.as_secs()
-                )
-            })?
             .map_err(|e| format!("cannot run the Antigravity CLI: {e}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            drop(launched.stdin);
+            let mut out_buf = Vec::new();
+            let read_res = tokio::time::timeout(CLI_TIMEOUT, async {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut launched.stdout, &mut out_buf)
+                    .await;
+                launched.process.wait().await
+            })
+            .await;
+            let exit = match read_res {
+                Ok(exit) => exit,
+                Err(_) => {
+                    launched.process.start_kill();
+                    return Err(format!(
+                        "`agy {}` did not answer in {} s",
+                        args.join(" "),
+                        CLI_TIMEOUT.as_secs()
+                    ));
+                }
+            };
+            let stderr = launched.stderr.text().await;
+            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
+            (stdout, stderr, exit.and_then(|info| info.code) == Some(0))
+        };
+        #[cfg(not(windows))]
+        let (stdout, stderr, success) = {
+            let mut child = tokio::process::Command::new(resolve_program(program));
+            child
+                .args(rest)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            apply_proxy_env(&mut child, account.proxy.as_deref());
+            prepare_query(&mut child);
+            let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "`agy {}` did not answer in {} s",
+                        args.join(" "),
+                        CLI_TIMEOUT.as_secs()
+                    )
+                })?
+                .map_err(|e| format!("cannot run the Antigravity CLI: {e}"))?;
+            (
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                output.status.success(),
+            )
+        };
         let text = format!("{stdout}\n{stderr}");
-        if !output.status.success()
+        if !success
             && !text.to_ascii_lowercase().contains("sign in")
             && args == ["models"]
         {

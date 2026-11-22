@@ -43,6 +43,12 @@ impl StderrTail {
         lines.push_back(line);
     }
 
+    /// Joined lines captured so far.
+    pub async fn text(&self) -> String {
+        let lines: Vec<String> = self.0.lock().await.iter().cloned().collect();
+        lines.join("\n")
+    }
+
     /// `"<what>"`, or `"<what>:\n<tail>"` when stderr said something.
     pub async fn describe(&self, what: &str) -> String {
         let lines: Vec<String> = self.0.lock().await.iter().cloned().collect();
