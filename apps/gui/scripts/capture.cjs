@@ -32,12 +32,14 @@ app.whenReady().then(async () => {
     await win.loadURL(env.CA_SHOT_URL);
     if (env.CA_SHOT_THEME) {
       // The app keeps its theme in localStorage (src/lib/theme.ts); set it and load again.
-      const choice = JSON.stringify({ mode: env.CA_SHOT_THEME, paper: "plain" });
+      const choice = JSON.stringify({ mode: env.CA_SHOT_THEME, paper: env.CA_SHOT_PAPER || "plain" });
       await win.webContents.executeJavaScript(`localStorage.setItem("crossagents.theme", ${JSON.stringify(choice)})`);
       await win.loadURL(env.CA_SHOT_URL);
     }
     // The scenario panel is the preview's own, not the app's.
     await win.webContents.insertCSS("#mock-panel { display: none !important; }");
+    // An offscreen BrowserWindow is unfocused, which pauses focus-gated polling like quota.
+    await win.webContents.executeJavaScript(`document.hasFocus = () => true; window.dispatchEvent(new Event("focus"));`);
     await sleep(wait);
     if (env.CA_SHOT_CLICK) {
       // A state only a click reaches (a confirmation's answer from the hub): click, settle.
@@ -46,6 +48,12 @@ app.whenReady().then(async () => {
       );
       if (!clicked) throw new Error(`nothing to click: ${env.CA_SHOT_CLICK}`);
       await sleep(600);
+    }
+    if (env.CA_SHOT_FOCUS) {
+      await win.webContents.executeJavaScript(
+        `(() => { const el = document.querySelector(${JSON.stringify(env.CA_SHOT_FOCUS)}); if (el) el.focus(); })()`,
+      );
+      await sleep(300);
     }
     const image = await win.webContents.capturePage();
     writeFileSync(env.CA_SHOT_OUT, image.toPNG());

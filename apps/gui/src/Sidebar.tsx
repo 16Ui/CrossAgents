@@ -13,6 +13,9 @@ import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
 import { Avatar, BrandMark, Icon, ModelMark, VendorMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
 import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
+import { ChatAvatar } from "./ChatAvatar";
+import { useChatProfile } from "./lib/chatProfile";
+import { vendorLabel } from "./lib/models";
 import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
@@ -28,7 +31,7 @@ import { useUnboundProjects } from "./lessons/projects";
 import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
-import { level, resetText, tightest, windowLabel } from "./lib/quota";
+import { level, resetText, tightest } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
@@ -532,13 +535,7 @@ export function Sidebar({ route }: { route: string[] }) {
             <UpdateNotice />
             <DevHubNotice />
             <OldHubNotice />
-            <QuotaMini />
-            <div className="foot-row">
-              <Connection />
-              <a className={"icon-btn " + (route[0] === "settings" ? "on" : "")} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
-                <Icon name="settings" size={15} />
-              </a>
-            </div>
+            <SidebarFooter route={route} />
           </div>
         </nav>
         </Archiving.Provider>
@@ -1090,98 +1087,190 @@ const togglePinned = pins.toggle;
 const useCollapsed = collapsedGroups.use;
 const toggleCollapsed = collapsedGroups.toggle;
 
-/** Fleet equalizer and quick peek across all accounts, plus the tightest quota window. */
-function QuotaMini() {
+/** Compact user profile footer card + grouped quota popover. */
+function SidebarFooter({ route }: { route: string[] }) {
+  const profile = useChatProfile();
+  const status = useConnectionStatus();
+  const conn = useConnectionState();
+  const [info, setInfo] = useState<HubInfo>();
+  useEffect(() => {
+    if (status === "connected") api.info().then(setInfo, () => {});
+  }, [status, conn?.mode]);
+
+  const statusTone = status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger";
+  const statusText =
+    status === "connected"
+      ? t("hub.connected")
+      : status === "connecting"
+        ? t("hub.connecting")
+        : t("hub.offline", { reason: status.replace(/^offline: /, "") });
+
+  const host = info?.machine?.hostname;
+  const remote = conn?.mode === "remote";
+  const customName = profile.name.trim();
+  const displayTitle = customName || host || "本机";
+  const where = remote ? "远程" : customName ? host || "本机" : undefined;
+
+  const cardTitle = [
+    displayTitle,
+    statusText,
+    info?.version ? `v${info.version}` : undefined,
+    info?.home,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div className="foot-user-wrap">
+      <div className="foot-user">
+        <a className="foot-profile" href="#/settings" title={cardTitle}>
+          <span className="foot-avatar-wrap">
+            <ChatAvatar image={profile.avatar} size={30} />
+            <span
+              className={`foot-status-dot ${statusTone} ${status === "connecting" ? "pulse" : ""}`}
+              role="img"
+              aria-label={statusText}
+              title={statusText}
+            />
+          </span>
+          <span className="foot-identity">
+            <span className="foot-name">{displayTitle}</span>
+            <span className="foot-meta">
+              {status !== "connected" ? (
+                <span className={`foot-meta-state ${statusTone}`}>{statusText}</span>
+              ) : (
+                <>
+                  {where && <span className="foot-meta-where">{where}</span>}
+                  {info && <Versions hub={info} />}
+                </>
+              )}
+            </span>
+          </span>
+        </a>
+        <div className="foot-actions">
+          <QuotaPill />
+          <a
+            className={"icon-btn foot-settings-btn " + (route[0] === "settings" ? "on" : "")}
+            href="#/settings"
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+          >
+            <Icon name="settings" size={15} />
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Compact quota pill (`4/8`) with a hover/focus popover grouped by vendor. */
+function QuotaPill() {
   const quota = useQuota();
   const accounts = quota.data?.accounts ?? [];
-  const found = tightest(
-    accounts.map((a) => ({
-      ...a,
-      windows: a.status.rate_limits,
-    })),
-  );
-  if (!found && !accounts.length) return null;
-  const pct = found ? Math.round(found.window.used_percent) : 0;
-  const name = found ? found.account.account.label || found.account.account.id : "";
+  if (!accounts.length) return null;
+
   const cells = accounts.map((a) => {
     const top = tightest([{ ...a, windows: a.status.rate_limits }])?.window;
     const used = top ? Math.max(0, Math.min(100, Math.round(top.used_percent))) : 0;
-    const remain = !a.status.logged_in || a.at_risk ? 0 : top ? Math.max(8, 100 - used) : 100;
-    const tone = !a.status.logged_in || a.at_risk
-      ? "danger"
-      : top
-        ? level(top.used_percent, a.status.limit_reached)
-        : "ok";
-    return { a, top, used, remain, tone };
+    const unavailable = !a.status.logged_in || a.at_risk || a.egress_block || a.status.limit_reached || used >= 100;
+    const tone = unavailable ? "danger" : top ? level(top.used_percent, a.status.limit_reached) : "ok";
+    const rank = tone === "ok" ? 0 : tone === "warn" ? 1 : 2;
+    return { a, top, used, tone, unavailable, rank };
   });
-  const okCount = cells.filter((c) => c.a.status.logged_in && !c.a.at_risk && c.tone !== "danger").length;
+
+  const okCount = cells.filter((c) => !c.unavailable).length;
+  const pillTone =
+    okCount === 0
+      ? "danger"
+      : okCount < accounts.length || cells.some((c) => c.tone === "warn")
+        ? "warn"
+        : "ok";
+
+  // Group by provider in stable order, sorting healthy accounts before exhausted/unavailable ones.
+  const byVendor = new Map<string, typeof cells>();
+  for (const c of cells) {
+    const list = byVendor.get(c.a.account.provider) ?? [];
+    list.push(c);
+    byVendor.set(c.a.account.provider, list);
+  }
+  const vendorGroups = [...byVendor.entries()].map(([provider, list]) => {
+    const sorted = [...list].sort((x, y) => x.rank - y.rank || x.used - y.used);
+    const ok = sorted.filter((c) => !c.unavailable).length;
+    return { provider, label: vendorLabel(provider), items: sorted, ok, total: sorted.length };
+  });
 
   return (
-    <div className="quota-mini-wrap">
+    <div className="foot-quota-wrap">
       <a
-        className="quota-mini"
+        className={`foot-quota-pill ${pillTone}`}
         href="#/usage"
-        title={
-          found
-            ? t("quota.miniTitle", {
-                name,
-                window: windowLabel(found.window),
-                pct,
-              })
-            : t("quota.fleet", { ok: okCount, total: accounts.length })
-        }
+        title={t("quota.fleet", { ok: okCount, total: accounts.length })}
+        aria-label={t("quota.fleet", { ok: okCount, total: accounts.length })}
       >
-        <span className="quota-equalizer" aria-hidden="true">
-          {cells.map((c) => (
-            <span key={c.a.account.id} className={`eq-col ${c.tone}`}>
-              <span style={{ height: `${c.remain}%` }} />
-            </span>
-          ))}
+        <span className={`dot ${pillTone}`} aria-hidden="true" />
+        <span className="foot-quota-count">
+          {okCount}/{accounts.length}
         </span>
-        <span className="quota-mini-text">
-          {accounts.length > 1
-            ? t("quota.fleet", { ok: okCount, total: accounts.length })
-            : found
-              ? t("quota.mini", {
-                  pct,
-                  window: windowLabel(found.window).replace(/限额$/, ""),
-                })
-              : t("quota.fleet", { ok: okCount, total: accounts.length })}
-        </span>
-        {found && (
-          <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
-            <span style={{ width: `${Math.min(100, pct)}%` }} />
-          </span>
-        )}
       </a>
-      {accounts.length > 0 && (
-        <div className="quota-peek" role="region" aria-label={t("quota.peekTitle")}>
-          <div className="quota-peek-head">
-            <span>{t("quota.peekTitle")}</span>
-            <span className="chip small">{t("quota.fleet", { ok: okCount, total: accounts.length })}</span>
-          </div>
-          <div className="quota-peek-list">
-            {cells.map(({ a, top, used, tone }) => (
-              <div key={a.account.id} className="quota-peek-row">
-                <VendorMark plugin={a.account.provider} size={13} />
-                <span className="quota-peek-name">{a.account.label || a.account.id}</span>
-                {a.agents.length > 0 && (
-                  <span className="quota-peek-agents">{a.agents.map((ag) => `@${ag}`).join(" ")}</span>
-                )}
-                <span className={`quota-peek-val ${tone}`}>
-                  {a.at_risk
-                    ? t("quota.atRisk")
-                    : !a.status.logged_in
-                      ? t("quota.unlogged")
-                      : top
-                        ? `${used}% · ${resetText(top.resets_at) ?? windowLabel(top)}`
-                        : t("quota.noLimit")}
+      <div className="quota-peek" role="region" aria-label={t("quota.peekTitle")}>
+        <div className="quota-peek-head">
+          <span>账号号池</span>
+          <span className="quota-peek-head-right">
+            <span className="quota-peek-summary">
+              {okCount}/{accounts.length} 可用
+            </span>
+            <a className="quota-peek-manage" href="#/usage">
+              管理
+            </a>
+          </span>
+        </div>
+        <div className="quota-peek-groups">
+          {vendorGroups.map((g) => (
+            <div key={g.provider} className="quota-peek-group">
+              <div className="quota-peek-vendor">
+                <VendorMark plugin={g.provider} size={12} />
+                <span className="quota-peek-vendor-name">{g.label}</span>
+                <span className={`quota-peek-vendor-count ${g.ok === 0 ? "danger" : g.ok < g.total ? "warn" : "ok"}`}>
+                  {g.ok}/{g.total}
                 </span>
               </div>
-            ))}
-          </div>
+              <div className="quota-peek-list">
+                {g.items.map(({ a, top, used, tone, unavailable }) => {
+                  const statusLabel = a.at_risk
+                    ? t("quota.atRisk")
+                    : a.egress_block
+                      ? "出口异常"
+                      : !a.status.logged_in
+                        ? t("quota.unlogged")
+                        : a.status.limit_reached || used >= 100
+                          ? "已耗尽"
+                          : top
+                            ? `已用 ${used}%`
+                            : "充足";
+                  const reset = top?.resets_at ? resetText(top.resets_at) : undefined;
+                  return (
+                    <div key={a.account.id} className={"quota-peek-item" + (unavailable ? " is-down" : "")}>
+                      <div className="quota-peek-row">
+                        <span className={`dot ${tone}`} aria-hidden="true" />
+                        <span className="quota-peek-name">{a.account.label || a.account.id}</span>
+                        <span className={`quota-peek-val ${tone}`}>{statusLabel}</span>
+                      </div>
+                      {(a.agents.length > 0 || reset) && (
+                        <div className="quota-peek-sub">
+                          {a.agents.length > 0 && (
+                            <span className="quota-peek-agents">{a.agents.map((ag) => `@${ag}`).join(" ")}</span>
+                          )}
+                          {reset && <span className="quota-peek-reset">{reset}</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -1294,30 +1383,6 @@ function Machine({ machine, searching, children }: { machine: SidebarMachine; se
       </div>
       {!closed && <div className="machine-body">{children}</div>}
     </section>
-  );
-}
-
-function Connection() {
-  const status = useConnectionStatus();
-  const [info, setInfo] = useState<HubInfo>();
-  useEffect(() => {
-    if (status === "connected") api.info().then(setInfo, () => {});
-  }, [status]);
-  const color = status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger";
-  const text =
-    status === "connected"
-      ? t("hub.connected")
-      : status === "connecting"
-        ? t("hub.connecting")
-        : t("hub.offline", { reason: status.replace(/^offline: /, "") });
-  return (
-    <div className="connection" title={info?.home}>
-      <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} role="img" aria-label={text} title={text} />
-      <span className="text" title={text}>
-        {text}
-      </span>
-      {info && status === "connected" && <Versions hub={info} />}
-    </div>
   );
 }
 

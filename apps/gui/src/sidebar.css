@@ -15,9 +15,8 @@
 }
 .member-elapsed .member-elapsed-facts > * { white-space: nowrap; }
 
-/* The footer's hub line: when the words would be cut ("hub 已…"), only the dot stays, with the
-   words as its tooltip and accessible name. */
+/* The footer card: on very narrow sidebars, hide the quota pill count so avatar + name stay legible. */
 .sidebar .foot { container-type: inline-size; container-name: sidebar-foot; }
-@container sidebar-foot (max-width: 195px) {
-  .connection .text { display: none; }
+@container sidebar-foot (max-width: 175px) {
+  .foot-quota-count { display: none; }
 }
