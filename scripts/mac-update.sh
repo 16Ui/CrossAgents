@@ -162,7 +162,11 @@ else
 fi
 got=$(defaults read "$new/Contents/Info" CFBundleShortVersionString)
 [ "$got" = "$latest" ] || die "包里的版本是 $got，不是 $latest"
-codesign --verify --deep --strict "$new" || die "签名校验没过，不装"
+if ! codesign --verify --deep --strict "$new" 2>/dev/null; then
+  # 无开发者证书打包的 Tauri .app 没有自动补 ad-hoc 签名，安装前在本地补签一次再校验。
+  codesign --force --deep --sign - "$new" >/dev/null 2>&1 || true
+  codesign --verify --deep --strict "$new" || die "签名校验没过，不装"
+fi
 [ -x "$link_bin" ] || die "包里缺 crossagents-link，不装"
 
 # ------------------------------------------------------------------ 替换

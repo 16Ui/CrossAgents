@@ -275,22 +275,19 @@ pub fn install_tray(app: &AppHandle) -> tauri::Result<()> {
             "stop-background" => stop_background(app),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } if cfg!(not(target_os = "macos")) => {
+        .on_tray_icon_event(|tray, event| {
+            if cfg!(not(target_os = "macos"))
+                && matches!(
+                    event,
+                    TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    }
+                )
+            {
                 show_window(tray.app_handle());
             }
-            TrayIconEvent::Click {
-                button: MouseButton::Right,
-                button_state: MouseButtonState::Down,
-                ..
-            } => {
-                refresh_tray(tray.app_handle());
-            }
-            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         tray = tray.icon(icon.clone());
