@@ -307,9 +307,31 @@ fn select_value(item: &Value) -> Option<SelectValue> {
     Some(SelectValue { value, name })
 }
 
+/// Splits a trailing reasoning-effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, `-max`)
+/// from a combined model slug such as `gemini-4-neon-medium` → `("gemini-4-neon", "medium")`.
+pub fn split_effort_suffix(wanted: &str) -> Option<(&str, &str)> {
+    let lower = wanted.to_ascii_lowercase();
+    for suffix in ["-xhigh", "-medium", "-high", "-low", "-max"] {
+        if let Some(base_len) = lower.strip_suffix(suffix).map(str::len)
+            && base_len > 0
+        {
+            return Some((&wanted[..base_len], &wanted[base_len + 1..]));
+        }
+    }
+    None
+}
+
 impl SelectOption {
-    /// Exact (case-insensitive) match on value or name first, then substring.
+    /// Exact (case-insensitive) match on value or name first, then substring, then base model
+    /// after stripping a trailing effort suffix (e.g. `gemini-4-neon-medium` → `gemini-4-neon`).
     pub fn resolve(&self, wanted: &str) -> Option<&SelectValue> {
+        self.resolve_exact_or_sub(wanted).or_else(|| {
+            let (base, _) = split_effort_suffix(wanted)?;
+            self.resolve_exact_or_sub(base)
+        })
+    }
+
+    fn resolve_exact_or_sub(&self, wanted: &str) -> Option<&SelectValue> {
         let wanted = wanted.to_lowercase();
         let exact = self
             .values
@@ -364,6 +386,19 @@ mod tests {
         assert_eq!(model.values.len(), 2);
         assert_eq!(model.resolve("haiku").unwrap().value, "claude-haiku-5-5");
         assert_eq!(model.resolve("DEFAULT").unwrap().value, "default");
+        assert_eq!(
+            model.resolve("claude-haiku-5-5-medium").unwrap().value,
+            "claude-haiku-5-5"
+        );
+        assert_eq!(
+            split_effort_suffix("gemini-4-neon-medium"),
+            Some(("gemini-4-neon", "medium"))
+        );
+        assert_eq!(
+            split_effort_suffix("gemini-4-neon-xhigh"),
+            Some(("gemini-4-neon", "xhigh"))
+        );
+        assert_eq!(split_effort_suffix("gemini-4-neon"), None);
         assert!(model.resolve("gpt").is_none());
     }
 

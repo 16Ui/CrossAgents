@@ -472,20 +472,49 @@ impl AcpSession {
             ));
             return;
         };
-        if value.value == option.current {
-            return;
+        if value.value != option.current {
+            let request = SetSessionConfigOptionRequest {
+                session_id: self.session_id.clone(),
+                config_id: option.id.clone(),
+                value: value.value.clone(),
+            };
+            if let Err(err) = self
+                .peer
+                .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
+                .await
+            {
+                warn(format!("cannot select model {}: {err}", value.value));
+            }
         }
-        let request = SetSessionConfigOptionRequest {
-            session_id: self.session_id.clone(),
-            config_id: option.id.clone(),
-            value: value.value.clone(),
-        };
-        if let Err(err) = self
-            .peer
-            .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
-            .await
+        // When a combined slug (`gemini-4-neon-medium`) resolved to a base ACP model
+        // (`gemini-4-neon`), also forward the stripped effort suffix if ACP exposes an effort
+        // / thought_level config option.
+        if let Some((_, effort)) = wire::split_effort_suffix(wanted)
+            && !value.value.eq_ignore_ascii_case(wanted)
+            && let Some(effort_opt) = find_select_option(options, |id, cat| {
+                matches!(
+                    cat,
+                    Some("thought_level" | "reasoning_effort" | "effort" | "thinking")
+                ) || matches!(
+                    id,
+                    "thought_level" | "reasoning_effort" | "effort" | "thinking" | "thinking_level"
+                )
+            })
+            && let Some(effort_val) = effort_opt.resolve(effort)
+            && effort_val.value != effort_opt.current
         {
-            warn(format!("cannot select model {}: {err}", value.value));
+            let request = SetSessionConfigOptionRequest {
+                session_id: self.session_id.clone(),
+                config_id: effort_opt.id.clone(),
+                value: effort_val.value.clone(),
+            };
+            if let Err(err) = self
+                .peer
+                .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
+                .await
+            {
+                warn(format!("cannot select effort {}: {err}", effort_val.value));
+            }
         }
     }
 }

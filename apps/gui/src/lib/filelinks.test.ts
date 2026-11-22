@@ -13,12 +13,15 @@ test("a document's links are relative to its folder", () => {
   assert.equal(docLinkPath("docs", "../../secret.md"), "../secret.md");
 });
 
-test("line suffixes split off: :line, :line:col, #Lline", () => {
+test("line suffixes split off: :line, :line:col, :line-end, #Lline", () => {
   assert.deepEqual(splitLine("src/main.rs:12"), { path: "src/main.rs", line: 12 });
   assert.deepEqual(splitLine("src/main.rs:12:5"), { path: "src/main.rs", line: 12, col: 5 });
+  assert.deepEqual(splitLine("crates/core/src/process.rs:33-64"), { path: "crates/core/src/process.rs", line: 33 });
+  assert.deepEqual(splitLine("crates/core/src/process.rs:33:1-64:10"), { path: "crates/core/src/process.rs", line: 33, col: 1 });
   assert.deepEqual(splitLine("docs/a.md#L40"), { path: "docs/a.md", line: 40 });
   assert.deepEqual(splitLine("docs/a.md#L40-L52"), { path: "docs/a.md", line: 40 });
   assert.deepEqual(splitLine("C:/work/x.ts:3"), { path: "C:/work/x.ts", line: 3 });
+  assert.deepEqual(splitLine("C:/work/x.ts:3-9"), { path: "C:/work/x.ts", line: 3 });
   assert.deepEqual(splitLine("Cargo.toml"), { path: "Cargo.toml" });
 });
 
