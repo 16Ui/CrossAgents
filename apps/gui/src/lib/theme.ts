@@ -19,10 +19,10 @@ export const MODES: { key: Mode; label: string }[] = [
 ];
 
 export const PAPERS: { key: Paper; label: string; hint: string; swatch: string; card?: string }[] = [
-  { key: "plain", label: "素白", hint: "中性灰白", swatch: "#f4f4f2" },
+  { key: "plain", label: "macOS 蓝", hint: "中性灰白与 macOS 系统蓝强调色（深/浅色均生效）", swatch: "#f5f5f7", card: "#007aff" },
+  { key: "ink", label: "墨 · shadcn", hint: "shadcn/ui Zinc 极简黑白灰，零彩色干扰（深/浅色均生效）", swatch: "#fafafa", card: "#18181b" },
   { key: "paper", label: "纸", hint: "偏暖，像纸", swatch: "#faf9f5" },
   { key: "mist", label: "雾", hint: "偏冷的灰", swatch: "#f3f4f6" },
-  { key: "ink", label: "墨", hint: "素白底，主操作用墨色不用靛紫；深色下也生效", swatch: "#f4f4f2", card: "#18181b" },
 ];
 
 const KEY = "crossagents.theme";

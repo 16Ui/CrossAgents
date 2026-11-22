@@ -11,12 +11,12 @@
    light-mist (雾), dark. :root is light. 墨 is light (素白) or dark plus `data-accent="ink"`:
    the accent becomes ink (near black, near white in dark) instead of indigo. */
 :root {
-  --page: #f4f4f2;
+  --page: #f5f5f7;
   /* Where conversations and pages are drawn. */
   --canvas: var(--page);
-  --sidebar: #f9f9f7;
+  --sidebar: #f0f0f3;
   --surface: #ffffff;
-  --surface-sunk: #ededea;
+  --surface-sunk: #ebebef;
   --hover: rgba(24, 24, 27, 0.045);
   --selected: rgba(24, 24, 27, 0.075);
   --border: rgba(24, 24, 27, 0.09);
@@ -25,14 +25,14 @@
   --text-2: #52525a;
   --muted: #84848c;
 
-  /* Accent is indigo: primary buttons, live marks, the selected row, focus. */
-  --accent: #5b5bd6;
-  --accent-hover: #4b4bc4;
-  --accent-bg: rgba(91, 91, 214, 0.1);
-  --accent-text: #4343b8;
+  /* Accent is macOS system blue: primary buttons, live marks, the selected row, focus. */
+  --accent: #007aff;
+  --accent-hover: #0066d6;
+  --accent-bg: rgba(0, 122, 255, 0.1);
+  --accent-text: #0062cc;
   --on-accent: #ffffff;
-  --link: #2f5fb3;
-  --focus: #4a7fd6;
+  --link: #0066cc;
+  --focus: #007aff;
 
   /* Status: `--x` for marks and bars, `--x-bg` for tinted fills, `--x-text` for small text on
      those fills (contrast at least 4.5:1). */
@@ -112,26 +112,26 @@
 }
 
 :root[data-theme="dark"] {
-  --page: #0e0e0f;
-  --canvas: #161617;
-  --sidebar: #161617;
-  --surface: #1e1e20;
-  --surface-sunk: #232326;
-  --hover: rgba(255, 255, 255, 0.045);
-  --selected: rgba(255, 255, 255, 0.08);
-  --border: rgba(255, 255, 255, 0.075);
-  --border-strong: rgba(255, 255, 255, 0.15);
-  --text: #ececee;
-  --text-2: #a6a6ad;
-  --muted: #74747c;
+  --page: #111113;
+  --canvas: #18181a;
+  --sidebar: #161618;
+  --surface: #202023;
+  --surface-sunk: #26262a;
+  --hover: rgba(255, 255, 255, 0.048);
+  --selected: rgba(255, 255, 255, 0.085);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #f2f2f5;
+  --text-2: #a1a1aa;
+  --muted: #71717a;
 
-  --accent: #7c7ff2;
-  --accent-hover: #9194f6;
-  --accent-bg: rgba(124, 127, 242, 0.14);
-  --accent-text: #aeb0fb;
+  --accent: #0a84ff;
+  --accent-hover: #2d96ff;
+  --accent-bg: rgba(10, 132, 255, 0.16);
+  --accent-text: #58a6ff;
   --on-accent: #ffffff;
-  --link: #8fb4f0;
-  --focus: #6f9de6;
+  --link: #58a6ff;
+  --focus: #0a84ff;
 
   --ok: #5fb683;
   --ok-bg: #1b2a21;
@@ -156,21 +156,34 @@
   color-scheme: dark;
 }
 
-/* 墨: ink for primary actions, live marks and the selected item; colour stays for status,
-   diffs and vendors. */
+/* 墨 (shadcn Zinc): monochrome neutral surfaces and ink primary actions; colour stays only
+   for status, diffs and vendors. */
 :root[data-accent="ink"]:not([data-theme="dark"]) {
+  --page: #fafafa;
+  --sidebar: #f4f4f5;
+  --surface: #ffffff;
+  --surface-sunk: #f4f4f5;
   --accent: #18181b;
-  --accent-hover: #3a3a40;
+  --accent-hover: #27272a;
   --accent-bg: rgba(24, 24, 27, 0.075);
   --accent-text: #18181b;
-  --on-accent: #ffffff;
+  --on-accent: #fafafa;
+  --focus: #52525b;
+  --link: #18181b;
 }
 :root[data-theme="dark"][data-accent="ink"] {
-  --accent: #e6e6e9;
-  --accent-hover: #ffffff;
+  --page: #09090b;
+  --canvas: #0f0f11;
+  --sidebar: #0e0e10;
+  --surface: #18181b;
+  --surface-sunk: #222226;
+  --accent: #fafafa;
+  --accent-hover: #e4e4e7;
   --accent-bg: rgba(255, 255, 255, 0.09);
-  --accent-text: #f2f2f4;
-  --on-accent: #18181b;
+  --accent-text: #f4f4f5;
+  --on-accent: #09090b;
+  --focus: #a1a1aa;
+  --link: #e4e4e7;
 }
 
 * { box-sizing: border-box; }
@@ -316,10 +329,14 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .search {
   display: flex; align-items: center; gap: 7px; margin: 0 10px 6px; padding: 0 6px 0 10px; height: 32px;
   border: 1px solid var(--border); border-radius: var(--radius); color: var(--muted); background: var(--hover);
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
 }
-.search:focus-within { border-color: var(--border-strong); background: var(--surface); }
+.search:focus-within {
+  border-color: var(--focus); background: var(--surface);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 22%, transparent);
+}
 .search input { border: none; background: transparent; padding: 0; height: 100%; font-size: 13px; }
-.search input:focus { outline: none; }
+.search input:focus, .search input:focus-visible { outline: none; }
 .search input::placeholder { color: var(--muted); }
 .icon-btn {
   display: inline-grid; place-items: center; width: 22px; height: 22px; padding: 0; border: none;
@@ -1982,7 +1999,10 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 
 /* Flat project/member navigation: keep the name readable at the 226px default. */
 .flat-sidebar .search { height: 30px; border-color: transparent; }
-.flat-sidebar .search:focus-within { border-color: var(--border-strong); }
+.flat-sidebar .search:focus-within {
+  border-color: var(--focus); background: var(--surface);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus) 22%, transparent);
+}
 .flat-sidebar .side-nav a { color: var(--text-2); font-size: 13px; }
 .flat-sidebar .side-nav a:hover, .flat-sidebar .side-nav a.active { color: var(--text); }
 .flat-sidebar .side-nav svg { color: inherit; }
@@ -2024,7 +2044,7 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .member-unread { flex-shrink: 0; color: var(--text-2); }
 .flat-sidebar .row-actions { display: flex; position: absolute; right: 2px; top: 50%; transform: translateY(-50%); padding-right: 0; background: var(--surface); border-radius: 4px; opacity: 0; pointer-events: none; }
 .flat-sidebar .nav-row:hover .row-actions, .flat-sidebar .nav-row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
-.flat-sidebar :is(a, button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.flat-sidebar :is(a, button):focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .sidebar-unread { color: var(--muted); font-size: 11px; margin: 10px 8px 0; }
 /* The sidebar section, not the dock strip above the composer, which .needs-you lays out in a row. */
 .needs-you-group .group-name { color: var(--warn-text); }
