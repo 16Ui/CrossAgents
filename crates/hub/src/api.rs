@@ -109,6 +109,8 @@ pub struct AppState {
     pub terminals: Arc<crate::terminal::Terminals>,
     /// The built-in hole-punching entrance (docs/MULTI-NODE.md §14).
     pub link: Arc<crate::link::LinkService>,
+    /// Connected remote execution nodes (`crossagents node run`).
+    pub remote_nodes: Arc<crate::remote_nodes::RemoteNodes>,
 }
 
 impl AppState {
@@ -302,6 +304,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_projects::router())
         .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
+        .merge(crate::api_nodes::control_router())
         .merge(crate::browser::router())
         .merge(crate::api_bytes::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -314,10 +317,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_agent_token,
         ));
+    let node_channel = crate::api_nodes::node_channel_router(state.clone());
     Router::new()
         .route("/v1/health", get(health))
         .merge(authed)
         .merge(me)
+        .merge(node_channel)
         .with_state(state)
 }
 
@@ -3323,9 +3328,9 @@ async fn my_tools(
     State(state): State<Arc<AppState>>,
     Extension(agent): Extension<Agent>,
 ) -> Json<ListToolsResponse> {
-    Json(ListToolsResponse {
-        tools: state.orchestrator.tools_for(&agent).await,
-    })
+    let mut tools = state.orchestrator.tools_for(&agent).await;
+    tools.extend(crate::api_nodes::mcp_tools());
+    Json(ListToolsResponse { tools })
 }
 
 async fn call_tool(
@@ -3338,11 +3343,17 @@ async fn call_tool(
     tracing::info!(agent = %agent.name, tool = %name, "tool call");
     // Detached: a tool may end the caller's own session (e.g. a reviewer's verdict removes
     // the reviewer), which drops this request. The state change must still finish.
+    let state_for_task = state.clone();
     let orchestrator = state.orchestrator.clone();
     let bus = state.bus.clone();
     let (id, tool) = (agent.id, name.clone());
     let call = tokio::spawn(async move {
-        let result = orchestrator.call_tool(&agent, &name, input).await;
+        let result =
+            if let Some(res) = crate::api_nodes::call_mcp_tool(&state_for_task, &name, input.clone()).await {
+                res
+            } else {
+                orchestrator.call_tool(&agent, &name, input).await
+            };
         // What the agent did is in its round (`agent.round`, rounds.rs). Recorded in the same
         // detached task, so a request that was dropped still counts. An external agent's calls
         // land in its next round, since the hub starts and ends its turns at the reads (rounds.rs).

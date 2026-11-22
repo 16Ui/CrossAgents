@@ -1,5 +1,6 @@
 [
   {"method":"GET","path":"^/v1/info$","level":"read"},
+  {"method":"GET","path":"^/v1/nodes$","level":"read","note":"Online execution nodes (local + connected remote `crossagents node run` daemons)."},
   {"method":"GET","path":"^/v1/terminals$","level":"admin","note":"The person's own terminals. `output` is not here: main.cts relays it, as it does events."},
   {"method":"POST","path":"^/v1/terminals$","level":"admin"},
   {"method":"DELETE","path":"^/v1/terminals/[^/]+$","level":"admin"},

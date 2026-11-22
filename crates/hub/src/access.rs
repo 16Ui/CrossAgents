@@ -81,6 +81,7 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             // It starts the CLI for a real (if tiny) session, spending the account's quota.
             | ("POST", "/v1/plugins/{name}/self-check")
     ) || is_terminal(pattern)
+        || is_node_control(method, pattern)
         || is_extension_trust(method, pattern);
     if admin {
         Level::Admin
@@ -95,6 +96,12 @@ pub fn required(method: &Method, pattern: &str) -> Level {
 /// that printed, tokens included: every route, reading too, is admin.
 fn is_terminal(pattern: &str) -> bool {
     pattern == "/v1/terminals" || pattern.starts_with("/v1/terminals/")
+}
+
+/// Controlling a remote node runs commands and edits files as that node's OS user: admin.
+/// Listing connected nodes (`GET /v1/nodes`) remains read.
+fn is_node_control(method: &Method, pattern: &str) -> bool {
+    *method == Method::POST && pattern.starts_with("/v1/nodes/")
 }
 
 /// Granting an extension trust is admin, and only a person reaches it (docs/EXTENSIONS.md

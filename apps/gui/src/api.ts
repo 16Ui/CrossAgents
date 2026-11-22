@@ -556,6 +556,8 @@ export const api = {
     request<void>("POST", `/v1/browser/requests/${enc(id)}/result`, result),
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
+  /** Online execution nodes (built-in local hub + connected remote `crossagents node run` daemons). */
+  listNodes: () => request<import("@bindings/ListNodesResponse").ListNodesResponse>("GET", "/v1/nodes"),
   /** Every device the hub has issued, revoked ones included; no tokens or hashes (docs/API-AUTH.md §2.2). */
   listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),
   /** Revokes a device's credential; idempotent, answers the device as it now stands (`admin`). */

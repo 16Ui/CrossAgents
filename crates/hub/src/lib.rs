@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod api;
 pub mod api_bytes;
 pub mod api_expertise;
+pub mod api_nodes;
 pub mod api_projects;
 pub mod api_terminal;
 pub mod attachments;
@@ -30,6 +31,7 @@ pub mod notices;
 pub mod paths;
 pub mod prices;
 pub mod refresh;
+pub mod remote_nodes;
 pub mod replies;
 pub mod resume;
 pub mod retro;
@@ -450,6 +452,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         self_check: Arc::new(self_check::SelfCheck::new()),
         terminals: terminals.clone(),
         link: Arc::new(link::LinkService::new(&paths.home)),
+        remote_nodes: Arc::new(remote_nodes::RemoteNodes::new()),
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     state.link.resume(&state, addr).await;
