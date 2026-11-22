@@ -116,20 +116,55 @@ impl AntigravityDriver {
         let Some((program, extra)) = command.split_first() else {
             return;
         };
-        let mut child = Command::new(resolve_program(program));
-        child
-            .args(extra)
-            .arg("models")
-            .envs(system_proxy_env())
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        prepare_query(&mut child);
-        let Ok(Ok(output)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, child.output()).await else {
-            tracing::debug!("agy models did not answer");
-            return;
+        let output = if cfg!(windows) {
+            let mut args: Vec<String> = extra.to_vec();
+            args.push("models".into());
+            let mut env = system_proxy_env();
+            env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+            let Ok(mut launched) = crate::launch::launch(LaunchSpec {
+                program: resolve_program(program),
+                args,
+                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                env,
+                label: "agy models".into(),
+                ..LaunchSpec::default()
+            })
+            .await
+            else {
+                tracing::debug!("agy models failed to start");
+                return;
+            };
+            drop(launched.stdin);
+            let mut buf = Vec::new();
+            let read = tokio::time::timeout(
+                MODEL_LIST_TIMEOUT,
+                tokio::io::AsyncReadExt::read_to_end(&mut launched.stdout, &mut buf),
+            )
+            .await;
+            launched.process.start_kill();
+            if read.is_err() {
+                tracing::debug!("agy models did not answer");
+                return;
+            }
+            buf
+        } else {
+            let mut child = Command::new(resolve_program(program));
+            child
+                .args(extra)
+                .arg("models")
+                .envs(system_proxy_env())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            prepare_query(&mut child);
+            let Ok(Ok(output)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, child.output()).await
+            else {
+                tracing::debug!("agy models did not answer");
+                return;
+            };
+            output.stdout
         };
-        let models = wire::parse_models(&String::from_utf8_lossy(&output.stdout));
+        let models = wire::parse_models(&String::from_utf8_lossy(&output));
         if !models.is_empty() {
             *self.listed.lock().expect("model list") = models;
         }

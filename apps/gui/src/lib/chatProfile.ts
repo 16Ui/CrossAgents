@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from "react";
+import { api } from "../api";
 
 export type ChatProfile = {
   name: string;
-  /** A square WebP, stored on this device. */
+  /** A square WebP, synced to the connected hub and cached locally. */
   avatar: string | null;
   showAvatars: boolean;
 };
@@ -30,6 +31,16 @@ function notify() {
   listeners.forEach((listener) => listener());
 }
 
+function writeLocal(next: ChatProfile) {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota or SSR errors.
+  }
+  profile = next;
+  notify();
+}
+
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (event.key !== KEY && event.key !== null) return;
@@ -39,10 +50,42 @@ if (typeof window !== "undefined") {
 }
 
 export function setChatProfile(patch: Partial<ChatProfile>) {
-  const next = { ...profile, ...patch };
-  localStorage.setItem(KEY, JSON.stringify(next));
-  profile = next;
-  notify();
+  const next: ChatProfile = {
+    ...profile,
+    ...patch,
+    name: (patch.name ?? profile.name).slice(0, 32),
+  };
+  writeLocal(next);
+  if (patch.name !== undefined || patch.avatar !== undefined) {
+    void api.setProfile({ name: next.name, avatar: next.avatar }).catch(() => undefined);
+  }
+}
+
+let syncStarted = false;
+export function startChatProfileSync() {
+  if (syncStarted || typeof window === "undefined") return;
+  syncStarted = true;
+  const sync = async () => {
+    try {
+      const remote = await api.profile();
+      const remoteName = typeof remote?.name === "string" ? remote.name.slice(0, 32) : "";
+      const remoteAvatar = typeof remote?.avatar === "string" && remote.avatar ? remote.avatar : null;
+      if (remoteName || remoteAvatar) {
+        if (remoteName !== profile.name || remoteAvatar !== profile.avatar) {
+          writeLocal({ ...profile, name: remoteName, avatar: remoteAvatar });
+        }
+      } else if (profile.name || profile.avatar) {
+        // First time on a hub without a saved profile: migrate this device's local profile up.
+        await api.setProfile({ name: profile.name, avatar: profile.avatar });
+      }
+    } catch {
+      // Offline or older hub without /v1/profile: keep local cache.
+    }
+  };
+  void sync();
+  window.crossagents?.onStatus((status) => {
+    if (status === "connected") void sync();
+  });
 }
 
 function subscribe(listener: () => void) {

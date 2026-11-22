@@ -235,9 +235,11 @@ pub(crate) fn spawn(spec: &LaunchSpec) -> io::Result<Launched> {
     drop(pty_out_write);
 
     let attr_list = AttrList::new(conpty.0)?;
+    const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
     let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
     si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.StartupInfo.wShowWindow = 0; // SW_HIDE
     si.StartupInfo.hStdInput = stdin_read.as_raw_handle() as HANDLE;
     si.StartupInfo.hStdOutput = stdout_write.as_raw_handle() as HANDLE;
     si.StartupInfo.hStdError = stderr_write.as_raw_handle() as HANDLE;

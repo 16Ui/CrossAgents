@@ -26,6 +26,8 @@
   {"method":"POST","path":"^/v1/avatars$","level":"write"},
   {"method":"GET","path":"^/v1/avatars/[^/]+$","level":"read"},
   {"method":"DELETE","path":"^/v1/avatars/[^/]+$","level":"write"},
+  {"method":"GET","path":"^/v1/profile$","level":"read"},
+  {"method":"POST","path":"^/v1/profile$","level":"write"},
   {"method":"GET","path":"^/v1/notes$","level":"read"},
   {"method":"GET","path":"^/v1/background$","level":"read"},
   {"method":"DELETE","path":"^/v1/background/reminders/[^/]+$","level":"write"},

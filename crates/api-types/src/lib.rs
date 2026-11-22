@@ -1619,6 +1619,16 @@ pub enum TerminalTier {
     System,
 }
 
+/// The user's own chat profile stored on the hub (`GET /v1/profile`, `POST /v1/profile`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UserProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
 /// A terminal on the hub's machine (`GET /v1/terminals`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

@@ -538,6 +538,9 @@ export const api = {
   dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
 
   listTerminals: () => request<ListTerminalsResponse>("GET", "/v1/terminals"),
+  profile: () => request<{ name: string; avatar: string | null }>("GET", "/v1/profile"),
+  setProfile: (profile: { name: string; avatar: string | null }) =>
+    request<{ name: string; avatar: string | null }>("POST", "/v1/profile", profile),
   createTerminal: (req: CreateTerminalRequest) => request<TerminalInfo>("POST", "/v1/terminals", req),
   closeTerminal: (id: string) => request<void>("DELETE", `/v1/terminals/${enc(id)}`),
   terminalInput: (id: string, req: TerminalInputRequest) => request<TerminalInputResponse>("POST", `/v1/terminals/${enc(id)}/input`, req),

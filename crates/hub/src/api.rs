@@ -171,6 +171,12 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
         )
         .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
+        .route(
+            "/v1/profile",
+            get(get_user_profile)
+                .post(set_user_profile)
+                .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
+        )
         .route("/v1/notes", get(list_notes))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
@@ -1758,6 +1764,52 @@ async fn get_avatar(
     crate::avatars::read(&state.home, &id)
         .map(Json)
         .ok_or_else(|| CoreError::NotFound { kind: "avatar", id }.into())
+}
+
+const USER_PROFILE_MAX_AVATAR_BYTES: usize = 512 * 1024;
+
+async fn get_user_profile(
+    State(state): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::UserProfile> {
+    let path = state.home.join("profile.json");
+    let profile = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<crossagents_api_types::UserProfile>(&bytes).ok())
+        .unwrap_or_default();
+    Json(profile)
+}
+
+async fn set_user_profile(
+    State(state): State<Arc<AppState>>,
+    Json(mut req): Json<crossagents_api_types::UserProfile>,
+) -> ApiResult<Json<crossagents_api_types::UserProfile>> {
+    req.name = req.name.trim().chars().take(32).collect();
+    if let Some(avatar) = &req.avatar {
+        if avatar.is_empty() {
+            req.avatar = None;
+        } else if !avatar.starts_with("data:image/") || avatar.len() > USER_PROFILE_MAX_AVATAR_BYTES {
+            return Err(AppError::bad_request("invalid user avatar"));
+        }
+    }
+    let path = state.home.join("profile.json");
+    let bytes = serde_json::to_vec_pretty(&req).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            e.to_string(),
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, bytes).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            e.to_string(),
+        )
+    })?;
+    Ok(Json(req))
 }
 
 async fn delete_avatar(
