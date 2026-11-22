@@ -248,9 +248,41 @@ impl Terminal {
     }
 }
 
-/// The terminals of this hub.
+/// A system-tier CLI host (e.g. hidden ConPTY running `agy` / `codex`) registered by the local
+/// node's driver launcher.
+struct SystemHost {
+    id: String,
+    label: String,
+    cwd: PathBuf,
+    owner_agent: Option<String>,
+    created_at: DateTime<Utc>,
+    killer: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl SystemHost {
+    fn info(&self) -> TerminalInfo {
+        TerminalInfo {
+            id: self.id.clone(),
+            tier: TerminalTier::System,
+            owner_agent: self.owner_agent.clone(),
+            project: None,
+            cwd: self.cwd.display().to_string(),
+            shell: self.label.clone(),
+            cols: 120,
+            rows: 30,
+            created_at: self.created_at,
+            exited: false,
+            exit_code: None,
+            connections: 0,
+            node: None,
+        }
+    }
+}
+
+/// The terminals of this hub (this node's interactive `user`/`agent` PTYs and `system` CLI hosts).
 pub struct Terminals {
     map: Mutex<HashMap<String, Arc<Terminal>>>,
+    system_hosts: Mutex<HashMap<String, Arc<SystemHost>>>,
     shell: Option<Vec<String>>,
     idle: Duration,
 }
@@ -260,6 +292,7 @@ impl Terminals {
     pub fn new(shell: Option<Vec<String>>, idle: Duration) -> Arc<Self> {
         Arc::new(Self {
             map: Mutex::new(HashMap::new()),
+            system_hosts: Mutex::new(HashMap::new()),
             shell,
             idle,
         })
@@ -313,6 +346,9 @@ impl Terminals {
             })
             .map(|t| t.info())
             .collect();
+        if tier == Some(TerminalTier::System) || (tier.is_none() && include_system) {
+            all.extend(lock(&self.system_hosts).values().map(|h| h.info()));
+        }
         all.sort_by_key(|t| t.created_at);
         all
     }
@@ -499,9 +535,15 @@ impl Terminals {
 
     /// Ends a terminal and forgets it: the × on its tab.
     pub fn close(&self, id: &str) -> Result<(), CoreError> {
-        let terminal = lock(&self.map).remove(id).ok_or_else(|| not_found(id))?;
-        terminal.kill();
-        Ok(())
+        if let Some(terminal) = lock(&self.map).remove(id) {
+            terminal.kill();
+            return Ok(());
+        }
+        if let Some(host) = lock(&self.system_hosts).remove(id) {
+            (host.killer)();
+            return Ok(());
+        }
+        Err(not_found(id))
     }
 
     pub fn close_device(&self, id: &str) {
@@ -524,6 +566,32 @@ impl Terminals {
         for terminal in all {
             terminal.kill();
         }
+        let hosts: Vec<_> = lock(&self.system_hosts).drain().map(|(_, h)| h).collect();
+        for host in hosts {
+            (host.killer)();
+        }
+    }
+}
+
+impl crossagents_drivers::launch::SystemHostObserver for Terminals {
+    fn started(
+        &self,
+        info: crossagents_drivers::launch::SystemHostInfo,
+        killer: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        let host = Arc::new(SystemHost {
+            id: info.id.clone(),
+            label: info.label,
+            cwd: info.cwd,
+            owner_agent: info.owner_agent,
+            created_at: Utc::now(),
+            killer,
+        });
+        lock(&self.system_hosts).insert(info.id, host);
+    }
+
+    fn exited(&self, id: &str, _code: Option<i32>) {
+        lock(&self.system_hosts).remove(id);
     }
 }
 
@@ -862,5 +930,38 @@ mod tests {
         assert!(check_size(80, 0).is_err());
         assert!(check_size(MAX_COLS + 1, 24).is_err());
         assert!(check_size(80, MAX_ROWS + 1).is_err());
+    }
+
+    #[test]
+    fn system_hosts_are_hidden_by_default_and_closable() {
+        use crossagents_drivers::launch::{SystemHostInfo, SystemHostObserver};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let terminals = Terminals::new(None, DEFAULT_IDLE);
+        let killed = Arc::new(AtomicBool::new(false));
+        let killed_flag = killed.clone();
+        terminals.started(
+            SystemHostInfo {
+                id: "sys-test-1".into(),
+                label: "Antigravity CLI".into(),
+                cwd: PathBuf::from("."),
+                owner_agent: Some("Mira".into()),
+            },
+            Arc::new(move || killed_flag.store(true, Ordering::SeqCst)),
+        );
+
+        assert!(terminals.list().is_empty());
+        let with_sys = terminals.list_filtered(None, true);
+        assert_eq!(with_sys.len(), 1);
+        assert_eq!(with_sys[0].tier, TerminalTier::System);
+        assert_eq!(with_sys[0].shell, "Antigravity CLI");
+        assert_eq!(with_sys[0].owner_agent.as_deref(), Some("Mira"));
+
+        let only_sys = terminals.list_filtered(Some(TerminalTier::System), false);
+        assert_eq!(only_sys.len(), 1);
+
+        terminals.close("sys-test-1").unwrap();
+        assert!(killed.load(Ordering::SeqCst));
+        assert!(terminals.list_filtered(None, true).is_empty());
     }
 }

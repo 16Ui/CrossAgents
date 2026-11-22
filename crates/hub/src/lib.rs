@@ -411,6 +411,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     })
     .start(shutdown.clone());
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
+    crossagents_drivers::launch::set_system_host_observer(terminals.clone());
     terminals.start_reclaiming(shutdown.clone());
     let extension_poll = extensions.start(shutdown.clone());
     // Event hooks and resident services run beside the hub and end with it

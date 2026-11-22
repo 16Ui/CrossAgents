@@ -75,6 +75,69 @@ pub(crate) trait Killer: Send + Sync {
     fn kill(&self);
 }
 
+/// Descriptor of a system-level driver CLI process hosted on this node.
+#[derive(Debug, Clone)]
+pub struct SystemHostInfo {
+    pub id: String,
+    pub label: String,
+    pub cwd: PathBuf,
+    pub owner_agent: Option<String>,
+}
+
+/// Hook for the node's terminal manager to observe system-tier CLI hosts.
+pub trait SystemHostObserver: Send + Sync {
+    fn started(&self, info: SystemHostInfo, killer: Arc<dyn Fn() + Send + Sync>);
+    fn exited(&self, id: &str, code: Option<i32>);
+}
+
+static SYSTEM_HOST_OBSERVER: std::sync::Mutex<Option<Arc<dyn SystemHostObserver>>> =
+    std::sync::Mutex::new(None);
+
+/// Registers the observer notified whenever a direct/ConPTY driver CLI starts or exits.
+pub fn set_system_host_observer(observer: Arc<dyn SystemHostObserver>) {
+    *SYSTEM_HOST_OBSERVER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(observer);
+}
+
+fn notify_system_host(spec: &LaunchSpec, launched: &Launched) {
+    let observer = SYSTEM_HOST_OBSERVER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(observer) = observer else {
+        return;
+    };
+    let id = format!("sys-{}", uuid::Uuid::now_v7().simple());
+    let label = if spec.label.is_empty() {
+        spec.program.display().to_string()
+    } else {
+        spec.label.clone()
+    };
+    let killer = launched.process.killer.clone();
+    observer.started(
+        SystemHostInfo {
+            id: id.clone(),
+            label,
+            cwd: spec.cwd.clone(),
+            owner_agent: spec.owner.clone(),
+        },
+        Arc::new(move || killer.kill()),
+    );
+    let mut exit_rx = launched.process.exit.clone();
+    tokio::spawn(async move {
+        let code = loop {
+            if let Some(info) = *exit_rx.borrow() {
+                break info.code;
+            }
+            if exit_rx.changed().await.is_err() {
+                break None;
+            }
+        };
+        observer.exited(&id, code);
+    });
+}
+
 /// Owns the process: dropping it stops the process, unless the hub is leaving its hosted
 /// processes running ([`host::leave`]).
 pub struct ProcessHandle {
@@ -237,7 +300,10 @@ fn direct(spec: LaunchSpec) -> Result<Launched, CoreError> {
     #[cfg(windows)]
     {
         match crate::conpty::spawn(&spec) {
-            Ok(launched) => return Ok(launched),
+            Ok(launched) => {
+                notify_system_host(&spec, &launched);
+                return Ok(launched);
+            }
             Err(err) => {
                 tracing::debug!(
                     %err,
@@ -300,12 +366,14 @@ fn direct(spec: LaunchSpec) -> Result<Launched, CoreError> {
             )));
         }
     });
-    Ok(Launched {
+    let launched = Launched {
         stdin: Box::new(stdin),
         stdout: Box::new(stdout),
         stderr,
         process: ProcessHandle::new(pid, None, exit_rx, Arc::new(DirectKiller(kill))),
-    })
+    };
+    notify_system_host(&spec, &launched);
+    Ok(launched)
 }
 
 #[cfg(test)]
