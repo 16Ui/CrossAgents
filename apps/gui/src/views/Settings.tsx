@@ -19,7 +19,7 @@ import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { cursorFamilies } from "../lib/reasoning";
 import { exportPreferences, importPreferences, PREFERENCES_MAX_BYTES } from "../lib/preferencesTransfer";
-import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
+import { FONTS, MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
 import { AvatarGallery } from "./AvatarGallery";
 import { ConnectionPage } from "./Connection";
@@ -111,6 +111,19 @@ function AppearancePage() {
                   <span className="paper-card" style={p.card ? { background: p.card, borderColor: p.card } : undefined} />
                 </span>
                 {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="setting-line">
+          <div>
+            <div className="setting-label">字体风格</div>
+            <div className="setting-hint">「柔和」优先苹方 / MiSans / 思源黑体并开启平滑抗锯齿；「衬线 · Claude」正文用 Source Serif + 思源宋体；代码保持等宽。</div>
+          </div>
+          <div className="segmented" role="radiogroup" aria-label="对话字体">
+            {FONTS.map((f) => (
+              <button key={f.key} role="radio" aria-checked={theme.font === f.key} className={theme.font === f.key ? "active" : ""} onClick={() => setTheme({ font: f.key })}>
+                {f.label}
               </button>
             ))}
           </div>

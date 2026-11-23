@@ -61,8 +61,10 @@
   --shadow-float: 0 10px 28px rgba(16, 16, 20, 0.12), 0 2px 6px rgba(16, 16, 20, 0.07);
 
   /* Inter for Latin, the system's Chinese face through "CA CJK" (fonts.css, scaled to match). */
-  --font-sans: "Inter Variable", "Inter", "CA CJK", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", system-ui, sans-serif;
-  /* Agent prose reads like the rest of the tool (no chat-bot serif). */
+  --font-sans: "Inter Variable", "Inter", "CA CJK", "PingFang SC", "MiSans", "Noto Sans SC", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --font-soft: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", "CA CJK Soft", "PingFang SC", "MiSans", "Noto Sans SC", system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", "Source Serif 4", "CA CJK Serif", Georgia, "Times New Roman", serif;
+  /* Agent prose reads like the rest of the tool by default; switches in Settings → 外观. */
   --font-voice: var(--font-sans);
   --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, "CA CJK", monospace;
   --mono-size: 12.5px;
@@ -492,6 +494,10 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .bubble.system { align-self: stretch; max-width: none; background: transparent; border: 1px dashed var(--border-strong); color: var(--text-2); font-size: 13px; border-radius: var(--radius-lg); }
 .bubble-meta { align-self: flex-end; font-size: 11.5px; color: var(--muted); margin-top: -6px; }
 .prose { font-family: var(--font-voice); font-size: 14.5px; line-height: 1.65; word-break: break-word; }
+:root[data-font="soft"] { --font-sans: var(--font-soft); --font-voice: var(--font-soft); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+:root[data-font="soft"] .prose { font-size: 14.5px; line-height: 1.7; letter-spacing: 0.01em; }
+:root[data-font="serif"] { --font-voice: var(--font-serif); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+:root[data-font="serif"] .prose { font-size: 15.5px; line-height: 1.72; letter-spacing: 0.005em; }
 .prose p { margin: 0 0 0.6em; white-space: pre-wrap; }
 .prose p:last-child { margin-bottom: 0; }
 .prose pre { font-size: 12.5px; line-height: 1.5; margin: 0.4em 0 0.8em; }
@@ -873,13 +879,40 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
 .menu-head { font-size: 11px; color: var(--muted); padding: 8px 8px 3px; }
 .menu-item {
   display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border: none; border-radius: 6px;
-  background: transparent; color: var(--text); text-align: left; font-size: 13px;
+  background: transparent; color: var(--text); text-align: left; font-size: 13px; cursor: pointer; box-sizing: border-box;
 }
 .menu-item.cursor { background: var(--hover); }
 .menu-item.disabled { color: var(--muted); cursor: default; }
 .menu-item.disabled.cursor { background: transparent; }
 .menu-item[aria-selected="true"] { color: var(--accent-text); }
 .menu-item > svg:last-child { color: var(--accent); flex-shrink: 0; }
+.menu-star {
+  border: none; background: transparent; color: var(--muted); cursor: pointer;
+  padding: 2px 4px; border-radius: 4px; font-size: 13px; line-height: 1; opacity: 0.35; flex-shrink: 0;
+}
+.menu-item:hover .menu-star, .menu-item.cursor .menu-star, .menu-star.on { opacity: 1; }
+.menu-star:hover { background: var(--hover); color: var(--text); }
+.menu-star.on { color: #e5a93b; }
+.menu-footer {
+  flex-shrink: 0; margin-top: 4px; padding: 8px 8px 4px; border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.menu-footer-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.effort-pills { display: flex; flex-wrap: wrap; gap: 3px; }
+.effort-pill {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: 5px; padding: 2px 7px; font-size: 11px; cursor: pointer;
+}
+.effort-pill:hover { color: var(--text); background: var(--hover); }
+.effort-pill.on { border-color: var(--accent); color: var(--accent-text); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.cite-pop {
+  position: fixed; z-index: 120; transform: translate(-50%, -100%);
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px;
+  border-radius: 999px; border: 1px solid var(--border-strong);
+  background: var(--surface); color: var(--text); font-size: 12px;
+  box-shadow: var(--shadow-float); cursor: pointer;
+}
+.cite-pop:hover { background: var(--hover); color: var(--accent-text); }
 .menu-icon { width: 18px; display: grid; place-items: center; flex-shrink: 0; }
 .menu-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

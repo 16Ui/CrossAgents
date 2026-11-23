@@ -1,5 +1,5 @@
 // Flat project/member navigation. Domain grouping and human work live in pure views.
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { Run } from "@bindings/Run";
@@ -24,7 +24,7 @@ import { sessionWork } from "./lib/projectView";
 import { stepLine } from "./lib/workGroups";
 import { WorkDetails } from "./lib/workDetails";
 import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
-import { CENTRE_MACHINE, machineFoldKey, machineGroups, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
+import { CENTRE_MACHINE, machineFoldKey, machineGroups, reorderIds, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { useUnboundProjects } from "./lessons/projects";
@@ -44,6 +44,51 @@ import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspac
 const Confirmed = createContext(true);
 const Needs = createContext<readonly TodoItem[]>([]);
 const Runs = createContext<readonly RunDetail[]>([]);
+/** Persisted per-group session drag-and-drop order. */
+const SESSION_ORDER_KEY = "crossagents.sessionOrder";
+const sessionOrderListeners = new Set<() => void>();
+let sessionOrderRaw: string | null | undefined;
+let sessionOrderCache: Record<string, string[]> = {};
+function readSessionOrder(): Record<string, string[]> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(SESSION_ORDER_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw === sessionOrderRaw) return sessionOrderCache;
+  sessionOrderRaw = raw;
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    sessionOrderCache = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string[]>) : {};
+  } catch {
+    sessionOrderCache = {};
+  }
+  return sessionOrderCache;
+}
+function saveSessionOrder(group: string, ids: string[]) {
+  const next = { ...readSessionOrder(), [group]: ids };
+  const raw = JSON.stringify(next);
+  try {
+    localStorage.setItem(SESSION_ORDER_KEY, raw);
+  } catch {
+    // Ignore storage failures.
+  }
+  sessionOrderRaw = raw;
+  sessionOrderCache = next;
+  for (const fn of sessionOrderListeners) fn();
+}
+function useSessionOrder(): Record<string, string[]> {
+  return useSyncExternalStore(
+    (cb) => {
+      sessionOrderListeners.add(cb);
+      return () => sessionOrderListeners.delete(cb);
+    },
+    readSessionOrder,
+    readSessionOrder,
+  );
+}
+let draggingSession: { group: string; id: string } | null = null;
 /** How long a row stays lit after its turn ends. */
 const DONE_FLASH = 1800;
 /** An entry the hub refused (403): still readable, so its reason shows, but not clickable. */
@@ -343,14 +388,33 @@ export function Sidebar({ route }: { route: string[] }) {
   const unboundProjects = useUnboundProjects(runs);
   // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
   const extensionPages = [...useExtensions().pages.values()];
-  const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
+  const sessionOrder = useSessionOrder();
+  const [ctxMenu, setCtxMenu] = useState<{ agent: Agent; x: number; y: number } | null>(null);
+  const groups = sidebarGroups(everyone, runs, list, pinned, [...order], sessionOrder);
   const shown = searchGroups(groups, query);
   // A work group belongs to the project its `repo` names; one no project claims goes last.
   const projectKeys = new Set(groups.map((g) => g.key));
   const otherWorks = workList.filter((w) => !projectKeys.has(workProject(w)));
   const archived = everyone.filter((a) => a.archived_at);
   const isSession = (a: Agent) => route[0] === "s" && isAgent(a, route[1]);
-  const row = (member: SidebarMember) => <SessionRow key={member.agent.id} member={member} active={isSession(member.agent)} />;
+  const reorderInGroup = (groupKey: string, currentIds: string[], fromId: string, toId: string, after: boolean) => {
+    saveSessionOrder(groupKey, reorderIds(currentIds, fromId, toId, after));
+  };
+  const openRowMenu = (agent: Agent) => (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ agent, x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 220) });
+  };
+  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[]) => (
+    <SessionRow
+      key={member.agent.id}
+      member={member}
+      active={isSession(member.agent)}
+      dragKey={groupKey ? { group: groupKey, id: member.agent.id } : undefined}
+      onReorder={groupKey && groupIds ? (fromId, toId, after) => reorderInGroup(groupKey, groupIds, fromId, toId, after) : undefined}
+      onMenu={openRowMenu(member.agent)}
+    />
+  );
   const pinnedMembers = [
     ...new Map(
       groups
@@ -461,7 +525,7 @@ export function Sidebar({ route }: { route: string[] }) {
                 <div className="group-head static">
                   <span className="group-name">{t("sidebar.pinned")}</span>
                 </div>
-                {pinnedMembers.map(row)}
+                {pinnedMembers.map((m) => row(m))}
                 {pinnedRuns.map((d) => (
                   <Row
                     key={d.run.id}
@@ -505,7 +569,7 @@ export function Sidebar({ route }: { route: string[] }) {
                   keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
                   searching={searching}
                 >
-                  {row}
+                  {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
                 </Capped>
                 {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
               </Group>
@@ -518,6 +582,72 @@ export function Sidebar({ route }: { route: string[] }) {
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
+          {ctxMenu && (
+            <>
+              <div className="menu-scrim" onClick={() => setCtxMenu(null)} />
+              <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} role="menu">
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    togglePinned(sessionKey(ctxMenu.agent));
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{pinned.has(sessionKey(ctxMenu.agent)) ? "取消置顶" : "置顶会话"}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    openBeside(ctxMenu.agent.id);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{t("sidebar.openBeside")}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    archiving.archive(ctxMenu.agent);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{t("sidebar.archive")}</span>
+                  </span>
+                </button>
+                {list.filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd)).length > 0 && (
+                  <>
+                    <div className="menu-head">移入项目</div>
+                    {list
+                      .filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd))
+                      .map((w) => (
+                        <button
+                          key={w.key}
+                          type="button"
+                          className="menu-item"
+                          onClick={() => {
+                            void api.setAgentCwd(ctxMenu.agent.id, w.path);
+                            setCtxMenu(null);
+                          }}
+                        >
+                          <span className="menu-text">
+                            <span className="menu-label">{w.name}</span>
+                            <span className="menu-sub">{w.path}</span>
+                          </span>
+                        </button>
+                      ))}
+                  </>
+                )}
+              </div>
+            </>
+          )}
           {archiving.note && (
             <div className={"archive-note " + (archiving.note.error ? "failed" : "")} role="status">
               <span className="archive-note-text">{archiving.note.error ?? t("sidebar.archivedOne", { name: displayName(archiving.note.agent) })}</span>
@@ -725,7 +855,19 @@ function Capped<T>({
 }
 
 type Dot = "live" | "warn" | "danger" | "unread" | undefined;
-function SessionRow({ member, active }: { member: SidebarMember; active: boolean }) {
+function SessionRow({
+  member,
+  active,
+  dragKey,
+  onReorder,
+  onMenu,
+}: {
+  member: SidebarMember;
+  active: boolean;
+  dragKey?: { group: string; id: string };
+  onReorder?: (fromId: string, toId: string, after: boolean) => void;
+  onMenu?: (e: ReactMouseEvent) => void;
+}) {
   const { agent } = member;
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
@@ -818,6 +960,9 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       pinKey={sessionKey(agent)}
       beside={agent.id}
       archive={agent}
+      dragKey={dragKey}
+      onReorder={onReorder}
+      onMenu={onMenu}
       lead={
         <span className={"face " + (running ? "running" : "")}>
           <Avatar agent={agent} size={compact ? 18 : 24} />
@@ -910,6 +1055,8 @@ function Row({
   pinKey,
   beside,
   archive,
+  dragKey,
+  onReorder,
   onMenu,
 }: {
   href: string;
@@ -933,6 +1080,9 @@ function Row({
   beside?: string;
   /** The conversation this row archives from its hover actions. */
   archive?: Agent;
+  /** Drag-and-drop identity within a sidebar group. */
+  dragKey?: { group: string; id: string };
+  onReorder?: (fromId: string, toId: string, after: boolean) => void;
   /** The right-click menu of this row. */
   onMenu?: (e: ReactMouseEvent) => void;
 }) {
@@ -983,8 +1133,48 @@ function Row({
     onFocus: (e: ReactFocusEvent<HTMLDivElement>) => e.target.matches(":focus-visible") && showPeek(e.currentTarget, 0),
     onBlur: hidePeek,
   };
+  const [dragging, setDragging] = useState(false);
+  const [dropPos, setDropPos] = useState<"before" | "after" | null>(null);
+  const dnd = dragKey
+    ? {
+        draggable: true,
+        onDragStart: (e: ReactDragEvent<HTMLDivElement>) => {
+          hidePeek();
+          draggingSession = dragKey;
+          setDragging(true);
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", dragKey.id);
+        },
+        onDragEnd: () => {
+          draggingSession = null;
+          setDragging(false);
+          setDropPos(null);
+        },
+        onDragOver: (e: ReactDragEvent<HTMLDivElement>) => {
+          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          const rect = e.currentTarget.getBoundingClientRect();
+          setDropPos(e.clientY > rect.top + rect.height / 2 ? "after" : "before");
+        },
+        onDragLeave: () => setDropPos(null),
+        onDrop: (e: ReactDragEvent<HTMLDivElement>) => {
+          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          const after = e.clientY > rect.top + rect.height / 2;
+          onReorder?.(draggingSession.id, dragKey.id, after);
+          draggingSession = null;
+          setDropPos(null);
+        },
+      }
+    : undefined;
   return (
-    <div className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""}`} {...hover}>
+    <div
+      className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""} ${dragging ? "dragging" : ""} ${dropPos ? `drag-over-${dropPos}` : ""}`}
+      {...hover}
+      {...dnd}
+    >
       {peek && anchor && <SessionPeek anchor={anchor} facts={peek} />}
       <a
         className="row-link"

@@ -9,8 +9,15 @@ import { getBridge } from "../api";
 
 export type Mode = "system" | "light" | "dark";
 export type Paper = "plain" | "paper" | "mist" | "ink";
-export type ThemeChoice = { mode: Mode; paper: Paper };
+export type FontStyle = "sans" | "soft" | "serif";
+export type ThemeChoice = { mode: Mode; paper: Paper; font: FontStyle };
 export type Applied = "light" | "light-paper" | "light-mist" | "dark";
+
+export const FONTS: { key: FontStyle; label: string }[] = [
+  { key: "sans", label: "默认无衬线" },
+  { key: "soft", label: "柔和 · 苹方/MiSans" },
+  { key: "serif", label: "衬线 · Claude" },
+];
 
 export const MODES: { key: Mode; label: string }[] = [
   { key: "system", label: "跟随系统" },
@@ -26,7 +33,7 @@ export const PAPERS: { key: Paper; label: string; hint: string; swatch: string; 
 ];
 
 const KEY = "crossagents.theme";
-const DEFAULT: ThemeChoice = { mode: "system", paper: "plain" };
+const DEFAULT: ThemeChoice = { mode: "system", paper: "plain", font: "sans" };
 const listeners = new Set<() => void>();
 let choice: ThemeChoice = load();
 let started = false;
@@ -36,7 +43,8 @@ function load(): ThemeChoice {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
     const mode = MODES.some((m) => m.key === saved?.mode) ? saved.mode : DEFAULT.mode;
     const paper = PAPERS.some((p) => p.key === saved?.paper) ? saved.paper : DEFAULT.paper;
-    return { mode, paper };
+    const font = FONTS.some((f) => f.key === saved?.font) ? saved.font : DEFAULT.font;
+    return { mode, paper, font };
   } catch {
     return DEFAULT;
   }
@@ -56,6 +64,8 @@ function apply() {
   document.documentElement.dataset.theme = applied;
   if (choice.paper === "ink") document.documentElement.dataset.accent = "ink";
   else delete document.documentElement.dataset.accent;
+  if (choice.font && choice.font !== "sans") document.documentElement.dataset.font = choice.font;
+  else delete document.documentElement.dataset.font;
   // The window frame follows (Electron); read the colours the stylesheet now gives.
   const css = getComputedStyle(document.documentElement);
   getBridge()?.setTheme?.({

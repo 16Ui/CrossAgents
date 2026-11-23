@@ -205,6 +205,10 @@ pub struct CreateAgentRequest {
     /// Display name, title, avatar and persona; all optional.
     #[serde(default)]
     pub profile: crossagents_core::AgentProfile,
+    /// When true and `cwd` is a git repository, create an isolated git worktree for this session.
+    #[serde(default)]
+    #[ts(optional)]
+    pub worktree: Option<bool>,
 }
 
 /// How many pictures the avatar gallery holds, and how many one upload may add.
@@ -2603,6 +2607,72 @@ pub struct ImportAccountRequest {
     #[serde(default)]
     pub label: Option<String>,
     pub confirm: bool,
+}
+
+/// An external CLI session found on this machine that can be imported into CrossAgents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportableSession {
+    pub plugin: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub title: String,
+    pub updated_at: DateTime<Utc>,
+    pub turns: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub existing_agent_id: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub existing_agent_name: Option<String>,
+}
+
+/// `GET /v1/sessions/import`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportSessionsResponse {
+    pub candidates: Vec<ImportableSession>,
+}
+
+/// `POST /v1/agents/{key}/cwd`: moves a session to another working directory (rehoming a
+/// standalone chat into a project, or moving between projects).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetCwdRequest {
+    pub cwd: String,
+}
+
+/// `POST /v1/sessions/import`: imports an external CLI session as a CrossAgents agent so the
+/// conversation can continue here via the driver's `resume` capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportSessionRequest {
+    pub plugin: String,
+    pub session_id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub account: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub permission: Option<String>,
 }
 
 /// One account with its live status and models. `GET /v1/quota` lists every account.

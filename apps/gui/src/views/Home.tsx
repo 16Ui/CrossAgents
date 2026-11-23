@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
+import type { ImportableSession } from "@bindings/ImportableSession";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
 import { api, ApiError, errorText } from "../api";
@@ -11,6 +12,7 @@ import { useHubData, usePlugins } from "../hub";
 import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
 import { modelDisplay } from "../lib/modelDisplay";
+import { favoriteKey, toggleFavorite, useModelFavorites } from "../lib/modelFavorites";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { ReasoningPicks } from "../reasoningPicks";
 import { reasoningWorkerRequest, type ReasoningChoice } from "../lib/workerModels";
@@ -60,6 +62,22 @@ function save(key: string, value: unknown) {
   } catch {
     // Not remembered; fine.
   }
+}
+
+function shortAgo(iso: string): string {
+  const diff = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 1000));
+  if (Number.isNaN(diff) || diff < 60) return "刚刚";
+  const mins = Math.floor(diff / 60);
+  if (mins < 60) return `${mins} 分钟前`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  return `${days} 天前`;
+}
+
+function shortImportTitle(title: string, fallbackId: string): string {
+  const s = (title || fallbackId.slice(0, 8)).trim();
+  return s.length > 22 ? `${s.slice(0, 22)}…` : s;
 }
 
 /**
@@ -187,6 +205,7 @@ export function HomeView() {
   };
   const choose = (lead: Lead) => {
     setSessionId(undefined);
+    setImportPick(undefined);
     setPicked(lead);
     save(LEAD_KEY, lead);
   };
@@ -207,16 +226,44 @@ export function HomeView() {
     [sessionRepo, chatsOnly],
     (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
   );
+  const [importAllDirs, setImportAllDirs] = useState(false);
+  const [importShowAll, setImportShowAll] = useState(false);
+  const [chatWorktree, setChatWorktree] = useState(false);
+  const [modelOpenSignal, setModelOpenSignal] = useState(0);
+  const favorites = useModelFavorites();
+  const importable = useHubData(
+    () => api.importableSessions(importAllDirs ? undefined : sessionRepo).then((r) => r.candidates.filter((c) => !c.existing_agent_id)),
+    [sessionRepo, importAllDirs],
+    (e) => e.type === "agent.created" || e.type === "agent.removed",
+  );
+  useEffect(() => {
+    const onShortcut = (e: globalThis.KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setModelOpenSignal((n) => n + 1);
+      }
+    };
+    window.addEventListener("keydown", onShortcut);
+    return () => window.removeEventListener("keydown", onShortcut);
+  }, []);
   // The session picked to carry this start; absent: a new one, as before.
   const [sessionId, setSessionId] = useState<string>();
-  useEffect(() => setSessionId(undefined), [sessionRepo, chatsOnly]);
+  const [importPick, setImportPick] = useState<ImportableSession>();
+  useEffect(() => {
+    setSessionId(undefined);
+    setImportPick(undefined);
+  }, [sessionRepo, chatsOnly]);
   useEffect(() => {
     if (sessionId && sessions.data && !sessions.data.some((s) => s.agent.id === sessionId)) setSessionId(undefined);
   }, [sessions.data, sessionId]);
+  useEffect(() => {
+    if (importPick && importable.data && !importable.data.some((c) => c.session_id === importPick.session_id)) setImportPick(undefined);
+  }, [importable.data, importPick]);
   const chosenSession = sessionId ? sessions.data?.find((s) => s.agent.id === sessionId) : undefined;
+  const chosenImport = importPick ? importable.data?.find((c) => c.session_id === importPick.session_id) : undefined;
   // The permission pick follows whoever carries this start: another session or worker means
   // its own setting, until the person picks one here.
-  useEffect(() => setChatPerm(undefined), [chosenSession?.agent.id]);
+  useEffect(() => setChatPerm(undefined), [chosenSession?.agent.id, chosenImport?.session_id]);
   const sessionUse = chosenSession ? usabilityOf(chosenSession) : undefined;
   // A picked session decides who leads; otherwise the remembered pick when it still exists
   // here, else the first planner, else the first model.
@@ -234,7 +281,7 @@ export function HomeView() {
   const leadAgent = chosenSession?.agent ?? (lead?.kind === "agent" ? planners.find((a) => a.name === lead.name) : undefined);
   const leadPlugin = leadAgent?.plugin ?? (lead?.kind === "model" ? lead.plugin : undefined);
   const leadModel = leadAgent?.model ?? (lead?.kind === "model" ? lead.model : undefined);
-  const where = leadAgent?.cwd ?? cwd;
+  const where = leadAgent?.cwd ?? cwd ?? (chosenImport?.cwd || undefined);
 
   // A session that leads must not also be the default worker. Any other may work or review:
   // a role says how a session was made, not what it may do (docs/AGENT-WORKSPACE.md §2.1).
@@ -251,15 +298,15 @@ export function HomeView() {
         : undefined;
   const ready =
     !busy &&
-    !!request.trim() &&
-    (mode === "chat" ? !!chosenSession || !!chatModel : !!lead && !!where) &&
+    (mode === "chat" && chosenImport ? true : !!request.trim()) &&
+    (mode === "chat" ? !!chosenSession || !!chosenImport || !!chatModel : (!!lead || !!chosenImport) && !!where) &&
     (!sessionUse || sessionUse.selectable);
   // Effort levels of the vendor and model picked: the chat's model, or the run's lead. A
   // model the CLI reports levels for takes exactly those; one it does not name takes the
   // plugin's list. A picked session keeps its own, so there is nothing to choose.
   const effortPlugin = plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin));
   const effortModel = mode === "chat" ? chatModel?.model : leadModel;
-  const levels = chosenSession
+  const levels = chosenSession || chosenImport
     ? []
     : effortLevels(effortPlugin?.efforts_by_model?.[effortModel ?? ""] ?? effortPlugin?.efforts);
   const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
@@ -361,6 +408,29 @@ export function HomeView() {
     setError(undefined);
     try {
       const typed = request.trim();
+      // `/model <query>` switches the chat model right from the composer without sending a turn.
+      const slashModel = /^\/model(?:\s+(.*))?$/i.exec(typed);
+      if (slashModel) {
+        const q = (slashModel[1] ?? "").trim().toLowerCase();
+        if (!q) {
+          setRequest("");
+          setModelOpenSignal((n) => n + 1);
+          return;
+        }
+        const hit = offered
+          .flatMap((p) => p.models.map((m) => ({ plugin: p.name, model: m })))
+          .find((x) => `${x.plugin} ${x.model}`.toLowerCase().includes(q));
+        if (hit) {
+          const account = chatModel?.plugin === hit.plugin ? chatModel.account : undefined;
+          const next: Choice = { ...hit, ...(account ? { account } : {}) };
+          setChatPick(next);
+          save(CHAT_MODEL_KEY, next);
+          setRequest("");
+          return;
+        }
+        setError(`找不到匹配「${q}」的模型`);
+        return;
+      }
       // An existing session keeps its own model and login: just carry the conversation on.
       // Its permission is the person's to change here too; set it before the message lands.
       if (chosenSession) {
@@ -370,12 +440,32 @@ export function HomeView() {
         navigate("s", chosenSession.agent.id);
         return;
       }
+      if (chosenImport) {
+        const agent = await api.importSession({
+          plugin: chosenImport.plugin,
+          session_id: chosenImport.session_id,
+          cwd: cwd ?? (chosenImport.cwd || undefined),
+          account: chosenImport.account,
+          permission: chatPermission ?? undefined,
+        });
+        if (typed || uploads().length > 0) {
+          void sendMessage(agent.id, typed, { attachments: uploads() }).catch(() => {});
+        }
+        setImportPick(undefined);
+        sent();
+        navigate("s", agent.id);
+        return;
+      }
       if (!chatModel) return;
       const lead = leadingModel(typed);
       const choice = lead?.choice ?? chatModel;
       const text = lead?.rest || typed;
       const body = newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort);
-      const agent = await api.createAgent({ ...body, config: configWithPermission(body.config, chatPermission) });
+      const agent = await api.createAgent({
+        ...body,
+        config: configWithPermission(body.config, chatPermission),
+        ...(chatWorktree && cwd ? { worktree: true } : {}),
+      });
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
       sent();
@@ -389,13 +479,26 @@ export function HomeView() {
 
   async function submit() {
     if (mode === "chat") return startChat();
-    if (!ready || !lead || !where) return;
+    if (!ready || (!lead && !chosenImport) || !where) return;
     setBusy(true);
     setError(undefined);
     try {
-      const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
+      const importedLead = chosenImport
+        ? await api.importSession({
+            plugin: chosenImport.plugin,
+            session_id: chosenImport.session_id,
+            cwd: where,
+            account: chosenImport.account,
+          })
+        : undefined;
+      if (importedLead) setImportPick(undefined);
+      const leadChoice: Choice = importedLead
+        ? { plugin: importedLead.plugin, model: importedLead.model ?? "", account: accountOf(importedLead) }
+        : lead!.kind === "model"
+          ? lead!
+          : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
       // A picked session leads as it is, with its conversation; otherwise the lead's effort applies.
-      const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort, false);
+      const planner = importedLead ?? (chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort, false));
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
@@ -535,8 +638,9 @@ export function HomeView() {
    * Models by vendor; a vendor with several logins gets a group per login, so picking a model
    * also picks who pays for it.
    */
-  const modelMenu = (isOn: (c: Choice) => boolean, onPick: (c: Choice) => void): MenuItem[] =>
-    offered.flatMap((p: PluginInfo): MenuItem[] => {
+  const modelMenu = (isOn: (c: Choice) => boolean, onPick: (c: Choice) => void): MenuItem[] => {
+    const favItems: MenuItem[] = [];
+    const grouped = offered.flatMap((p: PluginInfo): MenuItem[] => {
       const logins = accountsOf(p.name);
       const groups = logins.length > 1 ? logins.map((a) => ({ account: a.account.id, title: `${vendorLabel(p.name)} · ${a.account.label || a.account.id}` })) : [{ account: undefined, title: vendorLabel(p.name) }];
       return groups.flatMap(({ account, title }): MenuItem[] => [
@@ -544,10 +648,27 @@ export function HomeView() {
         ...reasoningModels(p.name, modelsFor(p, account), modelsFor(p, account).find((m) => isOn({ plugin: p.name, model: m, ...(account ? { account } : {}) }))).map((m): MenuItem => {
           const choice: Choice = { plugin: p.name, model: m, ...(account ? { account } : {}) };
           const display = modelDisplay(p.name, m, quota.data?.accounts ?? [], account);
-          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: p.name === "cursor" ? prettyModel(cursorMode(m).base) : display.label, sub: m, searchText: display.description ?? undefined, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
+          const fkey = favoriteKey(p.name, m, account);
+          const starred = favorites.has(fkey);
+          const item: MenuItem = {
+            kind: "item",
+            key: `${p.name}/${account ?? ""}/${m}`,
+            label: p.name === "cursor" ? prettyModel(cursorMode(m).base) : display.label,
+            sub: m,
+            searchText: [vendorLabel(p.name), display.description].filter(Boolean).join(" "),
+            icon: <VendorMark plugin={p.name} size={14} />,
+            on: isOn(choice),
+            starred,
+            onToggleStar: () => toggleFavorite(fkey),
+            onPick: () => onPick(choice),
+          };
+          if (starred) favItems.push({ ...item, key: `fav/${item.key}` });
+          return item;
         }),
       ]);
     });
+    return favItems.length > 0 ? [{ kind: "header", key: "h-fav", label: "常用模型" }, ...favItems, ...grouped] : grouped;
+  };
   const same = (a: Choice | undefined, b: Choice) => !!a && a.plugin === b.plugin && a.model === b.model && (a.account ?? "") === (b.account ?? "");
 
   const leadItems: MenuItem[] = [
@@ -578,8 +699,21 @@ export function HomeView() {
   );
   // A new session first, then the workspace's own; unusable ones stay listed, disabled, with
   // the reason (the hub's words for what holds a busy one).
+  const importList = importable.data ?? [];
+  const IMPORT_CAP = 5;
+  const shownImports = importShowAll ? importList : importList.slice(0, IMPORT_CAP);
   const sessionItems: MenuItem[] = [
-    { kind: "item", key: "fresh", label: t("home.newSession"), sub: t("home.newSessionHint"), on: !chosenSession, onPick: () => setSessionId(undefined) },
+    {
+      kind: "item",
+      key: "fresh",
+      label: t("home.newSession"),
+      sub: t("home.newSessionHint"),
+      on: !chosenSession && !chosenImport,
+      onPick: () => {
+        setSessionId(undefined);
+        setImportPick(undefined);
+      },
+    },
     ...((sessions.data?.length ?? 0) > 0 ? [{ kind: "header", key: "h-sessions", label: t("session.existing") } satisfies MenuItem] : []),
     ...(sessions.data ?? []).map((s): MenuItem => {
       const use = usabilityOf(s);
@@ -594,19 +728,88 @@ export function HomeView() {
         key: `s/${s.agent.id}`,
         label: displayName(s.agent),
         sub: parts.join(" · "),
+        searchText: [s.agent.topic, s.agent.cwd, s.agent.model, s.agent.plugin].filter(Boolean).join(" "),
         subDir: "ltr",
         icon: <Avatar agent={s.agent} size={18} />,
         on: chosenSession?.agent.id === s.agent.id,
         disabled: !use.selectable,
-        onPick: () => setSessionId(s.agent.id),
+        onPick: () => {
+          setSessionId(s.agent.id);
+          setImportPick(undefined);
+        },
       };
     }),
+    ...(importList.length > 0 || sessionRepo
+      ? [{ kind: "header", key: "h-import", label: importAllDirs ? `${t("session.localCodex")}（全部目录）` : t("session.localCodex") } satisfies MenuItem]
+      : []),
+    ...shownImports.map((c): MenuItem => ({
+      kind: "item",
+      key: `imp/${c.session_id}`,
+      label: c.title || c.session_id.slice(0, 8),
+      sub: [
+        c.model ? shortModelLabel(c.model) : "Codex",
+        t("session.importTurns", { n: c.turns }),
+        shortAgo(c.updated_at),
+        (!sessionRepo || importAllDirs) && c.cwd ? wsName(c.cwd) : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      searchText: [c.title, c.cwd, c.model, c.session_id, "codex"].filter(Boolean).join(" "),
+      subDir: "ltr",
+      icon: <VendorMark plugin={c.plugin} size={16} />,
+      on: chosenImport?.session_id === c.session_id,
+      onPick: () => {
+        setImportPick(c);
+        setSessionId(undefined);
+      },
+    })),
+    ...(importList.length > IMPORT_CAP
+      ? [
+          {
+            kind: "item",
+            key: "imp-more",
+            label: importShowAll ? "收起本地会话" : `显示全部 ${importList.length} 条本地 Codex 会话`,
+            keepOpen: true,
+            onPick: () => setImportShowAll((v) => !v),
+          } satisfies MenuItem,
+        ]
+      : []),
+    ...(sessionRepo
+      ? [
+          {
+            kind: "item",
+            key: "imp-scope",
+            label: importAllDirs ? "仅看当前项目的 Codex 会话" : "查看所有目录的 Codex 会话",
+            keepOpen: true,
+            onPick: () => {
+              setImportAllDirs((v) => !v);
+              setImportShowAll(false);
+            },
+          } satisfies MenuItem,
+        ]
+      : []),
   ];
-  const effortItems: MenuItem[] = [
-    { kind: "header", key: "h", label: t("home.effort") },
-    { kind: "item", key: "", label: t("home.effortDefault"), on: !effortOn, onPick: () => setEffort("") },
-    ...levels.map((l): MenuItem => ({ kind: "item", key: l.value, label: l.label, sub: l.value, on: effortOn === l.value, onPick: () => setEffort(l.value) })),
-  ];
+  const effortFooter =
+    levels.length > 0 ? (
+      <>
+        <span className="menu-footer-label">{t("home.effort")}</span>
+        <div className="effort-pills">
+          <button type="button" className={`effort-pill ${!effortOn ? "on" : ""}`} onClick={() => setEffort("")}>
+            {t("home.effortDefault")}
+          </button>
+          {levels.map((l) => (
+            <button
+              key={l.value}
+              type="button"
+              className={`effort-pill ${effortOn === l.value ? "on" : ""}`}
+              onClick={() => setEffort(l.value)}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+      </>
+    ) : undefined;
   /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
   const choiceLabel = (c: Choice) => {
     const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
@@ -633,7 +836,7 @@ export function HomeView() {
       ? undefined
       : sessionUse && !sessionUse.selectable && sessionUse.reason
         ? t(sessionUse.reason.key, sessionUse.reason.vars)
-        : !chosenSession && !offered.length
+        : !chosenSession && !chosenImport && !offered.length
           ? t("home.noModels")
           : mode === "run" && !where
             ? t("home.needWorkspace")
@@ -713,39 +916,60 @@ export function HomeView() {
                 items={wsItems}
                 up
               />
-              {(sessionRepo || chatsOnly || chosenSession) && (
+              {(sessionRepo || chatsOnly || chosenSession || chosenImport || (importable.data?.length ?? 0) > 0) && (
                 <ChipMenu
-                  icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
-                  label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}
+                  icon={
+                    chosenImport ? (
+                      <VendorMark plugin={chosenImport.plugin} size={16} />
+                    ) : chosenSession ? (
+                      <Avatar agent={chosenSession.agent} size={16} />
+                    ) : (
+                      <Icon name="chat" size={14} />
+                    )
+                  }
+                  label={
+                    chosenImport
+                      ? `${shortImportTitle(chosenImport.title, chosenImport.session_id)} · ${t("session.importTag")}`
+                      : chosenSession
+                        ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}`
+                        : t("home.newSession")
+                  }
                   title={t("home.session")}
                   items={sessionItems}
+                  searchable
+                  searchPlaceholder="搜索会话、标题、目录、模型…"
+                  emptyText="没有匹配的会话"
                   up
                 />
               )}
-              {mode === "chat" && !chosenSession && chatModel && (
+              {mode === "chat" && !chosenSession && !chosenImport && chatModel && (
                 <ChipMenu
                   className="chip-model"
                   icon={<VendorMark plugin={chatModel.plugin} size={14} />}
-                  label={chipLabel(chatModel)}
-                  title={`${t("home.model")} · ${choiceLabel(chatModel)}`}
+                  label={effortOn ? `${chipLabel(chatModel)} · ${effortLabel(effortOn)}` : chipLabel(chatModel)}
+                  title={`${t("home.model")} · ${choiceLabel(chatModel)}${effortOn ? ` · ${effortLabel(effortOn)}` : ""}（Ctrl+Shift+M）`}
                   items={chatItems}
                   searchable
+                  footer={effortFooter}
+                  openSignal={modelOpenSignal}
                   up
                 />
               )}
-              {mode === "run" && !chosenSession && lead && (
+              {mode === "run" && !chosenSession && !chosenImport && lead && (
                 <ChipMenu
                   className="chip-model"
                   icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
-                  label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? chipLabel(lead) : ""}
-                  title={leadAgent ? t("home.lead") : lead.kind === "model" ? `${t("home.lead")} · ${choiceLabel(lead)}` : t("home.lead")}
+                  label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? (effortOn ? `${chipLabel(lead)} · ${effortLabel(effortOn)}` : chipLabel(lead)) : ""}
+                  title={leadAgent ? t("home.lead") : lead.kind === "model" ? `${t("home.lead")} · ${choiceLabel(lead)}（Ctrl+Shift+M）` : t("home.lead")}
                   items={leadItems}
                   searchable
+                  footer={effortFooter}
+                  openSignal={modelOpenSignal}
                   up
                 />
               )}
               {/* After the model it applies to: the chat's, or the run lead's. */}
-              {!chosenSession && activeChoice && activePlugin?.name === "cursor" && (
+              {!chosenSession && !chosenImport && activeChoice && activePlugin?.name === "cursor" && (
                 <ReasoningPicks
                   plugin={activePlugin}
                   model={activeChoice.model}
@@ -757,15 +981,6 @@ export function HomeView() {
                       save(CHAT_MODEL_KEY, next);
                     } else choose({ kind: "model", ...next });
                   }}
-                />
-              )}
-              {levels.length > 0 && (
-                <ChipMenu
-                  icon={<Icon name="brain" size={13} />}
-                  label={effortOn ? `${t("home.effortShort")} ${effortLabel(effortOn)}` : t("home.effortShort")}
-                  title={effortOn ? `${t("home.effort")} · ${effortLabel(effortOn)}` : t("home.effort")}
-                  items={effortItems}
-                  up
                 />
               )}
             </div>
@@ -802,6 +1017,8 @@ export function HomeView() {
         <div className="home-note">
           {missing ? (
             <span>{missing}</span>
+          ) : chosenImport && mode === "chat" && !request.trim() ? (
+            <span>{t("session.importHint")}</span>
           ) : (
             mode === "run" && (
               <span>
@@ -827,9 +1044,18 @@ export function HomeView() {
                 label={t("home.permission")}
                 value={chatPermission}
                 onChange={setChatPerm}
-                plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
+                plugin={chosenImport?.plugin ?? chosenSession?.agent.plugin ?? chatModel?.plugin}
               />
             </Field>
+            {cwd && !chosenSession && !chosenImport && (
+              <div className="field">
+                <span>分支隔离</span>
+                <label className="field-check">
+                  <input type="checkbox" checked={chatWorktree} onChange={(e) => setChatWorktree(e.target.checked)} />
+                  在独立 Git worktree 中开启（不改动当前分支）
+                </label>
+              </div>
+            )}
           </div>
         ) : (
           <div className="card form home-options">

@@ -25,6 +25,11 @@ export type MenuItem =
       icon?: ReactNode;
       on?: boolean;
       disabled?: boolean;
+      /** Favorite star toggle shown on the right; clicking it does not close the menu. */
+      starred?: boolean;
+      onToggleStar?: () => void;
+      /** Keep the menu open after picking (e.g. "show more" or a filter toggle). */
+      keepOpen?: boolean;
       onPick: () => void;
     }
   | { kind: "header"; key: string; label: ReactNode };
@@ -71,6 +76,10 @@ export function ChipMenu({
   className,
   menuClassName,
   searchable,
+  searchPlaceholder = "搜索模型、平台、账号…",
+  emptyText = "没有匹配项",
+  footer,
+  openSignal,
 }: {
   icon?: ReactNode;
   label: ReactNode;
@@ -83,6 +92,12 @@ export function ChipMenu({
   /** Extra class on the menu itself: it lives in <body>, so styles cannot reach it through the chip's parents. */
   menuClassName?: string;
   searchable?: boolean;
+  searchPlaceholder?: string;
+  emptyText?: string;
+  /** Sticky footer docked at the bottom of the popup (e.g. reasoning effort pills). */
+  footer?: ReactNode;
+  /** Incrementing this number opens the menu programmatically (e.g. Ctrl+Shift+M). */
+  openSignal?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [cursor, setCursor] = useState(-1);
@@ -160,13 +175,20 @@ export function ChipMenu({
     menu.current?.querySelector<HTMLElement>(".menu-item.cursor")?.scrollIntoView({ block: "nearest" });
   }, [open, activeCursor, query]);
 
-  const show = () => {
+  const show = useCallback(() => {
     setQuery("");
     const all = items.filter((i) => i.kind === "item");
     const on = all.findIndex((i) => i.on && !i.disabled);
     setCursor(on >= 0 ? on : all.findIndex((i) => !i.disabled));
     setOpen(true);
-  };
+  }, [items]);
+  const lastSignal = useRef(openSignal ?? 0);
+  useEffect(() => {
+    if (openSignal && openSignal !== lastSignal.current) {
+      lastSignal.current = openSignal;
+      show();
+    }
+  }, [openSignal, show]);
   const step = (from: number, delta: number) => {
     for (let n = 1; n <= picks.length; n++) {
       const i = (from + delta * n + picks.length * 2) % picks.length;
@@ -178,8 +200,10 @@ export function ChipMenu({
     const item = picks[i];
     if (!item || item.disabled) return;
     item.onPick();
-    setOpen(false);
-    trigger.current?.focus();
+    if (!item.keepOpen) {
+      setOpen(false);
+      trigger.current?.focus();
+    }
   };
 
   const style: CSSProperties = place
@@ -217,21 +241,19 @@ export function ChipMenu({
       </button>
       {open && createPortal(
         <div ref={menu} className={`menu pop ${place?.up ? "up" : ""} ${menuClassName ?? ""}`} style={style}>
-          {searchable && <input className="menu-search" role="combobox" aria-expanded={open} aria-controls={listId} aria-activedescendant={activeCursor >= 0 ? `${listId}-${activeCursor}` : undefined} aria-label="搜索模型" placeholder="搜索模型、平台、账号…" value={query} autoFocus onChange={(e) => { setQuery(e.target.value); setCursor(-1); }} />}
+          {searchable && <input className="menu-search" role="combobox" aria-expanded={open} aria-controls={listId} aria-activedescendant={activeCursor >= 0 ? `${listId}-${activeCursor}` : undefined} aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={query} autoFocus onChange={(e) => { setQuery(e.target.value); setCursor(-1); }} />}
           <div id={listId} className="menu-options" role="listbox" aria-label={title}>
-          {picks.length === 0 && <div className="menu-head" role="status">没有匹配的模型</div>}
+          {picks.length === 0 && <div className="menu-head" role="status">{emptyText}</div>}
           {visible.map((item) => {
             if (item.kind === "header") return <div key={item.key} className="menu-head">{item.label}</div>;
             const i = picks.indexOf(item);
             return (
-              <button
-                type="button"
+              <div
                 key={item.key}
                 id={`${listId}-${i}`}
                 role="option"
                 aria-selected={!!item.on}
                 aria-disabled={item.disabled || undefined}
-                disabled={item.disabled}
                 className={`menu-item ${i === activeCursor ? "cursor" : ""} ${item.disabled ? "disabled" : ""}`}
                 onMouseEnter={() => !item.disabled && setCursor(i)}
                 onClick={() => pick(i)}
@@ -241,11 +263,26 @@ export function ChipMenu({
                   <span className="menu-label">{item.label}</span>
                   {item.sub && <span className={`menu-sub ${item.subDir === "ltr" ? "ltr" : ""}`}>{item.sub}</span>}
                 </span>
+                {item.onToggleStar && (
+                  <button
+                    type="button"
+                    className={`menu-star ${item.starred ? "on" : ""}`}
+                    title={item.starred ? "取消常用置顶" : "标为常用（置顶）"}
+                    aria-label={item.starred ? "取消常用置顶" : "标为常用（置顶）"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      item.onToggleStar?.();
+                    }}
+                  >
+                    {item.starred ? "★" : "☆"}
+                  </button>
+                )}
                 {item.on && <Icon name="check" size={14} />}
-              </button>
+              </div>
             );
           })}
           </div>
+          {footer && <div className="menu-footer">{footer}</div>}
         </div>
       , document.body)}
     </div>

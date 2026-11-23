@@ -1,16 +1,16 @@
-// Model and reasoning effort as chips in a conversation's composer: switch either between
-// turns, like Claude Code's /model and effort picker. The vendor stays (a session belongs to
-// one CLI); the change applies from the next turn.
+// Model and reasoning effort in a conversation's composer: switch either between turns,
+// with favorite models hoisted to the top and reasoning effort docked inside the model popup
+// (plus Ctrl+Shift+M / Cmd+Shift+M to open the picker from anywhere in the session).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "./api";
-import { Icon, VendorMark } from "./components";
+import { VendorMark } from "./components";
 import { usePlugins } from "./hub";
-import { accountOf, effortLabel, effortLevels, effortOf } from "./lib/models";
+import { favoriteKey, toggleFavorite, useModelFavorites } from "./lib/modelFavorites";
+import { accountOf, effortLabel, effortLevels, effortOf, prettyModel } from "./lib/models";
 import { modelDisplay } from "./lib/modelDisplay";
 import { cursorMode, reasoningModels } from "./lib/reasoning";
-import { prettyModel } from "./lib/models";
 import { ReasoningPicks } from "./reasoningPicks";
 import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
@@ -18,8 +18,11 @@ import { ChipMenu, type MenuItem } from "./menu";
 export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const plugins = usePlugins();
   const [error, setError] = useState<string>();
+  const [openSignal, setOpenSignal] = useState(0);
+  const favorites = useModelFavorites();
   const quota = useQuota();
-  const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], accountOf(agent));
+  const account = accountOf(agent);
+  const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], account);
   const info = plugins.data?.find((p) => p.name === agent.plugin);
   const models = info?.models ?? [];
   // A model the CLI reports levels for takes exactly those, which may be none at all; one it
@@ -28,57 +31,88 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const effort = effortOf(agent.config);
   const label = effort ? effortLabel(effort) : undefined;
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        setOpenSignal((n) => n + 1);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const apply = (model: string | null, next?: string) =>
     api.setModel(agent.id, model, next).then(
       () => setError(undefined),
       (err) => setError(errorText(err)),
     );
 
+  const list = reasoningModels(agent.plugin, (agent.model && !models.includes(agent.model) ? [agent.model] : []).concat(models), agent.model);
+  const toItem = (m: string, prefix = ""): MenuItem => {
+    const fkey = favoriteKey(agent.plugin, m, account);
+    return {
+      kind: "item",
+      key: `${prefix}${m}`,
+      label: agent.plugin === "cursor" ? prettyModel(cursorMode(m).base) : display(m).label,
+      sub: m,
+      searchText: display(m).description ?? undefined,
+      icon: <VendorMark plugin={agent.plugin} size={14} />,
+      on: agent.model === m,
+      starred: favorites.has(fkey),
+      onToggleStar: () => toggleFavorite(fkey),
+      onPick: () => void apply(m),
+    };
+  };
+  const favModels = list.filter((m) => favorites.has(favoriteKey(agent.plugin, m, account)));
   const modelItems: MenuItem[] = [
-    ...reasoningModels(agent.plugin, (agent.model && !models.includes(agent.model) ? [agent.model] : []).concat(models), agent.model).map(
-      (m): MenuItem => ({
-        kind: "item",
-        key: m,
-        label: agent.plugin === "cursor" ? prettyModel(cursorMode(m).base) : display(m).label,
-        sub: m,
-        searchText: display(m).description ?? undefined,
-        icon: <VendorMark plugin={agent.plugin} size={14} />,
-        on: agent.model === m,
-        onPick: () => void apply(m),
-      }),
-    ),
+    ...(favModels.length > 0 ? [{ kind: "header", key: "h-fav", label: "常用模型" } satisfies MenuItem, ...favModels.map((m) => toItem(m, "fav/"))] : []),
+    ...(favModels.length > 0 ? [{ kind: "header", key: "h-all", label: "全部模型" } satisfies MenuItem] : []),
+    ...list.map((m) => toItem(m)),
     { kind: "item", key: "", label: "插件默认", sub: "由 CLI 自己决定", on: !agent.model, onPick: () => void apply(null) },
   ];
 
-  const effortItems: MenuItem[] = [
-    { kind: "header", key: "h", label: "推理强度 · 下一轮起生效" },
-    { kind: "item", key: "", label: "默认", sub: "模型自己的默认", on: !effort, onPick: () => void apply(agent.model, "") },
-    ...levels.map(
-      (l): MenuItem => ({
-        kind: "item",
-        key: l.value,
-        label: l.label,
-        sub: l.value,
-        on: effort === l.value,
-        onPick: () => void apply(agent.model, l.value),
-      }),
-    ),
-  ];
+  const effortFooter =
+    levels.length > 0 ? (
+      <>
+        <span className="menu-footer-label">推理强度</span>
+        <div className="effort-pills">
+          <button type="button" className={`effort-pill ${!effort ? "on" : ""}`} onClick={() => void apply(agent.model, "")}>
+            默认
+          </button>
+          {levels.map((l) => (
+            <button
+              key={l.value}
+              type="button"
+              className={`effort-pill ${effort === l.value ? "on" : ""}`}
+              onClick={() => void apply(agent.model, l.value)}
+            >
+              {l.label}
+            </button>
+          ))}
+        </div>
+      </>
+    ) : undefined;
+
+  const modelLabel = agent.model
+    ? agent.plugin === "cursor"
+      ? prettyModel(cursorMode(agent.model).base)
+      : display(agent.model).label
+    : "插件默认";
 
   return (
     <>
       <ChipMenu
         icon={<VendorMark plugin={agent.plugin} size={13} />}
-        label={agent.model ? agent.plugin === "cursor" ? prettyModel(cursorMode(agent.model).base) : display(agent.model).label : "插件默认"}
-        title={`模型：${agent.model ?? "插件默认"} · 下一轮起生效`}
+        label={label ? `${modelLabel} · ${label}` : modelLabel}
+        title={`模型：${agent.model ?? "插件默认"}${label ? ` · 推理 ${label}` : ""} · 下一轮起生效（Ctrl+Shift+M）`}
         items={modelItems}
         searchable
+        footer={effortFooter}
+        openSignal={openSignal}
         up
       />
       {agent.plugin === "cursor" && <ReasoningPicks plugin={info} model={agent.model} onChange={(model) => void apply(model)} />}
-      {levels.length > 0 && (
-        <ChipMenu icon={<Icon name="brain" size={13} />} label={label ? `推理 ${label}` : "推理 默认"} title="推理强度" items={effortItems} up />
-      )}
       {error && (
         <span className="chip danger" title={error}>
           切换失败

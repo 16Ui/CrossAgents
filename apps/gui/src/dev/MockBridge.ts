@@ -25,6 +25,7 @@ import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
+import type { ImportableSession } from "@bindings/ImportableSession";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -135,6 +136,8 @@ export type MockState = {
   resume?: Record<string, ResumeCommandResponse>;
   /** A workspace's sessions as `GET /v1/session-candidates` answers; a scenario sets what it shows. */
   sessions?: SessionCandidate[];
+  /** Local external CLI sessions as `GET /v1/sessions/import` answers. */
+  importableSessions?: ImportableSession[];
   /** Whether this machine is Windows, which is how `approval.rs` decides Cursor may not run a
    * guarded session; unset: yes, as the GUI is built for Windows. */
   windows?: boolean;
@@ -1052,6 +1055,7 @@ export class MockBridge implements CrossAgentsBridge {
           ],
         });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if (p === "/v1/sessions/import") return json(200, { candidates: s.importableSessions ?? [] });
       if (p === "/v1/session-candidates") {
         // The policy the sessions would be assigned under: the run named by `?run=`, else the
         // workspace's one plan awaiting approval (session_candidates in crates/hub/src/api.rs).
@@ -1187,6 +1191,14 @@ export class MockBridge implements CrossAgentsBridge {
         }
         a.config = config as Agent["config"];
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cwd$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return json(404, { error: { code: "not_found", message: "agent not found" } });
+        const { cwd } = body as { cwd: string };
+        a.cwd = cwd;
+        this.emit({ type: "agent.updated", data: { agent: a } });
         return json(200, a);
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/topic$/))) {

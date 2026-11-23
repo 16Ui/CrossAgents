@@ -60,7 +60,7 @@ import { ContextUsageButton, useCompact } from "../contextusage";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { Composer, QueuePanel } from "./SessionComposer";
-import { AgentText, Bubble, fromPerson, MessageAppearance, PersonMessage } from "./SessionMessage";
+import { AgentText, Bubble, CiteContext, fromPerson, MessageAppearance, PersonMessage } from "./SessionMessage";
 import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
 
@@ -296,7 +296,19 @@ export function SessionView({
     ...(isChat(agent) ? [] : everyone.filter((a) => a.id !== agent.id && !a.archived_at && !recruits.includes(a) && wsKey(homeOf(a)) === wsKey(homeOf(agent)))),
   ];
 
+  const citeText = (raw: string) => {
+    const quoted = raw
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => `> ${l}`)
+      .join("\n");
+    if (!quoted) return;
+    setDraft((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${quoted}\n\n` : `${quoted}\n\n`));
+    document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+  };
+
   return (
+    <CiteContext.Provider value={agent.archived_at ? undefined : citeText}>
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
         {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose ?? onClosePane} />}
@@ -360,6 +372,7 @@ export function SessionView({
         </div>
       </section>
     </SideSlot.Provider>
+    </CiteContext.Provider>
   );
 }
 

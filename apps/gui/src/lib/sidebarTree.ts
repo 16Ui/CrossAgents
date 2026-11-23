@@ -11,6 +11,15 @@ export type SidebarGroup = {
   members: SidebarMember[];
 };
 
+/** Reorders `ids` by moving `fromId` before (or `after`) `toId`. Pure. */
+export function reorderIds(ids: readonly string[], fromId: string, toId: string, after = false): string[] {
+  if (fromId === toId || !ids.includes(fromId) || !ids.includes(toId)) return [...ids];
+  const rest = ids.filter((id) => id !== fromId);
+  const idx = rest.indexOf(toId);
+  rest.splice(after ? idx + 1 : idx, 0, fromId);
+  return rest;
+}
+
 /** Domain views own membership and stable ordering; this adds presentation preferences. */
 export function sidebarGroups(
   agents: Agent[],
@@ -18,15 +27,30 @@ export function sidebarGroups(
   projects: readonly { key: string; name: string }[],
   pins: ReadonlySet<string>,
   order: readonly string[] = [],
+  sessionOrder: Readonly<Record<string, readonly string[]>> = {},
 ): SidebarGroup[] {
   const pinned = new Set([...pins].filter((k) => k.startsWith("s:")).map((k) => k.slice(2)));
   const members = projectMembers(agents, runs, pinned);
   const assigned = new Set([...members.values()].flat().map((m) => m.agent.id));
   const rank = (key: string) => (order.includes(key) ? order.indexOf(key) : order.length);
-  // Newest first, and only pins move a row: a recent session is not buried under old ones behind
-  // 更多, and neither streaming nor a status change reorders the list.
-  const newestFirst = (a: Agent, b: Agent) =>
-    Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id);
+  // Newest first, with pins at top and per-group drag-and-drop order preserved; unranked new
+  // sessions appear above ranked ones so they are never buried behind 更多.
+  const sortAgents = (groupKey: string) => {
+    const custom = sessionOrder[groupKey] ?? [];
+    const customRank = (id: string) => (custom.length ? custom.indexOf(id) : -1);
+    return (a: Agent, b: Agent) => {
+      const pinDiff = Number(pinned.has(b.id)) - Number(pinned.has(a.id));
+      if (pinDiff) return pinDiff;
+      const ra = customRank(a.id);
+      const rb = customRank(b.id);
+      if (ra !== rb) {
+        if (ra === -1) return -1;
+        if (rb === -1) return 1;
+        return ra - rb;
+      }
+      return b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id);
+    };
+  };
   const withWork = (m: ProjectMember, project: readonly RunDetail[]): SidebarMember => {
     const work = lastWork(m.agent.id, project);
     return { ...m, summary: work?.text ?? null, lastAt: work?.at || null };
@@ -34,18 +58,19 @@ export function sidebarGroups(
   const groups = projects
     .map((p) => {
       const project = runs.filter((d) => wsKey(d.run.repo) === p.key);
+      const cmp = sortAgents(p.key);
       return {
         ...p,
         members: (members.get(p.key) ?? [])
           .filter((m) => !m.agent.archived_at)
-          .sort((a, b) => newestFirst(a.agent, b.agent))
+          .sort((a, b) => cmp(a.agent, b.agent))
           .map((m) => withWork(m, project)),
       };
     })
     .sort((a, b) => rank(a.key) - rank(b.key) || a.key.localeCompare(b.key));
   const standalone = standaloneSessions(agents)
     .filter((a) => !assigned.has(a.id) && !a.archived_at)
-    .sort(newestFirst);
+    .sort(sortAgents("__chats"));
   if (standalone.length)
     groups.push({
       key: "__chats",
