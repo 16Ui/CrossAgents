@@ -450,6 +450,8 @@ impl AntigravitySession {
             .ok_or_else(|| CoreError::Agent("empty Antigravity launch command".into()))?;
         let mut env = system_proxy_env();
         env.extend(self.env.iter().cloned());
+        #[cfg(windows)]
+        env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
         let launched = crate::launch::launch(LaunchSpec {
             program,
             args: all_args,
