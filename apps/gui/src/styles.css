@@ -1711,9 +1711,9 @@ button.account-who { display: inline-flex; align-items: center; gap: 4px; }
 .titlebar-title { min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .titlebar.blurred .titlebar-nav, .titlebar.blurred .titlebar-title { opacity: 0.55; }
 
-/* Sidebar hidden from the title bar (Ctrl+B). */
-.app.no-sidebar { grid-template-columns: minmax(0, 1fr); }
-.app.no-sidebar.with-drawer { grid-template-columns: minmax(0, 1fr) var(--tools-width, 420px); }
+/* Sidebar collapsed to minimalist 44px icon rail (Ctrl+B). */
+.app.no-sidebar { grid-template-columns: 44px minmax(0, 1fr); }
+.app.no-sidebar.with-drawer { grid-template-columns: 44px minmax(0, 1fr) var(--tools-width, 420px); }
 .window .app.drawer-float .drawer { top: calc(40px + var(--panel-gap)); }
 
 /* The sidebar in a small window: over the page from the left (hovered, or opened by a click with

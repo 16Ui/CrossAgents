@@ -261,6 +261,13 @@ export function markSeen(agentId: string) {
   changed();
 }
 
+export function markAllSeen() {
+  if (Object.keys(unread).length === 0) return;
+  unread = {};
+  save();
+  changed();
+}
+
 /** Registers an open pane's agent; returns the cleanup. */
 export function view(agentId: string): () => void {
   viewing = [...viewing, agentId];

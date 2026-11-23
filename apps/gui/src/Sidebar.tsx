@@ -6,7 +6,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Work } from "@bindings/Work";
 import type { WorkDetail } from "@bindings/WorkDetail";
-import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
+import { deliveryOf, lastError, markAllSeen, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
@@ -99,6 +99,109 @@ const CRAWL_DELAY = 200;
 const CRAWL_PX_PER_MS = 0.04;
 /** Clipped by less than this, moving reads as jitter, not as showing more. */
 const CRAWL_MIN_PX = 8;
+/** Minimalist 44px collapsed icon rail: expand, new, search, live/waiting session avatars, tools popover, settings. */
+export function SidebarRail({ route, onExpand }: { route: string[]; onExpand: () => void }) {
+  const agents = useHubData(() => api.listAgents().then((r) => r.agents), [], (e) => e.type.startsWith("agent."));
+  const questions = useQuestions();
+  const unread = useUnread();
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const inToolRoute = ["usage", "expertise", "git", "lessons", "extensions", "ext"].includes(route[0] ?? "");
+  const waitingIds = new Set((questions.data?.items ?? []).filter((q) => q.status === "open").map((q) => q.from));
+
+  const liveAgents = (agents.data ?? [])
+    .filter((a) => !a.archived_at)
+    .map((a) => {
+      const state = deliveryOf(a.id)?.state;
+      const running = state ? state !== "idle" : a.status === "running";
+      const waiting = waitingIds.has(a.id);
+      const err = a.status === "error" || unread[a.id]?.kind === "error";
+      const done = unread[a.id]?.kind === "done";
+      const priority = err ? 4 : waiting ? 3 : running ? 2 : done ? 1 : 0;
+      return { agent: a, running, waiting, err, done, priority };
+    })
+    .filter((x) => x.priority > 0)
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 6);
+
+  return (
+    <nav className="sidebar-rail" aria-label="极简导航栏">
+      <button type="button" className="rail-btn brand-btn" onClick={onExpand} title="展开侧栏 (Ctrl+B)" aria-label="展开侧栏">
+        <BrandMark size={18} />
+      </button>
+      <a className={`rail-btn ${!route[0] ? "active" : ""}`} href="#/" onClick={() => selectWorkspace("")} title="新建会话 (Ctrl+N)" aria-label="新建会话">
+        <Icon name="plus" size={16} />
+      </a>
+      <button
+        type="button"
+        className="rail-btn"
+        title="搜索会话 (Ctrl+K)"
+        aria-label="搜索会话"
+        onClick={() => {
+          onExpand();
+          requestAnimationFrame(() => document.querySelector<HTMLInputElement>(".sidebar .search input")?.focus());
+        }}
+      >
+        <Icon name="search" size={15} />
+      </button>
+      {liveAgents.length > 0 && <div className="rail-sep" />}
+      <div className="rail-live">
+        {liveAgents.map(({ agent, running, waiting, err }) => {
+          const active = route[0] === "s" && isAgent(agent, route[1]);
+          const dotClass = err ? "danger" : waiting ? "warn" : running ? "live" : "";
+          const hint = `${sessionLabel(agent)} · ${err ? "出错" : waiting ? "等你处理" : running ? "运行中" : "有新回复"}`;
+          return (
+            <a key={agent.id} className={`rail-btn ${active ? "active" : ""}`} href={sessionHref(agent)} title={hint} aria-label={hint}>
+              <Avatar agent={agent} size={22} />
+              <span className={`rail-dot ${dotClass}`} aria-hidden="true" />
+            </a>
+          );
+        })}
+      </div>
+      <div className="rail-sep" />
+      <button
+        type="button"
+        className={`rail-btn ${toolsOpen || inToolRoute ? "active" : ""}`}
+        title="更多工具（用量、专长、Git、排障、扩展）"
+        aria-label="更多工具"
+        aria-expanded={toolsOpen}
+        onClick={() => setToolsOpen((v) => !v)}
+      >
+        <Icon name="sliders" size={15} />
+      </button>
+      <a className={`rail-btn ${route[0] === "settings" ? "active" : ""}`} href="#/settings" title="设置" aria-label="设置">
+        <Icon name="settings" size={16} />
+      </a>
+      {toolsOpen && (
+        <>
+          <div className="menu-scrim" onClick={() => setToolsOpen(false)} />
+          <div className="context-menu rail-tools-pop" role="menu">
+            <a className="menu-item" href="#/usage" onClick={() => setToolsOpen(false)}>
+              <Icon name="chart" size={14} />
+              <span className="menu-label">{t("nav.usage")}</span>
+            </a>
+            <a className="menu-item" href="#/expertise" onClick={() => setToolsOpen(false)}>
+              <Icon name="brain" size={14} />
+              <span className="menu-label">{t("nav.expertise")}</span>
+            </a>
+            <a className="menu-item" href="#/git" onClick={() => setToolsOpen(false)}>
+              <Icon name="branch" size={14} />
+              <span className="menu-label">Git</span>
+            </a>
+            <a className="menu-item" href="#/lessons" onClick={() => setToolsOpen(false)}>
+              <Icon name="tasks" size={14} />
+              <span className="menu-label">{t("nav.lessons")}</span>
+            </a>
+            <a className="menu-item" href="#/extensions" onClick={() => setToolsOpen(false)}>
+              <Icon name="panel" size={14} />
+              <span className="menu-label">扩展</span>
+            </a>
+          </div>
+        </>
+      )}
+    </nav>
+  );
+}
+
 /** How long a row's archive can be taken back from the sidebar. */
 const UNDO_WINDOW = 8000;
 const Archiving = createContext<(agent: Agent) => void>(() => {});
@@ -388,10 +491,73 @@ export function Sidebar({ route }: { route: string[] }) {
   const unboundProjects = useUnboundProjects(runs);
   // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
   const extensionPages = [...useExtensions().pages.values()];
+  const [onlyActive, setOnlyActive] = useState(false);
+  const inToolRoute = ["usage", "expertise", "git", "lessons", "extensions", "ext"].includes(route[0] ?? "");
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const showTools = toolsOpen || inToolRoute;
   const sessionOrder = useSessionOrder();
   const [ctxMenu, setCtxMenu] = useState<{ agent: Agent; x: number; y: number } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ agent: Agent; value: string } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const flashToast = (msg: string) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 3200);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  const copyResume = async (agent: Agent) => {
+    try {
+      const res = await api.resumeCommand(agent.id);
+      if (res.command) {
+        await navigator.clipboard.writeText(res.command);
+        flashToast(`已复制 ${displayName(agent)} 的终端恢复命令`);
+      } else {
+        flashToast(res.unavailable ?? "这个会话暂时没有终端恢复命令");
+      }
+    } catch (err) {
+      flashToast(errorText(err));
+    }
+  };
+  const submitRename = async () => {
+    if (!renameTarget) return;
+    const { agent, value } = renameTarget;
+    setRenameTarget(null);
+    try {
+      await api.setTopic(agent.id, value.trim() || null);
+      flashToast("已更新会话标题");
+    } catch (err) {
+      flashToast(errorText(err));
+    }
+  };
+  const batchArchiveIdle = async (cwd: string) => {
+    const key = wsKey(cwd);
+    const targets = everyone.filter(
+      (a) =>
+        !a.archived_at &&
+        wsKey(a.cwd) === key &&
+        !isSession(a) &&
+        !pinned.has(sessionKey(a)) &&
+        a.status !== "running" &&
+        deliveryOf(a.id)?.state !== "turn",
+    );
+    if (!targets.length) {
+      flashToast("没有可归档的空闲会话");
+      return;
+    }
+    await Promise.allSettled(targets.map((a) => api.archiveAgent(a.id, true)));
+    flashToast(`已归档 ${targets.length} 个空闲会话`);
+  };
   const groups = sidebarGroups(everyone, runs, list, pinned, [...order], sessionOrder);
-  const shown = searchGroups(groups, query);
+  const isActiveMember = (m: SidebarMember) => {
+    const state = deliveryOf(m.agent.id)?.state;
+    const running = state ? state !== "idle" : m.agent.status === "running";
+    return running || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id);
+  };
+  const filteredGroups = onlyActive
+    ? groups.map((g) => ({ ...g, members: g.members.filter(isActiveMember) })).filter((g) => g.members.length > 0)
+    : groups;
+  const shown = searchGroups(filteredGroups, query);
   // A work group belongs to the project its `repo` names; one no project claims goes last.
   const projectKeys = new Set(groups.map((g) => g.key));
   const otherWorks = workList.filter((w) => !projectKeys.has(workProject(w)));
@@ -443,51 +609,80 @@ export function Sidebar({ route }: { route: string[] }) {
                 <Icon name="close" size={12} />
               </button>
             )}
+            <button
+              type="button"
+              className={`search-filter-btn ${onlyActive ? "on" : ""}`}
+              onClick={(e) => {
+                e.preventDefault();
+                setOnlyActive((v) => !v);
+              }}
+              title={onlyActive ? "显示全部会话" : "仅看运行中 / 待处理 / 未读会话"}
+              aria-pressed={onlyActive}
+              aria-label="仅看活跃会话"
+            >
+              <Icon name="info" size={13} />
+            </button>
           </label>
-          <div className="side-nav">
-            <a className={"nav-new " + (!route[0] ? "active" : "")} href="#/" onClick={() => selectWorkspace("")}>
+          <div className="side-nav-primary">
+            <a className={"nav-new-full " + (!route[0] ? "active" : "")} href="#/" onClick={() => selectWorkspace("")}>
               <Icon name="plus" size={16} />
               <span>{t("sidebar.new")}</span>
               <kbd>Ctrl N</kbd>
             </a>
-            <a className={"nav-usage " + (route[0] === "usage" ? "active" : "")} href="#/usage">
-              <Icon name="chart" size={16} />
-              <span>{t("nav.usage")}</span>
-            </a>
-            <a className={"nav-expertise " + (route[0] === "expertise" ? "active" : "")} href="#/expertise">
-              <Icon name="brain" size={16} />
-              <span>{t("nav.expertise")}</span>
-            </a>
-            {git.show && (
-              <a
-                className={"nav-git " + (route[0] === "git" ? "active" : "")}
-                href="#/git"
-                title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
-                aria-disabled={git.disabled || undefined}
-                style={git.disabled ? REFUSED : undefined}
-                onClick={git.disabled ? (e) => e.preventDefault() : undefined}
-              >
-                <Icon name="branch" size={16} />
-                <span>Git</span>
-              </a>
+            <button
+              type="button"
+              className={`nav-tools-toggle ${inToolRoute ? "on" : ""}`}
+              aria-expanded={showTools}
+              onClick={() => setToolsOpen((v) => !v)}
+            >
+              <Icon name="sliders" size={14} />
+              <span>更多工具</span>
+              <span className="tools-chev">
+                <Icon name={showTools ? "chevron" : "chevronRight"} size={12} />
+              </span>
+            </button>
+            {showTools && (
+              <div className="nav-tools-list">
+                <a className={route[0] === "usage" ? "active" : ""} href="#/usage">
+                  <Icon name="chart" size={14} />
+                  <span>{t("nav.usage")}</span>
+                </a>
+                <a className={route[0] === "expertise" ? "active" : ""} href="#/expertise">
+                  <Icon name="brain" size={14} />
+                  <span>{t("nav.expertise")}</span>
+                </a>
+                {git.show && (
+                  <a
+                    className={route[0] === "git" ? "active" : ""}
+                    href="#/git"
+                    title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
+                    aria-disabled={git.disabled || undefined}
+                    style={git.disabled ? REFUSED : undefined}
+                    onClick={git.disabled ? (e) => e.preventDefault() : undefined}
+                  >
+                    <Icon name="branch" size={14} />
+                    <span>Git</span>
+                  </a>
+                )}
+                {lessons.show && (
+                  <a
+                    className={route[0] === "lessons" ? "active" : ""}
+                    href="#/lessons"
+                    title={lessons.disabled ? lessons.reason : undefined}
+                    aria-disabled={lessons.disabled || undefined}
+                    style={lessons.disabled ? REFUSED : undefined}
+                    onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
+                  >
+                    <Icon name="tasks" size={14} />
+                    <span>{t("nav.lessons")}</span>
+                  </a>
+                )}
+                <a className={route[0] === "extensions" || route[0] === "ext" ? "active" : ""} href="#/extensions">
+                  <Icon name="panel" size={14} />
+                  <span>扩展</span>
+                </a>
+              </div>
             )}
-            {lessons.show && (
-              <a
-                className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")}
-                href="#/lessons"
-                title={lessons.disabled ? lessons.reason : undefined}
-                aria-disabled={lessons.disabled || undefined}
-                style={lessons.disabled ? REFUSED : undefined}
-                onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
-              >
-                <Icon name="tasks" size={16} />
-                <span>{t("nav.lessons")}</span>
-              </a>
-            )}
-            <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
-              <Icon name="panel" size={16} />
-              <span>扩展</span>
-            </a>
           </div>
           <div className="scroll">
             {extensionPages.length > 0 && (
@@ -512,7 +707,14 @@ export function Sidebar({ route }: { route: string[] }) {
               </section>
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
-            {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
+            {done > 0 && (
+              <div className="sidebar-unread-bar">
+                <span>{t("sidebar.doneUnread", { n: done })}</span>
+                <button type="button" className="link" onClick={markAllSeen}>
+                  全部已读
+                </button>
+              </div>
+            )}
             {!searching && work.show && work.disabled && (
               <div className="works-refused nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
                 <span className="row-link">
@@ -539,53 +741,101 @@ export function Sidebar({ route }: { route: string[] }) {
                 ))}
               </section>
             )}
-            {machineGroups(shown).map((machine) => (
-              <Machine key={machine.key} machine={machine} searching={searching}>
-            {machine.groups.map((g) => {
-              const groupWorks = workList.filter((w) => workProject(w) === g.key);
-              const workLeads = new Set(groupWorks.map((w) => w.lead));
-              const sessionMembers = searching
-                ? g.members
-                : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
-              return (
-              <Group
-                key={g.key}
-                group={g}
-                searching={searching}
-                active={route[0] === "w" && route[1] === g.key}
-                onMove={
-                  g.key === CHATS
-                    ? undefined
-                    : () => {
-                        const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
-                        const i = keys.indexOf(g.key);
-                        if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
-                        projectOrder.replace(keys);
-                      }
-                }
-              >
-                <Capped
-                  items={sessionMembers}
-                  keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
-                  searching={searching}
-                >
-                  {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
-                </Capped>
-                {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
-              </Group>
-              );
-            })}
-            {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
-              </Machine>
-            ))}
+            {(() => {
+              const machines = machineGroups(shown);
+              const singleLocal = machines.length === 1 && machines[0].key === CENTRE_MACHINE;
+              return machines.map((machine) => {
+                const body = (
+                  <>
+                    {machine.groups.map((g) => {
+                      const groupWorks = workList.filter((w) => workProject(w) === g.key);
+                      const workLeads = new Set(groupWorks.map((w) => w.lead));
+                      const sessionMembers = searching
+                        ? g.members
+                        : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
+                      return (
+                        <Group
+                          key={g.key}
+                          group={g}
+                          searching={searching}
+                          active={route[0] === "w" && route[1] === g.key}
+                          onMove={
+                            g.key === CHATS
+                              ? undefined
+                              : () => {
+                                  const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
+                                  const i = keys.indexOf(g.key);
+                                  if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
+                                  projectOrder.replace(keys);
+                                }
+                          }
+                        >
+                          <Capped
+                            items={sessionMembers}
+                            keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
+                            searching={searching}
+                          >
+                            {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
+                          </Capped>
+                          {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
+                        </Group>
+                      );
+                    })}
+                    {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
+                  </>
+                );
+                return singleLocal ? (
+                  <div key={machine.key}>{body}</div>
+                ) : (
+                  <Machine key={machine.key} machine={machine} searching={searching}>
+                    {body}
+                  </Machine>
+                );
+              });
+            })()}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
+          {renameTarget && (
+            <form
+              className="rename-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitRename();
+              }}
+            >
+              <input
+                value={renameTarget.value}
+                onChange={(e) => setRenameTarget({ ...renameTarget, value: e.target.value })}
+                onKeyDown={(e) => e.key === "Escape" && setRenameTarget(null)}
+                placeholder={`给 ${displayName(renameTarget.agent)} 起个标题…`}
+                autoFocus
+              />
+              <button type="submit" className="primary small">
+                保存
+              </button>
+              <button type="button" className="ghost small" onClick={() => setRenameTarget(null)}>
+                取消
+              </button>
+            </form>
+          )}
           {ctxMenu && (
             <>
               <div className="menu-scrim" onClick={() => setCtxMenu(null)} />
               <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} role="menu">
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    setRenameTarget({ agent: ctxMenu.agent, value: ctxMenu.agent.topic ?? "" });
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">重命名标题…</span>
+                  </span>
+                </button>
                 <button
                   type="button"
                   className="menu-item"
@@ -614,6 +864,18 @@ export function Sidebar({ route }: { route: string[] }) {
                   type="button"
                   className="menu-item"
                   onClick={() => {
+                    void copyResume(ctxMenu.agent);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">复制终端恢复命令</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
                     archiving.archive(ctxMenu.agent);
                     setCtxMenu(null);
                   }}
@@ -622,6 +884,32 @@ export function Sidebar({ route }: { route: string[] }) {
                     <span className="menu-label">{t("sidebar.archive")}</span>
                   </span>
                 </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    void batchArchiveIdle(ctxMenu.agent.cwd);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">归档本项目空闲会话</span>
+                  </span>
+                </button>
+                {Object.keys(unread).length > 0 && (
+                  <button
+                    type="button"
+                    className="menu-item"
+                    onClick={() => {
+                      markAllSeen();
+                      setCtxMenu(null);
+                    }}
+                  >
+                    <span className="menu-text">
+                      <span className="menu-label">全部标为已读</span>
+                    </span>
+                  </button>
+                )}
                 {list.filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd)).length > 0 && (
                   <>
                     <div className="menu-head">移入项目</div>
@@ -647,6 +935,14 @@ export function Sidebar({ route }: { route: string[] }) {
                 )}
               </div>
             </>
+          )}
+          {toast && !archiving.note && (
+            <div className="archive-note" role="status">
+              <span className="archive-note-text">{toast}</span>
+              <button className="icon-btn" onClick={() => setToast(null)} aria-label="关闭">
+                <Icon name="close" size={12} />
+              </button>
+            </div>
           )}
           {archiving.note && (
             <div className={"archive-note " + (archiving.note.error ? "failed" : "")} role="status">
@@ -975,6 +1271,11 @@ function SessionRow({
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{sessionLabel(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
+          {typeof (agent.config as Record<string, unknown> | null)?.worktree_branch === "string" && (
+            <span className="member-branch" title={`Worktree 分支：${String((agent.config as Record<string, unknown>).worktree_branch)}`}>
+              {String((agent.config as Record<string, unknown>).worktree_branch).replace(/^ca\//, "")}
+            </span>
+          )}
           {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
