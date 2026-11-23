@@ -303,6 +303,7 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .col-edge::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background 0.12s; }
 .col-edge:hover::after, body.col-resizing .col-edge::after { background: var(--accent); }
 .sidebar-edge { left: calc(var(--panel-gap) + var(--sidebar-width) + var(--panel-gap) / 2 - 4px); }
+.sidebar-rail-edge { left: calc(var(--panel-gap) + 44px + var(--panel-gap) / 2 - 4px); }
 .tools-edge { right: calc(var(--panel-gap) + var(--tools-width) + var(--panel-gap) / 2 - 4px); }
 body.col-resizing { cursor: col-resize; user-select: none; }
 /* The conversations and, under them, the bottom dock. */
