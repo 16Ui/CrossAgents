@@ -56,6 +56,8 @@ import "./session-polish.css";
 import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
+import { isRemoteNodeId, normalizeNodeOs, useNodes } from "../nodes";
+import { OsIcon } from "../osIcon";
 import { ContextUsageButton, useCompact } from "../contextusage";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
@@ -560,6 +562,10 @@ function Header({
   const [resume, setResume] = useState(false);
   const compact = useCompact(agent);
   const stop = useArmed();
+  const nodes = useNodes();
+  const remoteNode = isRemoteNodeId(agent.node)
+    ? nodes.data?.find((n) => !n.local && (n.id === agent.node || n.name === agent.node))
+    : undefined;
 
   async function run(action: () => Promise<unknown>) {
     setBusy(true);
@@ -588,6 +594,21 @@ function Header({
           <span className="who-sub">{agent.topic ?? agentTitle(agent)}</span>
         </span>
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+        {isRemoteNodeId(agent.node) && (
+          <a
+            href="#/settings/devices"
+            className={`chip node-chip ${remoteNode && !remoteNode.online ? "dim" : ""}`}
+            title={
+              remoteNode
+                ? `运行在节点 ${remoteNode.name}（${remoteNode.hostname} · ${remoteNode.online ? "在线" : "离线"}）`
+                : `运行在远程节点 ${agent.node}`
+            }
+          >
+            <OsIcon os={normalizeNodeOs(remoteNode?.os)} size={12} />
+            <span>{remoteNode?.name ?? agent.node}</span>
+            <span className={`dot ${remoteNode?.online ? "ok" : "off"}`} aria-hidden="true" />
+          </a>
+        )}
         {!rail && (
           <>
             <RelationChip agent={agent} className="hide-narrow" />

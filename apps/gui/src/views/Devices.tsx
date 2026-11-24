@@ -11,6 +11,7 @@ import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
+import { normalizeNodeOs, useNodes } from "../nodes";
 import { isOnline, isRevoked, isThisWindow, KIND_LABELS, LEVEL_LABELS, OS_UNKNOWN_HINT, sortDevices } from "../lib/devices";
 import { OsIcon, osName } from "../osIcon";
 import { useConnectionState } from "../lib/useConnection";
@@ -32,11 +33,7 @@ export function DevicesPage() {
   const refused = revoke.refused ? revoke.reason : undefined;
   const [error, setError] = useState<string>();
   const list = sortDevices(devices.data ?? []);
-  const nodes = useHubData(
-    () => api.listNodes().then((r) => r.nodes),
-    [],
-    (e) => e.type === "device.created" || e.type === "device.revoked",
-  );
+  const nodes = useNodes();
   const remoteNodes = (nodes.data ?? []).filter((n) => !n.local);
   const [hub, setHub] = useState<HubInfo>();
   useEffect(() => {
@@ -118,23 +115,32 @@ export function DevicesPage() {
 }
 
 function RemoteNodeRow({ node }: { node: RemoteNodeInfo }) {
-  const os = node.os === "windows" || node.os === "macos" || node.os === "linux" ? node.os : undefined;
+  const os = normalizeNodeOs(node.os);
+  const installedPlugins = (node.plugins ?? []).filter((p) => p.installed);
   return (
-    <div className="setting-line device-row">
+    <div className={`setting-line device-row ${node.online ? "" : "revoked"}`}>
       <div className="device-name">
         <div className="setting-label">
           <OsIcon os={os} size={15} />
           {node.name}
-          <span className="chip small ok">在线节点</span>
-          <span className="chip small">{node.os}/{node.arch}</span>
-          <span className="chip small">{node.shell}</span>
+          <span className={`chip small ${node.online ? "ok" : ""}`}>{node.online ? "在线节点" : "离线节点"}</span>
+          {node.os && node.os !== "unknown" && (
+            <span className="chip small">{node.arch ? `${node.os}/${node.arch}` : node.os}</span>
+          )}
+          {node.shell && <span className="chip small">{node.shell}</span>}
+          {installedPlugins.map((p) => (
+            <span key={p.name} className="chip small accent" title={p.models.join(", ") || p.name}>
+              {p.name}
+              {p.models.length > 0 ? ` · ${p.models.length}` : ""}
+            </span>
+          ))}
         </div>
         <div className="device-times">
           <span className="setting-hint">主机 {node.hostname}</span>
           {node.default_cwd && <span className="setting-hint">目录 {node.default_cwd}</span>}
-          <span className="setting-hint">v{node.version}</span>
-          <span className="setting-hint" title={`连接于 ${full(node.connected_at)}`}>
-            连接 {when(node.connected_at)}
+          {node.version && <span className="setting-hint">v{node.version}</span>}
+          <span className="setting-hint" title={`${node.online ? "连接于" : "最后在线"} ${full(node.connected_at)}`}>
+            {node.online ? "连接" : "最后在线"} {when(node.connected_at)}
           </span>
         </div>
       </div>

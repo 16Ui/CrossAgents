@@ -30,6 +30,7 @@ import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
+import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunCostResponse } from "@bindings/RunCostResponse";
@@ -114,6 +115,10 @@ export type MockState = {
   usageSeriesVariant?: "normal" | "empty" | "issues" | "session";
   accountUsage?: AccountUsageResponse;
   plugins: PluginInfo[];
+  /** Connected or known remote execution nodes (`GET /v1/nodes`); absent: local machine only. */
+  nodes?: RemoteNodeInfo[];
+  /** Plugins reported per remote node id (`GET /v1/plugins?node=<id>`). */
+  nodePlugins?: Record<string, PluginInfo[]>;
   /** What a mock install or upgrade does: succeed, exit non-zero, or leave nothing behind. */
   install?: "ok" | "fail" | "missing";
   /** Uncommitted files in a run's checkout, by run id: deleting it asks for force. */
@@ -822,7 +827,11 @@ export class MockBridge implements CrossAgentsBridge {
         // `features: null` is an older hub: it answers without the list at all, and `version`
         // is then what the GUI infers its entries from.
         const features = s.features === null ? undefined : (s.features ?? FEATURES);
-        return json(200, { version: s.version ?? __BUILD__.version, commit, machine: HUB_MACHINE, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
+        const localNode = s.nodes?.find((n) => n.local);
+        const machine = localNode
+          ? { os: localNode.os === "windows" || localNode.os === "macos" || localNode.os === "linux" ? localNode.os : HUB_MACHINE.os, hostname: localNode.hostname || HUB_MACHINE.hostname }
+          : HUB_MACHINE;
+        return json(200, { version: s.version ?? __BUILD__.version, commit, machine, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") {
         // `?run=`: what the plan being settled changes (list_agents).
@@ -1054,7 +1063,38 @@ export class MockBridge implements CrossAgentsBridge {
             { value: "http://127.0.0.1:7890", label: "本机 :7890", source: "local", ip: "203.0.113.9", country: "US", asn: "AS13335", latency_ms: 85 },
           ],
         });
-      if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if (p === "/v1/nodes") {
+        const nodes: RemoteNodeInfo[] = s.nodes ?? [
+          {
+            id: "local",
+            name: "local",
+            os: HUB_MACHINE.os,
+            arch: "x86_64",
+            hostname: HUB_MACHINE.hostname,
+            shell: "powershell",
+            default_cwd: "C:/work/crossagents",
+            version: s.version ?? __BUILD__.version,
+            connected_at: new Date().toISOString(),
+            local: true,
+            online: true,
+            plugins: s.plugins.map((pl) => ({
+              name: pl.name,
+              installed: pl.cli?.installed ?? pl.models.length > 0,
+              version: pl.cli?.version ?? undefined,
+              driver: pl.driver,
+              models: pl.models,
+              efforts: pl.efforts,
+              efforts_by_model: pl.efforts_by_model,
+            })),
+          },
+        ];
+        return json(200, { nodes });
+      }
+      if (p === "/v1/plugins") {
+        const node = url.searchParams.get("node");
+        if (node && node !== "local") return json(200, { plugins: s.nodePlugins?.[node] ?? [] });
+        return json(200, { plugins: s.plugins });
+      }
       if (p === "/v1/sessions/import") return json(200, { candidates: s.importableSessions ?? [] });
       if (p === "/v1/session-candidates") {
         // The policy the sessions would be assigned under: the run named by `?run=`, else the
@@ -1133,7 +1173,10 @@ export class MockBridge implements CrossAgentsBridge {
         // Like the hub: no name, a made-up person's name (never a model's).
         const name = req.name || MOCK_NAMES.find((n) => !taken(n)) || `Nova ${s.agents.length}`;
         const id = uid();
-        const cwd = req.cwd || `C:/Users/me/.crossagents/chats/${id}`;
+        const targetNode = req.node && req.node !== "local" ? s.nodes?.find((n) => !n.local && (n.id === req.node || n.name === req.node)) : undefined;
+        const cwd =
+          req.cwd ||
+          (targetNode?.chats_dir ? `${targetNode.chats_dir}/${id}` : targetNode?.default_cwd || `C:/Users/me/.crossagents/chats/${id}`);
         const agent: Agent = {
           id,
           ...req,
@@ -1145,7 +1188,7 @@ export class MockBridge implements CrossAgentsBridge {
           home: cwd,
           cwd,
           status: "stopped", // as the hub makes them: started by their first message
-          node: null,
+          node: targetNode?.id ?? (req.node && req.node !== "local" ? req.node : null),
           created_at: new Date().toISOString(),
         };
         s.agents.push(agent);

@@ -170,7 +170,7 @@ test("todos survive hidden/archived/search-filtered members, and only server ans
   );
 });
 
-import { CENTRE_MACHINE, machineFoldKey, machineGroups } from "./sidebarTree.ts";
+import { CENTRE_MACHINE, buildMachineGroups, machineFoldKey, machineGroups, searchMachineGroups } from "./sidebarTree.ts";
 
 test("workspace groups sit under the centre machine, which exists even with none", () => {
   assert.deepEqual(machineGroups([]), [{ key: CENTRE_MACHINE, groups: [] }]);
@@ -185,4 +185,19 @@ test("a machineKey can place groups on other machines", () => {
   const gs = [{ key: "/a", name: "a", members: [] }, { key: "/b", name: "b", members: [] }];
   const machines = machineGroups(gs, (g) => (g.key === "/b" ? "node1" : CENTRE_MACHINE));
   assert.deepEqual(machines.map((m) => [m.key, m.groups.length]), [[CENTRE_MACHINE, 1], ["node1", 1]]);
+});
+
+test("buildMachineGroups partitions projects and standalone chats per machine", () => {
+  const winAgent = agent("win1", { home: "C:/Dev/App", cwd: "C:/Dev/App", node: null });
+  const macAgent = agent("mac1", { home: "/Users/link/Dev/App", cwd: "/Users/link/Dev/App", node: "mac-1" });
+  const macChat = agent("macChat", { home: "/Users/link/.crossagents/chats/macChat", cwd: "/Users/link/.crossagents/chats/macChat", node: "mac-1", topic: "问一下 Xcode 打包" });
+  const machines = buildMachineGroups([winAgent, macAgent, macChat], [], ["mac-1", "linux-offline"], new Set());
+  assert.deepEqual(machines.map((m) => m.key), [CENTRE_MACHINE, "mac-1", "linux-offline"]);
+  assert.deepEqual(machines[0].groups.map((g) => g.key), ["c:/dev/app"]);
+  assert.deepEqual(machines[1].groups.map((g) => g.key), ["/users/link/dev/app", "__chats"]);
+  assert.deepEqual(machines[2].groups, []);
+
+  const filtered = searchMachineGroups(machines, "Xcode");
+  assert.deepEqual(filtered.map((m) => m.key), ["mac-1"]);
+  assert.deepEqual(filtered[0].groups.map((g) => g.key), ["__chats"]);
 });

@@ -3,9 +3,11 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use async_trait::async_trait;
 use clap::Subcommand;
 use crossagents_api_types::{
     ListNodesResponse, NodeEditFileRequest, NodeEditFileResponse, NodeExecRequest,
@@ -15,8 +17,16 @@ use crossagents_api_types::{
     NodeWriteFileResponse,
 };
 use crossagents_core::process::NoWindow;
+use crossagents_core::{CoreError, Driver, SessionSpec};
+use crossagents_hub::{HubConfig, Paths};
+use crossagents_node::{
+    DriverSource, NodeService, PluginSnapshot, RegisterInfo, Transport, TransportError,
+    TransportServer,
+};
+use crossagents_plugins::PluginRegistry;
 use futures::StreamExt;
 use tokio::process::Command;
+use tokio::sync::{Mutex, mpsc, watch};
 
 use super::Context;
 use crate::output::{print_json, print_table};
@@ -117,17 +127,36 @@ pub async fn run(ctx: &Context, cmd: NodeCommand) -> Result<()> {
                 .nodes
                 .iter()
                 .map(|n| {
+                    let plugins: Vec<&str> = n
+                        .plugins
+                        .iter()
+                        .filter(|p| p.installed)
+                        .map(|p| p.name.as_str())
+                        .collect();
                     vec![
                         n.name.clone(),
-                        if n.local { "local".into() } else { "remote".into() },
+                        if n.local {
+                            "local".into()
+                        } else if n.online {
+                            "online".into()
+                        } else {
+                            "offline".into()
+                        },
                         format!("{}/{}", n.os, n.arch),
-                        n.shell.clone(),
+                        if plugins.is_empty() {
+                            "-".into()
+                        } else {
+                            plugins.join(",")
+                        },
                         n.hostname.clone(),
                         n.default_cwd.clone(),
                     ]
                 })
                 .collect();
-            print_table(&["NAME", "KIND", "PLATFORM", "SHELL", "HOST", "CWD"], &rows);
+            print_table(
+                &["NAME", "STATE", "PLATFORM", "PLUGINS", "HOST", "CWD"],
+                &rows,
+            );
             Ok(())
         }
         NodeCommand::Exec {
@@ -294,6 +323,159 @@ pub async fn run(ctx: &Context, cmd: NodeCommand) -> Result<()> {
     }
 }
 
+struct LocalRegistrySource(PluginRegistry);
+
+impl DriverSource for LocalRegistrySource {
+    fn driver(&self, plugin: &str, driver: Option<&str>) -> Result<Arc<dyn Driver>, CoreError> {
+        self.0.local_driver(plugin, driver)
+    }
+}
+
+struct ChannelTransportServer {
+    accepted: Mutex<mpsc::UnboundedReceiver<Arc<dyn Transport>>>,
+}
+
+#[async_trait]
+impl TransportServer for ChannelTransportServer {
+    async fn accept(&self) -> Option<Arc<dyn Transport>> {
+        self.accepted.lock().await.recv().await
+    }
+}
+
+struct HttpClientTransport {
+    out_tx: mpsc::UnboundedSender<String>,
+    in_rx: Mutex<mpsc::UnboundedReceiver<String>>,
+    closed: watch::Receiver<bool>,
+}
+
+#[async_trait]
+impl Transport for HttpClientTransport {
+    async fn send_line(&self, line: String) -> Result<(), TransportError> {
+        if *self.closed.borrow() {
+            return Err(TransportError("node connection closed".into()));
+        }
+        self.out_tx
+            .send(line)
+            .map_err(|_| TransportError("node writer closed".into()))
+    }
+
+    async fn recv_line(&self) -> Option<String> {
+        let mut rx = self.in_rx.lock().await;
+        let mut closed = self.closed.clone();
+        tokio::select! {
+            line = rx.recv() => line,
+            _ = closed.wait_for(|c| *c) => None,
+        }
+    }
+}
+
+async fn collect_plugin_snapshots(registry: &PluginRegistry) -> Vec<PluginSnapshot> {
+    let drivers = registry.defaults();
+    let mut handles = Vec::with_capacity(drivers.len());
+    for d in &drivers {
+        let d = d.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_secs(6), d.probe_cli()).await;
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+
+    let mut snapshots = Vec::with_capacity(drivers.len());
+    for d in drivers {
+        let name = d.name().to_owned();
+        let status = d.cli_status().await;
+        let version = status
+            .as_ref()
+            .and_then(|s| s.located.as_ref())
+            .and_then(|l| l.version.clone());
+        let installed = d.installed();
+        let models = if installed { d.models() } else { Vec::new() };
+        let efforts = registry
+            .config(&name)
+            .map(|c| c.efforts.clone())
+            .unwrap_or_default();
+        let efforts_by_model = models
+            .iter()
+            .filter_map(|m| d.model_efforts(m).map(|e| (m.clone(), e)))
+            .collect();
+        snapshots.push(PluginSnapshot {
+            name,
+            installed,
+            version,
+            driver: Some(d.kind().as_str().to_owned()),
+            models,
+            efforts,
+            efforts_by_model,
+            capabilities: Some(d.capabilities()),
+        });
+    }
+    snapshots
+}
+
+/// On Unix (macOS/Linux), queries the user's login shell once for its `PATH` so CLIs installed via
+/// Homebrew, nvm, volta, fnm, or npm global are found even under launchd or non-interactive shells.
+#[cfg(unix)]
+async fn login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let mut cmd = Command::new(&shell);
+    cmd.args(["-lc", "printf '%s' \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(3), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let val = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!val.is_empty()).then_some(val)
+}
+
+#[cfg(not(unix))]
+async fn login_shell_path() -> Option<String> {
+    None
+}
+
+fn rewrite_remote_spec(
+    spec: &mut SessionSpec,
+    hub_base: &str,
+    default_cwd: &Path,
+    extra_path: Option<&str>,
+) {
+    // Rewrite the hub's collaboration MCP entry so the agent on this node launches THIS machine's
+    // `crossagents mcp` binary pointing at the node's reachable hub URL.
+    if let Ok(exe) = std::env::current_exe() {
+        for mcp in &mut spec.mcp_servers {
+            if mcp.name == "crossagents" {
+                mcp.command = exe.clone();
+                mcp.args = vec!["mcp".into()];
+                mcp.env
+                    .insert("CROSSAGENTS_URL".into(), hub_base.to_owned());
+            }
+        }
+    }
+    // Ensure standalone chat directories (under `.crossagents/chats/`) exist on this machine.
+    let cwd_str = spec.agent.cwd.to_string_lossy();
+    if cwd_str.trim().is_empty() || cwd_str.trim() == "." {
+        spec.agent.cwd = default_cwd.to_path_buf();
+    } else if !spec.agent.cwd.exists() {
+        let norm = cwd_str.replace('\\', "/");
+        if norm.contains("/.crossagents/chats/") {
+            let _ = std::fs::create_dir_all(&spec.agent.cwd);
+        }
+    }
+    if let Some(path) = extra_path
+        && !spec.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+    {
+        spec.env.push(("PATH".into(), path.to_owned()));
+    }
+}
+
 /// Runs the outbound node daemon loop with automatic reconnect until Ctrl+C or token revocation.
 async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> {
     let base = hub.trim().trim_end_matches('/').to_owned();
@@ -304,22 +486,67 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
         Some(dir) => dir,
         None => std::env::current_dir().context("cannot determine current directory")?,
     };
+    let paths = Paths::from_env()?;
+    let _ = std::fs::create_dir_all(&paths.home);
+    let hub_cfg =
+        HubConfig::load(paths.clone()).unwrap_or_else(|_| HubConfig::new(paths.clone(), 0));
+    let (plugins, warnings) = PluginRegistry::load(&hub_cfg.plugins, &paths.plugins());
+    for w in warnings {
+        eprintln!("warning: skipping plugin: {w}");
+    }
+    eprintln!("probing local CLI plugins on this machine...");
+    let snapshots = collect_plugin_snapshots(&plugins).await;
+    let ready: Vec<String> = snapshots
+        .iter()
+        .filter(|p| p.installed)
+        .map(|p| format!("{} ({} models)", p.name, p.models.len()))
+        .collect();
+    if ready.is_empty() {
+        eprintln!("no local agent CLIs detected (file/exec tools still available)");
+    } else {
+        eprintln!("ready local CLIs: {}", ready.join(", "));
+    }
+
+    let extra_path = login_shell_path().await;
+    let hostname = node_hostname();
+    let shell = default_shell();
+    let chats_dir = paths.home.join("chats");
+    let _ = std::fs::create_dir_all(&chats_dir);
+
+    let mut register = RegisterInfo::local();
+    register.hostname = hostname.clone();
+    register.plugins = snapshots;
+
+    let (accept_tx, accepted_rx) = mpsc::unbounded_channel::<Arc<dyn Transport>>();
+    let server = Arc::new(ChannelTransportServer {
+        accepted: Mutex::new(accepted_rx),
+    });
+    let rewriter_base = base.clone();
+    let rewriter_cwd = default_cwd.clone();
+    let rewriter_path = extra_path.clone();
+    let service = NodeService::new(Arc::new(LocalRegistrySource(plugins)))
+        .with_register(register)
+        .with_spec_rewriter(Arc::new(move |spec| {
+            rewrite_remote_spec(spec, &rewriter_base, &rewriter_cwd, rewriter_path.as_deref());
+        }));
+    let service_task = tokio::spawn(service.run(server));
+
     let http = reqwest::Client::builder()
         .no_proxy()
         .build()
         .context("cannot build HTTP client")?;
-    let hostname = node_hostname();
-    let shell = default_shell();
     let mut attempt = 0usize;
 
     loop {
         let cwd_str = default_cwd.to_string_lossy();
+        let chats_str = chats_dir.to_string_lossy();
         let query = encode_query(&[
             ("os", std::env::consts::OS),
             ("arch", std::env::consts::ARCH),
             ("hostname", hostname.as_str()),
             ("shell", shell.as_str()),
             ("cwd", cwd_str.as_ref()),
+            ("chats_dir", chats_str.as_ref()),
             ("version", env!("CARGO_PKG_VERSION")),
         ]);
         let resp = http
@@ -338,12 +565,80 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
                     std::env::consts::ARCH,
                     default_cwd.display()
                 );
+
+                // Wire this SSE connection into the persistent `NodeService`.
+                let (frame_in_tx, frame_in_rx) = mpsc::unbounded_channel::<String>();
+                let (frame_out_tx, mut frame_out_rx) = mpsc::unbounded_channel::<String>();
+                let (close_tx, close_rx) = watch::channel(false);
+                let transport: Arc<dyn Transport> = Arc::new(HttpClientTransport {
+                    out_tx: frame_out_tx,
+                    in_rx: Mutex::new(frame_in_rx),
+                    closed: close_rx.clone(),
+                });
+                let _ = accept_tx.send(transport);
+
+                // Ordered HTTP writer: drains queued JSON-line frames into one POST batch per RTT.
+                let writer_http = http.clone();
+                let writer_url = format!("{base}/v1/node/frames");
+                let writer_token = token.to_owned();
+                let writer_close = close_tx.clone();
+                let mut writer_closed = close_rx;
+                let writer_task = tokio::spawn(async move {
+                    loop {
+                        let first = tokio::select! {
+                            _ = writer_closed.wait_for(|c| *c) => break,
+                            line = frame_out_rx.recv() => match line {
+                                Some(l) => l,
+                                None => break,
+                            }
+                        };
+                        let mut batch = first;
+                        if !batch.ends_with('\n') {
+                            batch.push('\n');
+                        }
+                        while batch.len() < 128 * 1024 {
+                            match frame_out_rx.try_recv() {
+                                Ok(next) => {
+                                    batch.push_str(&next);
+                                    if !batch.ends_with('\n') {
+                                        batch.push('\n');
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        match writer_http
+                            .post(&writer_url)
+                            .bearer_auth(&writer_token)
+                            .header("content-type", "text/plain; charset=utf-8")
+                            .body(batch)
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {}
+                            Ok(resp) => {
+                                eprintln!("node frame post failed with {}", resp.status());
+                                let _ = writer_close.send(true);
+                                break;
+                            }
+                            Err(err) => {
+                                eprintln!("node frame post error: {err}");
+                                let _ = writer_close.send(true);
+                                break;
+                            }
+                        }
+                    }
+                });
+
                 let mut stream = r.bytes_stream();
                 let mut buf = String::new();
                 let mut current_event = String::new();
                 loop {
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => {
+                            let _ = close_tx.send(true);
+                            writer_task.abort();
+                            service_task.abort();
                             eprintln!("node shutting down");
                             return Ok(());
                         }
@@ -363,8 +658,8 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
                                     continue;
                                 }
                                 if let Some(data) = line.strip_prefix("data:") {
+                                    let raw = data.trim().to_owned();
                                     if current_event == "call" {
-                                        let raw = data.trim().to_owned();
                                         let http = http.clone();
                                         let base = base.clone();
                                         let token = token.to_owned();
@@ -372,15 +667,20 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
                                         tokio::spawn(async move {
                                             handle_call(http, base, token, cwd, raw).await;
                                         });
+                                    } else if current_event == "frame" {
+                                        let _ = frame_in_tx.send(raw);
                                     }
                                 }
                             }
                         }
                     }
                 }
+                let _ = close_tx.send(true);
+                writer_task.abort();
                 eprintln!("disconnected from hub; reconnecting...");
             }
             Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+                service_task.abort();
                 let status = r.status();
                 let body = r.text().await.unwrap_or_default();
                 bail!("hub rejected node token ({status}): {body}");
@@ -396,7 +696,10 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
         let wait = BACKOFF_SECS[attempt.min(BACKOFF_SECS.len() - 1)];
         attempt += 1;
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::signal::ctrl_c() => {
+                service_task.abort();
+                return Ok(());
+            }
             _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
         }
     }

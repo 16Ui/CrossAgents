@@ -866,7 +866,30 @@ async fn create_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
-    if cfg!(windows)
+    let target_node = req
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(crate::builtin_node::LOCAL));
+    let remote_node = match target_node {
+        Some(node_key) => Some(
+            state
+                .remote_nodes
+                .resolve_online(node_key)
+                .await
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "远程节点 {node_key:?} 当前不在线或不存在；请先在该机器上运行 `crossagents node run`"
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let target_is_windows = remote_node
+        .as_ref()
+        .map(|n| n.os.eq_ignore_ascii_case("windows"))
+        .unwrap_or(cfg!(windows));
+    if target_is_windows
         && req.plugin == "cursor"
         && req.config.get("permission").and_then(|v| v.as_str()) == Some("guard")
     {
@@ -879,36 +902,63 @@ async fn create_agent(
         &crate::identity::denied_words(state.runtime.plugins()),
     )
     .await?;
-    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
-        && !state.runtime.plugins().contains(&req.plugin)
-    {
-        return Err(AppError::bad_request(format!(
-            "unknown plugin {:?} (available: {})",
-            req.plugin,
-            state.runtime.plugins().names().join(", ")
-        )));
-    }
-    // A CLI older than the description's minimum does not register an agent
-    // (docs/research/multica.md §2.9). A CLI that has not answered its version yet is
-    // started as before: unknown is not too old.
-    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
-        && let Some(driver) = state.runtime.plugins().get(&req.plugin)
-        && let Some(status) = driver.cli_status().await
-    {
-        let version = status
-            .located
-            .as_ref()
-            .and_then(|located| located.version.clone());
-        if let Some(config) = state.runtime.plugins().config(&req.plugin)
-            && config.too_old(version.as_deref())
+    if let Some(node) = &remote_node {
+        if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+            && !node.plugins.is_empty()
+            && !node
+                .plugins
+                .iter()
+                .any(|p| p.name == req.plugin && p.installed)
+        {
+            let available: Vec<&str> = node
+                .plugins
+                .iter()
+                .filter(|p| p.installed)
+                .map(|p| p.name.as_str())
+                .collect();
+            return Err(AppError::bad_request(format!(
+                "节点 {:?} 上未安装插件 {:?}（已安装：{}）",
+                node.name,
+                req.plugin,
+                if available.is_empty() {
+                    "无".to_owned()
+                } else {
+                    available.join(", ")
+                }
+            )));
+        }
+    } else {
+        if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+            && !state.runtime.plugins().contains(&req.plugin)
         {
             return Err(AppError::bad_request(format!(
-                "the {} CLI on this machine is too old (version {}, needs {} or newer): \
-                 upgrade it on the Agents page",
+                "unknown plugin {:?} (available: {})",
                 req.plugin,
-                version.as_deref().unwrap_or("unknown"),
-                config.min_version.as_deref().unwrap_or(""),
+                state.runtime.plugins().names().join(", ")
             )));
+        }
+        // A CLI older than the description's minimum does not register an agent
+        // (docs/research/multica.md §2.9). A CLI that has not answered its version yet is
+        // started as before: unknown is not too old.
+        if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+            && let Some(driver) = state.runtime.plugins().get(&req.plugin)
+            && let Some(status) = driver.cli_status().await
+        {
+            let version = status
+                .located
+                .as_ref()
+                .and_then(|located| located.version.clone());
+            if let Some(config) = state.runtime.plugins().config(&req.plugin)
+                && config.too_old(version.as_deref())
+            {
+                return Err(AppError::bad_request(format!(
+                    "the {} CLI on this machine is too old (version {}, needs {} or newer): \
+                     upgrade it on the Agents page",
+                    req.plugin,
+                    version.as_deref().unwrap_or("unknown"),
+                    config.min_version.as_deref().unwrap_or(""),
+                )));
+            }
         }
     }
     if let Some(driver) = &req.driver {
@@ -916,95 +966,135 @@ async fn create_agent(
     }
     let mut profile = req.profile.normalized()?;
     crate::avatars::assign_new(&state.home, state.store(), &mut profile).await?;
-    if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
+    if remote_node.is_none()
+        && let Some(account) = req.config.get("account").and_then(|v| v.as_str())
+    {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
     let id = AgentId::new();
     let mut config = req.config;
-    // No directory: a chat outside any project gets its own under the hub home (by id: the
-    // name can change).
-    let dir = if req.cwd.trim().is_empty() {
-        let dir = state.home.join("chats").join(id.to_string());
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::Internal,
-                format!("creating {}: {e}", dir.display()),
-            )
-        })?;
-        dir
-    } else if req.worktree == Some(true) {
-        let base = dunce::canonicalize(&req.cwd)
+    let cwd = if let Some(node) = &remote_node {
+        if req.worktree == Some(true) {
+            return Err(AppError::bad_request(
+                "远程节点暂不支持自动创建独立 Git worktree",
+            ));
+        }
+        let raw = req.cwd.trim();
+        if raw.is_empty() {
+            if let Some(chats) = node.chats_dir.as_deref().filter(|s| !s.is_empty()) {
+                let sep = if node.os.eq_ignore_ascii_case("windows") {
+                    '\\'
+                } else {
+                    '/'
+                };
+                PathBuf::from(format!("{}{sep}{id}", chats.trim_end_matches(['/', '\\'])))
+            } else if !node.default_cwd.trim().is_empty() {
+                PathBuf::from(node.default_cwd.trim())
+            } else {
+                PathBuf::from(".")
+            }
+        } else {
+            PathBuf::from(raw)
+        }
+    } else {
+        // No directory: a chat outside any project gets its own under the hub home (by id: the
+        // name can change).
+        let dir = if req.cwd.trim().is_empty() {
+            let dir = state.home.join("chats").join(id.to_string());
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                AppError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::Internal,
+                    format!("creating {}: {e}", dir.display()),
+                )
+            })?;
+            dir
+        } else if req.worktree == Some(true) {
+            let base = dunce::canonicalize(&req.cwd)
+                .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
+            if !base.is_dir() {
+                return Err(AppError::bad_request(format!(
+                    "cwd {:?} is not a directory",
+                    req.cwd
+                )));
+            }
+            let short = id.to_string().chars().take(8).collect::<String>();
+            let branch = format!("ca/chat-{short}");
+            let wt_root = state.home.join("worktrees");
+            let wt_dir = wt_root.join(format!("chat-{short}"));
+            let base_clone = base.clone();
+            let wt_clone = wt_dir.clone();
+            let branch_clone = branch.clone();
+            let repo_root = tokio::task::spawn_blocking(move || -> Result<String, String> {
+                let rev = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &base_clone.to_string_lossy(),
+                        "rev-parse",
+                        "--show-toplevel",
+                    ])
+                    .output()
+                    .map_err(|e| format!("running git: {e}"))?;
+                if !rev.status.success() {
+                    return Err("该目录不是 Git 仓库，无法创建独立 worktree".into());
+                }
+                let top = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
+                if let Some(parent) = wt_clone.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("creating worktree dir: {e}"))?;
+                }
+                let add = std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        &top,
+                        "worktree",
+                        "add",
+                        "-b",
+                        &branch_clone,
+                        &wt_clone.to_string_lossy(),
+                        "HEAD",
+                    ])
+                    .output()
+                    .map_err(|e| format!("running git worktree add: {e}"))?;
+                if !add.status.success() {
+                    let stderr = String::from_utf8_lossy(&add.stderr).trim().to_owned();
+                    return Err(format!("创建 Git worktree 失败：{stderr}"));
+                }
+                Ok(top)
+            })
+            .await
+            .map_err(|e| {
+                AppError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    ErrorCode::Internal,
+                    format!("worktree task: {e}"),
+                )
+            })?
+            .map_err(AppError::bad_request)?;
+            if let Some(obj) = config.as_object_mut() {
+                obj.insert("worktree_repo".into(), serde_json::Value::String(repo_root));
+                obj.insert("worktree_branch".into(), serde_json::Value::String(branch));
+            }
+            wt_dir
+        } else {
+            req.cwd.clone().into()
+        };
+        let cwd = dunce::canonicalize(&dir)
             .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
-        if !base.is_dir() {
+        if !cwd.is_dir() {
             return Err(AppError::bad_request(format!(
                 "cwd {:?} is not a directory",
                 req.cwd
             )));
         }
-        let short = id.to_string().chars().take(8).collect::<String>();
-        let branch = format!("ca/chat-{short}");
-        let wt_root = state.home.join("worktrees");
-        let wt_dir = wt_root.join(format!("chat-{short}"));
-        let base_clone = base.clone();
-        let wt_clone = wt_dir.clone();
-        let branch_clone = branch.clone();
-        let repo_root = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let rev = std::process::Command::new("git")
-                .args(["-C", &base_clone.to_string_lossy(), "rev-parse", "--show-toplevel"])
-                .output()
-                .map_err(|e| format!("running git: {e}"))?;
-            if !rev.status.success() {
-                return Err("该目录不是 Git 仓库，无法创建独立 worktree".into());
-            }
-            let top = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
-            if let Some(parent) = wt_clone.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("creating worktree dir: {e}"))?;
-            }
-            let add = std::process::Command::new("git")
-                .args([
-                    "-C",
-                    &top,
-                    "worktree",
-                    "add",
-                    "-b",
-                    &branch_clone,
-                    &wt_clone.to_string_lossy(),
-                    "HEAD",
-                ])
-                .output()
-                .map_err(|e| format!("running git worktree add: {e}"))?;
-            if !add.status.success() {
-                let stderr = String::from_utf8_lossy(&add.stderr).trim().to_owned();
-                return Err(format!("创建 Git worktree 失败：{stderr}"));
-            }
-            Ok(top)
-        })
-        .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, format!("worktree task: {e}")))?
-        .map_err(AppError::bad_request)?;
-        if let Some(obj) = config.as_object_mut() {
-            obj.insert("worktree_repo".into(), serde_json::Value::String(repo_root));
-            obj.insert("worktree_branch".into(), serde_json::Value::String(branch));
-        }
-        wt_dir
-    } else {
-        req.cwd.clone().into()
+        cwd
     };
-    let cwd = dunce::canonicalize(&dir)
-        .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
-    if !cwd.is_dir() {
-        return Err(AppError::bad_request(format!(
-            "cwd {:?} is not a directory",
-            req.cwd
-        )));
-    }
     let topic = req
         .topic
         .map(|t| t.trim().chars().take(120).collect::<String>())
         .filter(|t| !t.is_empty());
     let agent = Agent {
-        node: None,
+        node: remote_node.map(|n| n.id),
         id,
         name_source,
         topic,
@@ -1188,11 +1278,7 @@ async fn transcript(
     Path(key): Path<String>,
 ) -> ApiResult<Json<Transcript>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
-    let resolved = state
-        .runtime
-        .plugins()
-        .driver(&agent.plugin, agent.driver.as_deref())
-        .ok();
+    let driver_kind = state.runtime.driver_kind(&agent).await;
     // Clients follow the global stream from `last_seq`. Read the head first: every event
     // of this agent up to it is then folded in, and later ones arrive on the stream.
     let head = state.store().latest_event_seq().await?;
@@ -1222,7 +1308,7 @@ async fn transcript(
     let delivery = state.runtime.delivery_state(&agent).await;
     Ok(Json(Transcript {
         agent,
-        driver: resolved.as_ref().map(|r| r.driver.kind()),
+        driver: driver_kind,
         capabilities,
         delivery,
         turns: fold.turns,
@@ -1336,17 +1422,21 @@ async fn set_agent_cwd(
     if raw.is_empty() {
         return Err(AppError::bad_request("cwd must not be empty"));
     }
-    let cwd = dunce::canonicalize(raw)
-        .map_err(|e| AppError::bad_request(format!("cwd {raw:?}: {e}")))?;
-    if !cwd.is_dir() {
-        return Err(AppError::bad_request(format!("cwd {raw:?} is not a directory")));
-    }
-    Ok(Json(
-        state
-            .runtime
-            .place(&AgentKey::parse(&key), &cwd, false)
-            .await?,
-    ))
+    let parsed_key = AgentKey::parse(&key);
+    let existing = state.store().get_agent(&parsed_key).await?;
+    let cwd = if crate::runtime::is_remote_agent(&existing) {
+        PathBuf::from(raw)
+    } else {
+        let cwd = dunce::canonicalize(raw)
+            .map_err(|e| AppError::bad_request(format!("cwd {raw:?}: {e}")))?;
+        if !cwd.is_dir() {
+            return Err(AppError::bad_request(format!(
+                "cwd {raw:?} is not a directory"
+            )));
+        }
+        cwd
+    };
+    Ok(Json(state.runtime.place(&parsed_key, &cwd, false).await?))
 }
 
 /// What the session works on for a run now (docs/tasks/S1.md §3.3).
@@ -1922,13 +2012,31 @@ async fn delete_avatar(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
+#[derive(Deserialize, Default)]
+struct ListPluginsQuery {
+    #[serde(default)]
+    node: Option<String>,
+}
+
+async fn list_plugins(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListPluginsQuery>,
+) -> ApiResult<Json<ListPluginsResponse>> {
+    if let Some(node) = query
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(crate::builtin_node::LOCAL))
+    {
+        let plugins = state.remote_nodes.remote_plugins(node).await?;
+        return Ok(Json(ListPluginsResponse { plugins }));
+    }
     let registry = state.runtime.plugins();
     let mut plugins = Vec::new();
     for d in registry.defaults() {
         plugins.push(plugin_info(&state, d.as_ref()).await);
     }
-    Json(ListPluginsResponse { plugins })
+    Ok(Json(ListPluginsResponse { plugins }))
 }
 
 async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> PluginInfo {

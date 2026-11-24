@@ -693,6 +693,8 @@ dependencies = [
  "crossagents-core",
  "crossagents-drivers",
  "crossagents-hub",
+ "crossagents-node",
+ "crossagents-plugins",
  "dunce",
  "futures",
  "reqwest",

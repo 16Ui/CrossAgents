@@ -2434,13 +2434,21 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .home-path { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; }
 .home-path input { flex: 1; min-width: 0; }
 
-/* Machines: the sidebar's outer level (the centre today), and the os mark beside names. */
+/* Machines: the sidebar's outer level (centre + remote execution nodes), and the os mark beside names. */
 .machine-head { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .machine-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-2); padding: 3px 6px; }
-.machine-name .dot { margin-left: auto; }
-.machine-name .machine-via { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
-.machine-name .text { flex: 0 1 auto; }
+.machine-name .dot { margin-left: auto; flex-shrink: 0; }
+.machine-name .machine-via { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; opacity: 0.85; }
+.machine-name .text { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-add { opacity: 0; width: 22px; height: 22px; flex-shrink: 0; transition: opacity 120ms ease; }
+.machine-head:hover .machine-add, .machine-head:focus-within .machine-add { opacity: 1; }
 .machine-body { min-width: 0; padding-left: 10px; box-sizing: border-box; }
+.project-head button.group-name.project-name { text-align: left; justify-content: flex-start; padding: 0; background: none; border: 0; font-weight: inherit; }
+.machine-empty { margin: 2px 6px 6px; font-size: 11.5px; color: var(--muted); }
+.chip.node-chip { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; color: var(--text-2); }
+.chip.node-chip:hover { color: var(--text); border-color: var(--line-2); }
+.chip.node-chip.dim { opacity: 0.65; }
+.chip.node-chip .dot { width: 6px; height: 6px; }
 .os-icon { color: var(--muted); vertical-align: -2px; }
 .os-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .device-presence { display: inline-flex; align-items: center; gap: 5px; }

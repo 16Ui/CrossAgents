@@ -128,6 +128,9 @@ pub enum EventKind {
     DeviceCreated { device: crate::Device },
     #[serde(rename = "device.revoked")]
     DeviceRevoked { device: crate::Device },
+    /// A remote execution node connected, updated its registration, or disconnected.
+    #[serde(rename = "node.changed")]
+    NodeChanged { id: String },
     #[serde(rename = "hub.started")]
     HubStarted { version: String },
     #[serde(rename = "hub.stopping")]
@@ -836,6 +839,7 @@ impl EventKind {
         match self {
             Self::DeviceCreated { .. } => "device.created",
             Self::DeviceRevoked { .. } => "device.revoked",
+            Self::NodeChanged { .. } => "node.changed",
             Self::HubStarted { .. } => "hub.started",
             Self::HubStopping => "hub.stopping",
             Self::AgentCreated { .. } => "agent.created",
@@ -949,6 +953,7 @@ impl EventKind {
         match self {
             Self::DeviceCreated { .. }
             | Self::DeviceRevoked { .. }
+            | Self::NodeChanged { .. }
             | Self::HubStarted { .. }
             | Self::HubStopping
             | Self::WorkCreated { .. }

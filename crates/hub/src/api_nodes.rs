@@ -14,7 +14,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Extension, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -38,10 +38,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::{ApiResult, AppError, AppState, VERSION};
+use crate::remote_nodes::NodeStreamMsg;
 
 const FILE_OP_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 60;
 const MAX_EXEC_TIMEOUT_SECS: u64 = 120;
+const NODE_FRAME_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AuthedNode {
@@ -54,6 +56,10 @@ pub fn node_channel_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/node/stream", get(node_stream))
         .route("/v1/node/results/{call_id}", post(node_result))
+        .route(
+            "/v1/node/frames",
+            post(node_frames).layer(DefaultBodyLimit::max(NODE_FRAME_BODY_LIMIT)),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_node_token))
 }
 
@@ -143,6 +149,8 @@ struct NodeStreamQuery {
     #[serde(default)]
     cwd: String,
     #[serde(default)]
+    chats_dir: String,
+    #[serde(default)]
     version: String,
 }
 
@@ -151,6 +159,7 @@ async fn node_stream(
     Extension(authed): Extension<AuthedNode>,
     Query(q): Query<NodeStreamQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let chats_dir = q.chats_dir.trim();
     let info = RemoteNodeInfo {
         id: authed.device.id.clone(),
         name: authed.device.name.clone(),
@@ -175,6 +184,7 @@ async fn node_stream(
             q.shell.trim().to_owned()
         },
         default_cwd: q.cwd.trim().to_owned(),
+        chats_dir: (!chats_dir.is_empty()).then(|| chats_dir.to_owned()),
         version: if q.version.trim().is_empty() {
             "unknown".into()
         } else {
@@ -182,10 +192,12 @@ async fn node_stream(
         },
         connected_at: Utc::now(),
         local: false,
+        online: true,
+        plugins: Vec::new(),
     };
 
     let (mut rx, registration) = state.remote_nodes.register(info.clone()).await;
-    let (out_tx, out_rx) = mpsc::channel::<Result<SseEvent, Infallible>>(64);
+    let (out_tx, out_rx) = mpsc::channel::<Result<SseEvent, Infallible>>(256);
     let cancel = authed.cancel;
     let shutdown = state.shutdown.clone();
 
@@ -200,14 +212,21 @@ async fn node_stream(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = shutdown.cancelled() => break,
-                call = rx.recv() => {
-                    let Some(call) = call else { break };
-                    let Ok(data) = serde_json::to_string(&call) else { continue };
-                    if out_tx
-                        .send(Ok(SseEvent::default().event("call").data(data)))
-                        .await
-                        .is_err()
-                    {
+                _ = out_tx.closed() => break,
+                msg = rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    let sse = match msg {
+                        NodeStreamMsg::Call(call) => {
+                            let Ok(data) = serde_json::to_string(&call) else { continue };
+                            SseEvent::default().event("call").data(data)
+                        }
+                        NodeStreamMsg::Frame(line) => {
+                            SseEvent::default()
+                                .event("frame")
+                                .data(line.trim_end_matches(['\r', '\n']))
+                        }
+                    };
+                    if out_tx.send(Ok(sse)).await.is_err() {
                         break;
                     }
                 }
@@ -220,6 +239,18 @@ async fn node_stream(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+async fn node_frames(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<AuthedNode>,
+    body: String,
+) -> StatusCode {
+    if state.remote_nodes.feed_frames(&authed.device.id, &body).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
 }
 
 async fn node_result(
@@ -236,7 +267,15 @@ async fn node_result(
 
 async fn list_nodes(State(state): State<Arc<AppState>>) -> Json<ListNodesResponse> {
     Json(ListNodesResponse {
-        nodes: state.remote_nodes.list(state.started_at, VERSION).await,
+        nodes: state
+            .remote_nodes
+            .list(
+                state.store().as_ref(),
+                state.runtime.plugins(),
+                state.started_at,
+                VERSION,
+            )
+            .await,
     })
 }
 
@@ -426,7 +465,15 @@ pub async fn call_mcp_tool(
 ) -> Option<Result<Value, CoreError>> {
     match name {
         "node_list" => {
-            let nodes = state.remote_nodes.list(state.started_at, VERSION).await;
+            let nodes = state
+                .remote_nodes
+                .list(
+                    state.store().as_ref(),
+                    state.runtime.plugins(),
+                    state.started_at,
+                    VERSION,
+                )
+                .await;
             Some(Ok(json!({ "nodes": nodes })))
         }
         "node_exec" => Some(run_mcp_exec(state, input).await),

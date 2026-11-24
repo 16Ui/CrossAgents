@@ -325,7 +325,11 @@ impl Gate for HubGate {
             .authenticate(state.bus.store().as_ref(), token)
             .await
         {
-            Ok(Some((device, _))) if device.kind == DeviceKind::Client => Ok(()),
+            Ok(Some((device, _)))
+                if matches!(device.kind, DeviceKind::Client | DeviceKind::Node) =>
+            {
+                Ok(())
+            }
             Ok(Some(_)) => Err(Refusal::new(
                 "unauthorized",
                 "only client devices connect this way",

@@ -90,6 +90,7 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::DeviceCreated { device } | EventKind::DeviceRevoked { device } => {
             device.name.clone()
         }
+        EventKind::NodeChanged { id } => format!("node {id}"),
         EventKind::HubStarted { version } => format!("version {version}"),
         EventKind::HubStopping => String::new(),
         EventKind::AgentCreated { agent } => format!(

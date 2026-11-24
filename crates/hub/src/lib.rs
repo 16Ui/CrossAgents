@@ -233,8 +233,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         orchestrator: Arc::new(OnceLock::new()),
     });
     let cli_runs = Arc::new(cli_runs::CliRuns::load(paths.cli_runs()));
+    let remote_nodes = Arc::new(remote_nodes::RemoteNodes::with_bus(Arc::downgrade(&bus)));
     let runtime = Arc::new(
         Runtime::new(bus.clone(), plugins)
+            .with_remote_nodes(remote_nodes.clone())
             .with_cli_runs(cli_runs.clone())
             .with_setup(setup.clone())
             .with_home(paths.home.clone())
@@ -453,7 +455,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         self_check: Arc::new(self_check::SelfCheck::new()),
         terminals: terminals.clone(),
         link: Arc::new(link::LinkService::new(&paths.home)),
-        remote_nodes: Arc::new(remote_nodes::RemoteNodes::new()),
+        remote_nodes,
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     state.link.resume(&state, addr).await;

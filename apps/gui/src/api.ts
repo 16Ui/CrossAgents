@@ -392,7 +392,8 @@ export const api = {
   attachment: (key: string, id: string) => request<AttachmentContent>("GET", `/v1/agents/${enc(key)}/attachments/${enc(id)}`),
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
-  listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
+  listPlugins: (node?: string) =>
+    request<ListPluginsResponse>("GET", `/v1/plugins${node ? `?node=${enc(node)}` : ""}`),
   /** Looks for the CLIs again and asks their versions, in the background: 202 at once, and
    * `plugin.changed` as each probe ends. `name` narrows it to one plugin. */
   refreshPlugins: (name?: string) =>

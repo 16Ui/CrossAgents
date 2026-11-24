@@ -6,18 +6,31 @@
 //! - Executing remote commands & file operations (`exec`, `write`, `read`, `edit`, `list`, `search`)
 //! - Revoking the node device and verifying it disconnects cleanly.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use crossagents_api_types::{
-    CreateDeviceRequest, CreateDeviceResponse, DeviceKind, ListNodesResponse, NodeEditFileRequest,
-    NodeEditFileResponse, NodeExecRequest, NodeExecResponse, NodeListFilesRequest,
-    NodeListFilesResponse, NodeReadFileRequest, NodeReadFileResponse, NodeRpcCall, NodeRpcOp,
-    NodeRpcReply, NodeSearchFilesRequest, NodeSearchFilesResponse, NodeWriteFileRequest,
-    NodeWriteFileResponse,
+    Agent, CreateAgentRequest, CreateDeviceRequest, CreateDeviceResponse, DeviceKind,
+    ListNodesResponse, ListPluginsResponse, NodeEditFileRequest, NodeEditFileResponse,
+    NodeExecRequest, NodeExecResponse, NodeListFilesRequest, NodeListFilesResponse,
+    NodeReadFileRequest, NodeReadFileResponse, NodeRpcCall, NodeRpcOp, NodeRpcReply,
+    NodeSearchFilesRequest, NodeSearchFilesResponse, NodeWriteFileRequest, NodeWriteFileResponse,
+    SendMessageRequest, Transcript,
+};
+use crossagents_core::{
+    Capabilities, CoreError, Driver, DriverKind, DriverSession, OutputStream, Prompt,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use crossagents_hub::{HubConfig, Paths};
+use crossagents_node::{
+    DriverSource, NodeService, PluginSnapshot, RegisterInfo, Transport, TransportError,
+    TransportServer,
+};
 use futures::StreamExt;
 use serde_json::json;
+use tokio::sync::{Mutex, mpsc, watch};
 
 #[tokio::test]
 async fn remote_node_channel_exec_and_file_ops_end_to_end() {
@@ -360,4 +373,347 @@ fn handle_mock_node_op(root: &std::path::Path, op: NodeRpcOp) -> NodeRpcReply {
             error: None,
         },
     }
+}
+
+struct EchoDriver;
+struct EchoSession {
+    events: mpsc::UnboundedSender<SessionEvent>,
+    cwd: String,
+}
+
+#[async_trait]
+impl Driver for EchoDriver {
+    fn name(&self) -> &str {
+        "mac-codex"
+    }
+    fn kind(&self) -> DriverKind {
+        DriverKind::CodexNative
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            resume: true,
+            interrupt: true,
+            set_model: true,
+            ..Capabilities::default()
+        }
+    }
+    fn models(&self) -> Vec<String> {
+        vec!["gpt-5.3-codex".into()]
+    }
+    async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
+        let _ = spec.events.send(SessionEvent::from(SessionEventKind::Started {
+            session_id: "remote-sess-1".into(),
+        }));
+        Ok(Box::new(EchoSession {
+            events: spec.events,
+            cwd: spec.agent.cwd.to_string_lossy().into_owned(),
+        }))
+    }
+    async fn resume(
+        &self,
+        _session_id: &str,
+        spec: SessionSpec,
+    ) -> Result<Box<dyn DriverSession>, CoreError> {
+        self.open(spec).await
+    }
+}
+
+#[async_trait]
+impl DriverSession for EchoSession {
+    fn session_id(&self) -> &str {
+        "remote-sess-1"
+    }
+    async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
+        self.prompt_with(&Prompt::text(text)).await
+    }
+    async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        let _ = self.events.send(SessionEvent::from(SessionEventKind::Output {
+            stream: OutputStream::Text,
+            text: format!("mac-echo[{}]: {}", self.cwd, prompt.text),
+        }));
+        Ok(TurnOutcome {
+            stop_reason: StopReason::EndTurn,
+            turn_id: Some("t1".into()),
+        })
+    }
+    async fn interrupt(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn shutdown(&self) {}
+}
+
+struct TestDriverSource;
+impl DriverSource for TestDriverSource {
+    fn driver(&self, plugin: &str, _driver: Option<&str>) -> Result<Arc<dyn Driver>, CoreError> {
+        if plugin == "mac-codex" {
+            Ok(Arc::new(EchoDriver))
+        } else {
+            Err(CoreError::NotFound {
+                kind: "plugin",
+                id: plugin.to_owned(),
+            })
+        }
+    }
+}
+
+struct TestTransportServer(Mutex<mpsc::UnboundedReceiver<Arc<dyn Transport>>>);
+#[async_trait]
+impl TransportServer for TestTransportServer {
+    async fn accept(&self) -> Option<Arc<dyn Transport>> {
+        self.0.lock().await.recv().await
+    }
+}
+
+struct TestClientTransport {
+    out_tx: mpsc::UnboundedSender<String>,
+    in_rx: Mutex<mpsc::UnboundedReceiver<String>>,
+    closed: watch::Receiver<bool>,
+}
+#[async_trait]
+impl Transport for TestClientTransport {
+    async fn send_line(&self, line: String) -> Result<(), TransportError> {
+        self.out_tx
+            .send(line)
+            .map_err(|_| TransportError("closed".into()))
+    }
+    async fn recv_line(&self) -> Option<String> {
+        let mut rx = self.in_rx.lock().await;
+        let mut closed = self.closed.clone();
+        tokio::select! {
+            line = rx.recv() => line,
+            _ = closed.wait_for(|c| *c) => None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn remote_node_executes_agent_session_and_reports_plugins() {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = HubConfig::new(Paths::new(home.path().to_path_buf()), 0);
+    let hub = crossagents_hub::start(cfg).await.unwrap();
+    let base = format!("http://{}", hub.addr);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    // 1. Issue a node token for "mac-studio".
+    let created: CreateDeviceResponse = http
+        .post(format!("{base}/v1/devices"))
+        .bearer_auth(&hub.token)
+        .json(&CreateDeviceRequest {
+            name: "mac-studio".into(),
+            kind: Some(DeviceKind::Node),
+            level: None,
+            os: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let node_token = created.token;
+    let node_id = created.device.id;
+
+    // 2. Start a real NodeService reporting `mac-codex` and bridge it onto SSE + POST /v1/node/frames.
+    let mut reg = RegisterInfo::local();
+    reg.os = "macos".into();
+    reg.hostname = "Mac-Studio.local".into();
+    reg.plugins = vec![PluginSnapshot {
+        name: "mac-codex".into(),
+        installed: true,
+        version: Some("0.170.0".into()),
+        driver: Some("codex-native".into()),
+        models: vec!["gpt-5.3-codex".into()],
+        efforts: vec!["medium".into(), "high".into()],
+        efforts_by_model: BTreeMap::new(),
+        capabilities: Some(EchoDriver.capabilities()),
+    }];
+
+    let (accept_tx, accept_rx) = mpsc::unbounded_channel();
+    let service = NodeService::new(Arc::new(TestDriverSource)).with_register(reg);
+    let service_task = tokio::spawn(service.run(Arc::new(TestTransportServer(Mutex::new(accept_rx)))));
+
+    let resp = http
+        .get(format!(
+            "{base}/v1/node/stream?os=macos&arch=aarch64&hostname=Mac-Studio.local&shell=zsh&cwd=/Users/link/Dev&chats_dir=/Users/link/.crossagents/chats&version=0.3.6"
+        ))
+        .bearer_auth(&node_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<String>();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (close_tx, close_rx) = watch::channel(false);
+    accept_tx
+        .send(Arc::new(TestClientTransport {
+            out_tx,
+            in_rx: Mutex::new(in_rx),
+            closed: close_rx.clone(),
+        }))
+        .unwrap();
+
+    let writer_task = {
+        let http = http.clone();
+        let base = base.clone();
+        let token = node_token.clone();
+        tokio::spawn(async move {
+            while let Some(line) = out_rx.recv().await {
+                let _ = http
+                    .post(format!("{base}/v1/node/frames"))
+                    .bearer_auth(&token)
+                    .body(line)
+                    .send()
+                    .await;
+            }
+        })
+    };
+    let reader_task = tokio::spawn(async move {
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        let mut ev = String::new();
+        while let Some(Ok(bytes)) = stream.next().await {
+            buf.push_str(&String::from_utf8_lossy(&bytes));
+            while let Some(pos) = buf.find('\n') {
+                let line = buf[..pos].trim_end_matches('\r').to_owned();
+                buf.drain(..=pos);
+                if line.is_empty() {
+                    ev.clear();
+                    continue;
+                }
+                if let Some(e) = line.strip_prefix("event:") {
+                    ev = e.trim().to_owned();
+                } else if let Some(d) = line.strip_prefix("data:")
+                    && ev == "frame"
+                {
+                    let _ = in_tx.send(d.trim().to_owned());
+                }
+            }
+        }
+    });
+
+    // 3. Wait until GET /v1/plugins?node=mac-studio returns `mac-codex`.
+    let mut plugins = Vec::new();
+    for _ in 0..40 {
+        let resp: ListPluginsResponse = http
+            .get(format!("{base}/v1/plugins?node=mac-studio"))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if !resp.plugins.is_empty() {
+            plugins = resp.plugins;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(plugins.len(), 1);
+    assert_eq!(plugins[0].name, "mac-codex");
+    assert_eq!(plugins[0].models, vec!["gpt-5.3-codex".to_owned()]);
+
+    // 4. Create an agent on `mac-studio` with a macOS path that doesn't exist on Windows!
+    let agent: Agent = http
+        .post(format!("{base}/v1/agents"))
+        .bearer_auth(&hub.token)
+        .json(&CreateAgentRequest {
+            name: Some("MacCodex".into()),
+            topic: Some("Remote test".into()),
+            plugin: "mac-codex".into(),
+            driver: None,
+            model: Some("gpt-5.3-codex".into()),
+            role: None,
+            cwd: "/Users/link/Dev/MyApp".into(),
+            config: serde_json::json!({}),
+            profile: Default::default(),
+            worktree: None,
+            node: Some("mac-studio".into()),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent.node.as_deref(), Some(node_id.as_str()));
+    assert_eq!(agent.cwd.to_string_lossy(), "/Users/link/Dev/MyApp");
+
+    // 5. Send a message and confirm the remote node runs it and the transcript records the reply!
+    http.post(format!("{base}/v1/agents/{}/messages", agent.id))
+        .bearer_auth(&hub.token)
+        .json(&SendMessageRequest {
+            text: "hello from windows".into(),
+            now: None,
+            steer: None,
+            attachments: None,
+            client_message_id: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let mut replied = false;
+    for _ in 0..60 {
+        let tr: Transcript = http
+            .get(format!("{base}/v1/agents/{}/transcript", agent.id))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&tr).unwrap();
+        if text.contains("mac-echo[/Users/link/Dev/MyApp]: hello from windows") {
+            replied = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(replied, "remote node reply never appeared in hub transcript");
+
+    // 6. Disconnect the node and confirm it still shows in GET /v1/nodes as offline (`online: false`).
+    let _ = close_tx.send(true);
+    reader_task.abort();
+    writer_task.abort();
+    service_task.abort();
+
+    let mut offline_seen = false;
+    for _ in 0..40 {
+        let list: ListNodesResponse = http
+            .get(format!("{base}/v1/nodes"))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if list
+            .nodes
+            .iter()
+            .any(|n| n.id == node_id && !n.online && !n.local)
+        {
+            offline_seen = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(offline_seen, "disconnected node should still be listed as offline");
+
+    hub.shutdown();
+    let _ = hub.wait().await;
 }

@@ -1,6 +1,6 @@
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
-import { lastWork, projectMembers, standaloneSessions, wsKey, type ProjectMember } from "./projectView.ts";
+import { homeOf, isChat, lastWork, projectMembers, standaloneSessions, wsKey, wsName, type ProjectMember } from "./projectView.ts";
 
 /** A sidebar row: the member, and when the work its summary names last moved. */
 export type SidebarMember = ProjectMember & { lastAt: string | null };
@@ -142,3 +142,66 @@ export function machineGroups(groups: readonly SidebarGroup[], machineKey: (g: S
 
 /** The fold key of a machine row; shares the groups' remembered set, so it cannot clash with a path. */
 export const machineFoldKey = (machine: string) => `machine:${machine}`;
+
+/** Which sidebar machine an agent belongs to: centre when unset or `"local"`, else its node id. */
+export function agentMachine(agent: { node?: string | null }): string {
+  const n = agent.node?.trim();
+  return !n || n.toLowerCase() === "local" || n === CENTRE_MACHINE ? CENTRE_MACHINE : n;
+}
+
+/**
+ * Builds the sidebar tree partitioned by machine: centre first, then remote nodes (in order),
+ * then any historical node ids still referenced by agents. Each machine owns its own project
+ * groups and its own standalone chats group so identical paths on different OSes never collide.
+ */
+export function buildMachineGroups(
+  agents: Agent[],
+  runs: RunDetail[],
+  remoteNodeIds: readonly string[],
+  pins: ReadonlySet<string>,
+  order: readonly string[] = [],
+  sessionOrder: Readonly<Record<string, readonly string[]>> = {},
+): SidebarMachine[] {
+  const keys: string[] = [CENTRE_MACHINE];
+  const seen = new Set<string>(keys);
+  for (const id of remoteNodeIds) {
+    const trimmed = id.trim();
+    if (!trimmed || trimmed.toLowerCase() === "local" || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    keys.push(trimmed);
+  }
+  for (const a of agents) {
+    const k = agentMachine(a);
+    if (!seen.has(k)) {
+      seen.add(k);
+      keys.push(k);
+    }
+  }
+
+  return keys.map((key) => {
+    const machineAgents = agents.filter((a) => agentMachine(a) === key);
+    const machineRuns = key === CENTRE_MACHINE ? runs : [];
+    const projMap = new Map<string, { key: string; name: string }>();
+    for (const d of machineRuns) {
+      const k = wsKey(d.run.repo);
+      if (k && !projMap.has(k)) projMap.set(k, { key: k, name: wsName(d.run.repo) });
+    }
+    for (const a of machineAgents) {
+      if (isChat(a)) continue;
+      const h = homeOf(a);
+      if (!h) continue;
+      const k = wsKey(h);
+      if (!projMap.has(k)) projMap.set(k, { key: k, name: wsName(h) });
+    }
+    const groups = sidebarGroups(machineAgents, machineRuns, [...projMap.values()], pins, order, sessionOrder);
+    return { key, groups };
+  });
+}
+
+/** Filters machine groups by search query, hiding machines with no matches while searching. */
+export function searchMachineGroups(machines: readonly SidebarMachine[], query: string): SidebarMachine[] {
+  if (!query.trim()) return [...machines];
+  return machines
+    .map((m) => ({ ...m, groups: searchGroups(m.groups, query) }))
+    .filter((m) => m.groups.length > 0);
+}

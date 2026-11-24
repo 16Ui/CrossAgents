@@ -203,6 +203,7 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                     config: serde_json::json!({ "account": account.id }),
                     profile: Default::default(),
                     worktree: None,
+                    node: None,
                 },
             )
             .await?;

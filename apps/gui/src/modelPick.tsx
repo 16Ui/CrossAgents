@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "./api";
 import { VendorMark } from "./components";
-import { usePlugins } from "./hub";
+import { useNodePlugins } from "./nodes";
 import { favoriteKey, toggleFavorite, useModelFavorites } from "./lib/modelFavorites";
 import { accountOf, effortLabel, effortLevels, effortOf, prettyModel } from "./lib/models";
 import { modelDisplay } from "./lib/modelDisplay";
@@ -16,7 +16,7 @@ import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
 
 export function ModelEffortPicks({ agent }: { agent: Agent }) {
-  const plugins = usePlugins();
+  const plugins = useNodePlugins(agent.node);
   const [error, setError] = useState<string>();
   const [openSignal, setOpenSignal] = useState(0);
   const favorites = useModelFavorites();

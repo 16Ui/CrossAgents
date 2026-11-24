@@ -209,6 +209,10 @@ pub struct CreateAgentRequest {
     #[serde(default)]
     #[ts(optional)]
     pub worktree: Option<bool>,
+    /// Target execution node id, name, or hostname (`None` or `"local"` runs on the hub).
+    #[serde(default)]
+    #[ts(optional)]
+    pub node: Option<String>,
 }
 
 /// How many pictures the avatar gallery holds, and how many one upload may add.
@@ -3473,6 +3477,30 @@ pub struct BrowserResultRequest {
 // ---------------------------------------------------------------------------------------
 // Remote nodes (cross-platform remote execution & file operations)
 
+fn default_true() -> bool {
+    true
+}
+
+/// Summary of one CLI plugin reported by a connected node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodePluginInfo {
+    pub name: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub driver: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(default)]
+    pub efforts_by_model: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 /// One machine connected to the hub (either the built-in `"local"` machine or a remote
 /// `crossagents node run` agent).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -3489,10 +3517,20 @@ pub struct RemoteNodeInfo {
     pub shell: String,
     /// Default working directory on this node.
     pub default_cwd: String,
+    /// Directory where standalone chats live on this node, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chats_dir: Option<String>,
     pub version: String,
     pub connected_at: DateTime<Utc>,
     /// True for the hub's own machine.
     pub local: bool,
+    /// Whether the node currently has an active connection to the hub.
+    #[serde(default = "default_true")]
+    pub online: bool,
+    /// Plugins reported by this node.
+    #[serde(default)]
+    pub plugins: Vec<NodePluginInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
