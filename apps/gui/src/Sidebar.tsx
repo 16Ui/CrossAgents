@@ -741,58 +741,45 @@ export function Sidebar({ route }: { route: string[] }) {
                 ))}
               </section>
             )}
-            {(() => {
-              const machines = machineGroups(shown);
-              const singleLocal = machines.length === 1 && machines[0].key === CENTRE_MACHINE;
-              return machines.map((machine) => {
-                const body = (
-                  <>
-                    {machine.groups.map((g) => {
-                      const groupWorks = workList.filter((w) => workProject(w) === g.key);
-                      const workLeads = new Set(groupWorks.map((w) => w.lead));
-                      const sessionMembers = searching
-                        ? g.members
-                        : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
-                      return (
-                        <Group
-                          key={g.key}
-                          group={g}
-                          searching={searching}
-                          active={route[0] === "w" && route[1] === g.key}
-                          onMove={
-                            g.key === CHATS
-                              ? undefined
-                              : () => {
-                                  const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
-                                  const i = keys.indexOf(g.key);
-                                  if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
-                                  projectOrder.replace(keys);
-                                }
-                          }
-                        >
-                          <Capped
-                            items={sessionMembers}
-                            keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
-                            searching={searching}
-                          >
-                            {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
-                          </Capped>
-                          {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
-                        </Group>
-                      );
-                    })}
-                    {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
-                  </>
-                );
-                return singleLocal ? (
-                  <div key={machine.key}>{body}</div>
-                ) : (
-                  <Machine key={machine.key} machine={machine} searching={searching}>
-                    {body}
-                  </Machine>
-                );
-              });
-            })()}
+            {machineGroups(shown).map((machine) => (
+              <Machine key={machine.key} machine={machine} searching={searching}>
+                {machine.groups.map((g) => {
+                  const groupWorks = workList.filter((w) => workProject(w) === g.key);
+                  const workLeads = new Set(groupWorks.map((w) => w.lead));
+                  const sessionMembers = searching
+                    ? g.members
+                    : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
+                  return (
+                    <Group
+                      key={g.key}
+                      group={g}
+                      searching={searching}
+                      active={route[0] === "w" && route[1] === g.key}
+                      onMove={
+                        g.key === CHATS
+                          ? undefined
+                          : () => {
+                              const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
+                              const i = keys.indexOf(g.key);
+                              if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
+                              projectOrder.replace(keys);
+                            }
+                      }
+                    >
+                      <Capped
+                        items={sessionMembers}
+                        keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
+                        searching={searching}
+                      >
+                        {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
+                      </Capped>
+                      {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
+                    </Group>
+                  );
+                })}
+                {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
+              </Machine>
+            ))}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
