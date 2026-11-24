@@ -205,6 +205,10 @@ pub struct CreateAgentRequest {
     /// Display name, title, avatar and persona; all optional.
     #[serde(default)]
     pub profile: crossagents_core::AgentProfile,
+    /// When true and `cwd` is a git repository, create an isolated git worktree for this session.
+    #[serde(default)]
+    #[ts(optional)]
+    pub worktree: Option<bool>,
 }
 
 /// How many pictures the avatar gallery holds, and how many one upload may add.
@@ -1618,11 +1622,42 @@ pub struct FileSearchResponse {
     pub truncated: bool,
 }
 
+/// Visibility and ownership tier of a hub terminal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TerminalTier {
+    /// Interactive shell opened by the user in the GUI (default).
+    #[default]
+    User,
+    /// Managed terminal owned by an agent or run for long-running commands.
+    Agent,
+    /// Hidden infrastructure/driver host terminal.
+    System,
+}
+
+/// The user's own chat profile stored on the hub (`GET /v1/profile`, `POST /v1/profile`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UserProfile {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub avatar: Option<String>,
+}
+
 /// A terminal on the hub's machine (`GET /v1/terminals`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct TerminalInfo {
     pub id: String,
+    /// Visibility and ownership tier (`user`, `agent`, `system`).
+    #[serde(default)]
+    pub tier: TerminalTier,
+    /// Agent id that owns this terminal, for `agent` / `system` tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner_agent: Option<String>,
     /// What the client grouped it under when creating it; the hub only keeps this.
     pub project: Option<String>,
     pub cwd: String,
@@ -1653,6 +1688,12 @@ pub struct CreateTerminalRequest {
     pub cwd: String,
     #[serde(default)]
     pub project: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub tier: Option<TerminalTier>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub owner_agent: Option<String>,
     pub cols: u16,
     pub rows: u16,
     /// Reserved for cross-node terminals: anything but none is refused for now.
@@ -2581,6 +2622,72 @@ pub struct ImportAccountRequest {
     pub confirm: bool,
 }
 
+/// An external CLI session found on this machine that can be imported into CrossAgents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportableSession {
+    pub plugin: String,
+    pub session_id: String,
+    pub cwd: String,
+    pub title: String,
+    pub updated_at: DateTime<Utc>,
+    pub turns: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub existing_agent_id: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub existing_agent_name: Option<String>,
+}
+
+/// `GET /v1/sessions/import`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportSessionsResponse {
+    pub candidates: Vec<ImportableSession>,
+}
+
+/// `POST /v1/agents/{key}/cwd`: moves a session to another working directory (rehoming a
+/// standalone chat into a project, or moving between projects).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetCwdRequest {
+    pub cwd: String,
+}
+
+/// `POST /v1/sessions/import`: imports an external CLI session as a CrossAgents agent so the
+/// conversation can continue here via the driver's `resume` capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportSessionRequest {
+    pub plugin: String,
+    pub session_id: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub account: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub permission: Option<String>,
+}
+
 /// One account with its live status and models. `GET /v1/quota` lists every account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -3373,6 +3480,198 @@ pub struct BrowserResultRequest {
     pub output: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------------------
+// Remote nodes (cross-platform remote execution & file operations)
+
+/// One machine connected to the hub (either the built-in `"local"` machine or a remote
+/// `crossagents node run` agent).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RemoteNodeInfo {
+    pub id: String,
+    pub name: String,
+    /// `windows`, `macos`, `linux`, etc.
+    pub os: String,
+    /// `x86_64`, `aarch64`, etc.
+    pub arch: String,
+    pub hostname: String,
+    /// Default command shell on this node (`powershell`, `zsh`, `bash`, `sh`).
+    pub shell: String,
+    /// Default working directory on this node.
+    pub default_cwd: String,
+    pub version: String,
+    pub connected_at: DateTime<Utc>,
+    /// True for the hub's own machine.
+    pub local: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListNodesResponse {
+    pub nodes: Vec<RemoteNodeInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeExecRequest {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cwd: Option<String>,
+    /// Maximum seconds to wait before terminating the command (default 60, max 120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeExecResponse {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeReadFileRequest {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub start_line: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub end_line: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeReadFileResponse {
+    pub path: String,
+    pub content: String,
+    pub total_lines: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeWriteFileRequest {
+    pub path: String,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub create_dirs: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeWriteFileResponse {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeEditFileRequest {
+    pub path: String,
+    pub target: String,
+    pub replacement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub replace_all: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeEditFileResponse {
+    pub path: String,
+    pub replacements: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeListFilesRequest {
+    #[serde(default)]
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_entries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeFileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeListFilesResponse {
+    pub path: String,
+    pub entries: Vec<NodeFileEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeSearchFilesRequest {
+    #[serde(default)]
+    pub path: String,
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub max_matches: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeSearchMatch {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeSearchFilesResponse {
+    pub path: String,
+    pub matches: Vec<NodeSearchMatch>,
+    pub truncated: bool,
+}
+
+/// Wire frame pushed from the hub to a connected remote node over `GET /v1/node/stream`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRpcCall {
+    pub call_id: String,
+    pub op: NodeRpcOp,
+}
+
+/// Remote operation executed by a connected node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NodeRpcOp {
+    Exec(NodeExecRequest),
+    ReadFile(NodeReadFileRequest),
+    WriteFile(NodeWriteFileRequest),
+    EditFile(NodeEditFileRequest),
+    ListFiles(NodeListFilesRequest),
+    SearchFiles(NodeSearchFilesRequest),
+}
+
+/// Result posted by a remote node to `POST /v1/node/results/{call_id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeRpcReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 

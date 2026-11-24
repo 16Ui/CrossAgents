@@ -11,7 +11,7 @@ import { TerminalHydrate, TerminalProblem, TerminalScope, toggleTerminal, useTab
 import { BrowserHost } from "./browser";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
-import { Sidebar } from "./Sidebar";
+import { Sidebar, SidebarRail } from "./Sidebar";
 import { useSystemNotices } from "./notify";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
@@ -248,9 +248,12 @@ export function App() {
         window.location.hash = "/settings";
       } else if (mod && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        const search = document.querySelector<HTMLInputElement>(".sidebar .search input");
-        search?.focus();
-        search?.select();
+        if (!sidebar.docked) toggleSidebar();
+        requestAnimationFrame(() => {
+          const search = document.querySelector<HTMLInputElement>(".sidebar .search input");
+          search?.focus();
+          search?.select();
+        });
       } else if (e.key === "F11") {
         e.preventDefault();
         getBridge()?.command?.("fullscreen");
@@ -340,15 +343,47 @@ export function App() {
       className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"} ${widths.sidebar < 215 ? "sidebar-tight" : ""}`}
       style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px`, "--bottom-height": `${widths.bottom}px` } as CSSProperties}
     >
-      {sidebar.docked && <Sidebar route={route} />}
-      {sidebar.docked && (
+      {sidebar.docked ? <Sidebar route={route} /> : <SidebarRail route={route} onExpand={toggleSidebar} />}
+      {sidebar.docked ? (
         <div
           className="col-edge sidebar-edge"
           role="separator"
           aria-orientation="vertical"
-title="拖动调整宽度，双击还原，拖到边上收起"
+          title="拖动调整宽度，双击还原，拖到边上收起"
           onPointerDown={(e) => dragEdge(e, widths.sidebar, "right", setSidebarWidth, { below: COLLAPSE.sidebar, close: toggleSidebar, hint: "collapse-sidebar" })}
           onDoubleClick={() => setSidebarWidth(SIDEBAR.initial)}
+        />
+      ) : (
+        <div
+          className="col-edge sidebar-rail-edge"
+          role="separator"
+          aria-orientation="vertical"
+          title="向右拖动或双击展开侧栏"
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            const startX = e.clientX;
+            let expanded = false;
+            document.body.classList.add("col-resizing");
+            const onMove = (ev: PointerEvent) => {
+              const dx = ev.clientX - startX;
+              if (!expanded && dx >= 48) {
+                expanded = true;
+                toggleSidebar();
+              }
+              if (expanded) setSidebarWidth(44 + dx);
+            };
+            const onUp = () => {
+              document.body.classList.remove("col-resizing");
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", onUp);
+              window.removeEventListener("pointercancel", onUp);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp);
+            window.addEventListener("pointercancel", onUp);
+          }}
+          onDoubleClick={toggleSidebar}
         />
       )}
       {sidebar.floating && (

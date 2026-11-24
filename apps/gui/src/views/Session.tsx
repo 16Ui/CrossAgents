@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { writeClipboard } from "../lib/clipboard";
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { shortcut, shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
@@ -26,6 +27,7 @@ import { errorHint } from "../lib/errors";
 import { isModerationError } from "../lib/moderation";
 import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { effortLabel, prettyModel } from "../lib/models";
+import { useChatProfile } from "../lib/chatProfile";
 import { clock, range } from "../lib/time";
 import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
@@ -58,7 +60,7 @@ import { ContextUsageButton, useCompact } from "../contextusage";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { Composer, QueuePanel } from "./SessionComposer";
-import { AgentText, Bubble, fromPerson } from "./SessionMessage";
+import { AgentText, Bubble, CiteContext, fromPerson, MessageAppearance, PersonMessage } from "./SessionMessage";
 import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
 
@@ -294,7 +296,19 @@ export function SessionView({
     ...(isChat(agent) ? [] : everyone.filter((a) => a.id !== agent.id && !a.archived_at && !recruits.includes(a) && wsKey(homeOf(a)) === wsKey(homeOf(agent)))),
   ];
 
+  const citeText = (raw: string) => {
+    const quoted = raw
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => `> ${l}`)
+      .join("\n");
+    if (!quoted) return;
+    setDraft((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${quoted}\n\n` : `${quoted}\n\n`));
+    document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+  };
+
   return (
+    <CiteContext.Provider value={agent.archived_at ? undefined : citeText}>
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
         {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose ?? onClosePane} />}
@@ -302,7 +316,7 @@ export function SessionView({
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
         <LiveInfo.Provider value={live}>
-        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
+        <Conversation key={agent.id} agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -358,6 +372,7 @@ export function SessionView({
         </div>
       </section>
     </SideSlot.Provider>
+    </CiteContext.Provider>
   );
 }
 
@@ -472,7 +487,7 @@ function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) 
   async function copy() {
     if (!r?.command) return;
     try {
-      await navigator.clipboard.writeText(r.command);
+      await writeClipboard(r.command);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -817,8 +832,10 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
     : "发送中…";
   return (
     <div className="turn sending">
-      {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
-      {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
+      <PersonMessage>
+        {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
+        {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
+      </PersonMessage>
       {message.error ? (
         <div className="turn-note danger row" style={{ alignSelf: "flex-end", gap: 8 }} title={message.errorRaw ?? message.error}>
           <span>{message.outcomeUnknown ? message.error : `没发出去：${message.error}`}</span>
@@ -883,6 +900,10 @@ const LiveInfo = createContext<LiveTurn | undefined>(undefined);
 
 const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
 
+const HISTORY_PAGE = 50;
+const findTurn = (element: HTMLElement, id: string) =>
+  element.querySelector<HTMLElement>(`[data-turn="${CSS.escape(id)}"]`);
+
 function Conversation({
   agent,
   turns,
@@ -911,19 +932,65 @@ function Conversation({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const [firstTurn, setFirstTurn] = useState<string>();
+  const pendingScroll = useRef<{ id: string; offset?: number }>(null);
+  const remembered = firstTurn ? turns.findIndex((turn) => turn.message_id === firstTurn) : -1;
+  const first = remembered >= 0 ? remembered : Math.max(0, turns.length - HISTORY_PAGE);
+  const visible = first ? turns.slice(first) : turns;
+  const follow = useMemo(() => ({ el: ref, stick }), []);
+  const chatProfile = useChatProfile();
   // The run page shows its lead's conversation inside the run's scope: paths there are the run's.
   const outerScope = useFileScope();
+  const fileScope = useMemo(() => outerScope ?? { kind: "agent" as const, agent: agent.id }, [outerScope, agent.id]);
   // One mark per message from a person; recomputed only when those change.
   const asked = turns.filter(fromPerson);
   const key = asked.map((t) => t.message_id).join(",");
   const entries = useMemo<MapEntry[]>(() => asked.map((t) => ({ id: t.message_id, text: t.input })), [key]);
+  const notes = [...switches, ...handoffs, ...works, ...(rounds ?? []).map((round) => ({ ...round, round_id: round.id }))];
+
+  function loadEarlier() {
+    const el = ref.current;
+    if (!el || first === 0 || pendingScroll.current) return;
+    const id = turns[first].message_id;
+    const anchor = findTurn(el, id);
+    if (!anchor) return;
+    stick.current = false;
+    pendingScroll.current = { id, offset: anchor.getBoundingClientRect().top - el.getBoundingClientRect().top };
+    setFirstTurn(turns[Math.max(0, first - HISTORY_PAGE)].message_id);
+  }
+
+  function jumpTo(id: string) {
+    const el = ref.current;
+    if (!el) return;
+    stick.current = false;
+    const target = findTurn(el, id);
+    if (target) {
+      target.scrollIntoView({ block: "start", behavior: "smooth" });
+      return;
+    }
+    const index = turns.findIndex((turn) => turn.message_id === id);
+    if (index < 0) return;
+    pendingScroll.current = { id };
+    setFirstTurn(turns[Math.max(0, index - 10)].message_id);
+  }
 
   useLayoutEffect(() => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    const pending = pendingScroll.current;
+    if (pending) {
+      pendingScroll.current = null;
+      const target = findTurn(el, pending.id);
+      if (!target) return;
+      if (pending.offset === undefined) target.scrollIntoView({ block: "start" });
+      else el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - pending.offset;
+    } else if (stick.current) {
+      el.scrollTop = el.scrollHeight;
+    }
   });
 
   return (
+    <MessageAppearance.Provider value={chatProfile}>
     <div className="convo-wrap">
       <div
         className="convo"
@@ -931,10 +998,16 @@ function Conversation({
         onScroll={(e) => {
           const el = e.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+          if (!stick.current && el.scrollTop < 24) loadEarlier();
         }}
       >
         <div className="convo-inner">
           {top}
+          {first > 0 && (
+            <button type="button" className="ghost small conversation-earlier" onClick={loadEarlier}>
+              加载更早的消息（还有 {first} 回合）
+            </button>
+          )}
           {turns.length === 0 && !top && (
             <div className="empty">
               <h1>和 {displayName(agent)} 开始对话</h1>
@@ -944,11 +1017,11 @@ function Conversation({
               </p>
             </div>
           )}
-          <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
+          <FileScopeProvider value={fileScope}>
           <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
-          <Follow.Provider value={{ el: ref, stick }}>
-            {byTime(turns, [...switches, ...handoffs, ...works, ...(rounds ?? []).map((r) => ({ ...r, round_id: r.id }))]).map((x) =>
+          <Follow.Provider value={follow}>
+            {byTime(visible, first ? notes.filter((note) => note.at >= visible[0].sent_at) : notes).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
               ) : "round_id" in x ? (
@@ -969,8 +1042,9 @@ function Conversation({
         </div>
       </div>
       <ScrollThumb scroller={ref} />
-      <TurnMap scroller={ref} entries={entries} />
+      <TurnMap scroller={ref} entries={entries} onJump={jumpTo} />
     </div>
+    </MessageAppearance.Provider>
   );
 }
 
@@ -1052,8 +1126,9 @@ function SwitchNote({ change }: { change: ModelSwitch }) {
   );
 }
 
-function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
+const Turn = memo(function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
+  const { showAvatars } = useContext(MessageAppearance);
   // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
   // command and output out, so the same lines are not written twice (see ShownLive).
   const [shownLive, setShownLive] = useState<string | null>(null);
@@ -1064,16 +1139,18 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
         <>
-          {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
-          <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          <PersonMessage>
+            {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
+            <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          </PersonMessage>
           {!turn.started_at && <WaitingTurn turn={turn} agent={agent} />}
         </>
       ) : (
-        <PeerMessage turn={turn} agents={agents} tree={tree} />
+        <PeerMessage turn={turn} agents={agents} tree={tree} showAvatars={showAvatars} />
       )}
       {turn.items.length > 0 && (
         <div className="author">
-          <Avatar agent={agent} size={22} />
+          {showAvatars && <Avatar agent={agent} size={22} />}
           <span className="who">{displayName(agent)}</span>
           <span className="what">{agentTitle(agent)}</span>
         </div>
@@ -1094,7 +1171,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
   );
-}
+});
 
 function Item({ item }: { item: TranscriptItem }) {
   const cards = useToolCards();
@@ -1409,7 +1486,7 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
       )}
       {d?.result != null && (
         <>
-          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void navigator.clipboard.writeText(d.result!)}>复制原始结果</button></div>
+          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void writeClipboard(d.result!)}>复制原始结果</button></div>
           <ToolImages images={resultImages} />
           {result && result !== error && <pre className="out">{result}</pre>}
         </>
@@ -1544,7 +1621,7 @@ function TurnChanges({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
   const view = (file?: string) => openTool("changes", { agent: agent.name, turn: turn.message_id, file });
   const copy = async (path: string) => {
     try {
-      await navigator.clipboard.writeText(path);
+      await writeClipboard(path);
       setCopied(path);
       setTimeout(() => setCopied(undefined), 1500);
     } catch {

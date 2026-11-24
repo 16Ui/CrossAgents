@@ -60,7 +60,7 @@ async fn write_tree(dir: &Path) -> Option<String> {
 }
 
 async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = Command::new(crossagents_core::process::git_program());
     cmd.no_window();
     cmd.args(args)
         .current_dir(dir)

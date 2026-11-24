@@ -84,6 +84,7 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
       </section>
 
       {goal === "join" ? <JoinSection bridge={bridge} state={state} /> : <HostSection state={state} />}
+      {((paired && bridge.exportPairing) || bridge.importPairing) && <PairingTransfer bridge={bridge} />}
 
       {paired && (
         <section className="settings-section">
@@ -149,6 +150,68 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
         </section>
       )}
     </>
+  );
+}
+
+function PairingTransfer({ bridge }: { bridge: Bridge }) {
+  const [exported, setExported] = useState<{ file: string; key: string }>();
+  const [key, setKey] = useState("");
+  const [file, setFile] = useState<File>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+
+  async function run(action: () => Promise<void>) {
+    setBusy(true);
+    setError(undefined);
+    try { await action(); } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  }
+
+  function download() {
+    if (!exported) return;
+    const url = URL.createObjectURL(new Blob([exported.file], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "CrossAgents-配对迁移.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  return (
+    <section className="settings-section">
+      <div className="settings-head"><h2>迁移已有配对</h2></div>
+      <div className="setting-card">
+        <div className="setting-line">
+          <div>
+            <div className="setting-label">{bridge.exportPairing ? "导出当前配对" : "导入旧客户端的配对"}</div>
+            <div className="setting-hint">{bridge.exportPairing ? "下载加密文件。将迁移密钥单独保管。" : "选择加密文件并粘贴迁移密钥。导入成功后会替换当前配对。"}</div>
+          </div>
+          {bridge.exportPairing && <button type="button" disabled={busy} onClick={() => void run(async () => setExported(await bridge.exportPairing!()))}>生成迁移文件</button>}
+        </div>
+        {exported && (
+          <div className="setting-line">
+            <label>迁移密钥 <input type="password" aria-label="迁移密钥" value={exported.key} readOnly /></label>
+            <div className="row"><CopyButton text={exported.key} /><button type="button" onClick={download}>下载加密文件</button></div>
+          </div>
+        )}
+        {bridge.importPairing && (
+          <form className="setting-line" onSubmit={(event) => {
+            event.preventDefault();
+            if (!file || !key) return;
+            void run(async () => {
+              if (file.size > 64 * 1024) throw new Error("配对文件超过 64 KiB");
+              await bridge.importPairing!(await file.text(), key);
+              setKey("");
+            });
+          }}>
+            <input type="file" accept=".json,application/json" aria-label="配对迁移文件" onChange={(event) => setFile(event.target.files?.[0])} />
+            <input type="password" autoComplete="off" placeholder="迁移密钥" aria-label="迁移密钥" value={key} onChange={(event) => setKey(event.target.value)} />
+            <button disabled={busy || !file || !key.trim()}>导入配对</button>
+          </form>
+        )}
+      </div>
+      <ErrorBox error={error} />
+    </section>
   );
 }
 

@@ -390,7 +390,7 @@ async fn ignored_in(dir: &Path, entries: &[Entry]) -> Option<std::collections::H
     if entries.is_empty() {
         return Some(std::collections::HashSet::new());
     }
-    let mut child = Command::new("git")
+    let mut child = Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(["check-ignore", "--stdin"])
         .current_dir(dir)
@@ -705,7 +705,7 @@ fn tree_spec(commit: &str, rel: &str) -> String {
 /// Runs git in `dir`: its stdout, or `None` when it says no (exit 1, or a path that is not
 /// in the tree). Outside a repository that is the request's fault, not a failure.
 async fn git(dir: &Path, args: &[&str]) -> Result<Option<Vec<u8>>, FileError> {
-    let output = Command::new("git")
+    let output = Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(args)
         .current_dir(dir)
@@ -755,7 +755,7 @@ async fn commit_of(root: &Path, git_ref: &str) -> Result<String, FileError> {
 /// The first [`CONTENT_LIMIT`] bytes of a blob (all of it when smaller); `size` is what
 /// `cat-file -s` said.
 async fn blob(root: &Path, spec: &str, size: u64) -> Result<Vec<u8>, FileError> {
-    let mut child = Command::new("git")
+    let mut child = Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(["cat-file", "blob", spec])
         .current_dir(root)

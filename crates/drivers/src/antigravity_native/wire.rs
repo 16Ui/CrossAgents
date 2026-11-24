@@ -34,6 +34,7 @@ pub struct Step {
     pub step_type: String,
     pub tool_name: Option<String>,
     pub text_delta: Option<String>,
+    pub duration_seconds: Option<f64>,
     pub tool_info: Option<ToolInfo>,
     pub usage: Option<Usage>,
 }
@@ -142,6 +143,7 @@ fn step(value: &Value) -> Step {
         step_type: text(value, "step_type").unwrap_or_default(),
         tool_name: text(value, "tool_name"),
         text_delta: text(value, "text_delta"),
+        duration_seconds: value.get("duration_seconds").and_then(Value::as_f64),
         tool_info: info.map(|info| ToolInfo {
             name: text(info, "name"),
             parameters: info.get("parameters").filter(|v| !v.is_null()).cloned(),

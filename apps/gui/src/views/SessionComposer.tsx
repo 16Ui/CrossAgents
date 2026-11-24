@@ -9,7 +9,7 @@ import { api, errorText } from "../api";
 import { HeldFiles, MiniFiles, useHeld } from "../attach";
 import { ErrorBox, Icon, Vendor, displayName } from "../components";
 import { useCompact } from "../contextusage";
-import { useHubData } from "../hub";
+import { useHubData, usePlugins } from "../hub";
 import { supportNote } from "../lib/attachments";
 // `draft` is this file's word for the text being typed, so the module keeps the plural.
 import * as drafts from "../lib/draft";
@@ -104,7 +104,7 @@ export function Composer({
   const [deferred, setDeferred] = useState<string[]>([]);
   const [keepNote, setKeepNote] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
   const compact = useCompact(agent);
   const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
@@ -182,6 +182,30 @@ export function Composer({
     const text = draft.trim();
     const held = files.held;
     if ((!text && !held.length) || busy) return;
+    // `/model <query>` switches this session's model from the composer without sending a turn.
+    const slashModel = !held.length && agent.plugin !== "external" ? /^\/model\s+(.+)$/i.exec(text) : null;
+    if (slashModel) {
+      const q = slashModel[1].trim().toLowerCase();
+      setBusy(true);
+      setError(undefined);
+      try {
+        const res = await api.listPlugins();
+        const models = res.plugins.find((p) => p.name === agent.plugin)?.models ?? [];
+        const hit = models.find((m) => m.toLowerCase().includes(q));
+        if (!hit) {
+          setError(`当前驱动（${agent.plugin}）找不到匹配「${q}」的模型`);
+          return;
+        }
+        await api.setModel(agent.id, hit);
+        setDraft("");
+        drafts.forget({ kind: "session", agent: agent.id });
+      } catch (err) {
+        setError(errorText(err));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     setBusy(true);
     setError(undefined);
     // Shown at once (outbox.ts); a failure puts the text and files back here.

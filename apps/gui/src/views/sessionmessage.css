@@ -4,6 +4,14 @@
 
 /* A person's message rendered as markdown: the bubble's own voice and size, the writer's line
    breaks kept, and code and quotes set against the sunk bubble rather than blending into it. */
+.person-message:not(.with-avatar), .person-message:not(.with-avatar) > .person-message-content { display: contents; }
+.person-message.with-avatar { display: flex; align-items: flex-start; align-self: flex-end; gap: 9px; max-width: min(100%, calc(82% + 39px)); }
+.person-message.with-avatar > .person-message-content { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.person-message-name { text-align: end; color: var(--muted); font-size: 11.5px; overflow-wrap: anywhere; }
+.person-message > .chat-avatar { margin-top: 16px; }
+.turn .person-message.with-avatar .bubble { max-width: 100%; }
+.conversation-earlier { align-self: center; }
+
 .turn .bubble-md { white-space: normal; }
 .turn .bubble-md .prose { font-size: inherit; line-height: 1.6; white-space: normal; }
 .turn .bubble-md .prose p { margin: 0 0 0.55em; white-space: pre-wrap; }

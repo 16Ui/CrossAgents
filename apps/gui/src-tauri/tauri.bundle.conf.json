@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "active": true,
+    "icon": ["../build/icon.ico", "../build/icon.png"],
+    "targets": ["nsis", "app", "dmg"],
+    "externalBin": ["binaries/crossagents", "binaries/crossagents-link"]
+  }
+}

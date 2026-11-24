@@ -63,6 +63,12 @@ impl StderrTail {
         lines.push_back(line);
     }
 
+    /// Joined lines captured so far.
+    pub async fn text(&self) -> String {
+        let lines: Vec<String> = self.0.lock().await.iter().cloned().collect();
+        lines.join("\n")
+    }
+
     /// `"<what>"`, or `"<what>:\n<tail>"` when stderr said something.
     pub async fn describe(&self, what: &str) -> String {
         let lines: Vec<String> = self.0.lock().await.iter().cloned().collect();
@@ -146,10 +152,78 @@ pub fn find_in_path_in(program: &str, dirs: Option<&[PathBuf]>) -> PathBuf {
 pub fn hide_console(command: &mut Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
+    hide_node_child_windows(command);
 }
 
 #[cfg(not(windows))]
 pub fn hide_console(_: &mut Command) {}
+
+/// Node-based vendor CLIs (`codebuddy`, `cursor-agent`, etc.) call `child_process.exec` /
+/// `execFile` / `spawnSync` internally without `windowsHide: true` (e.g. `reg query` for
+/// `MachineGuid` / `ProxyEnable` / `CodePage`, `cscript`, `git rev-parse`). When the parent
+/// process runs without a console (`DETACHED_PROCESS`) or inside a wrapper tree, Windows
+/// allocates a visible console window (`conhost.exe`) for each of those grandchildren.
+///
+/// Preloading a tiny script via `NODE_OPTIONS` defaults `windowsHide` to `true` across
+/// `child_process` so grandchildren stay hidden too.
+#[cfg(windows)]
+fn hide_node_child_windows(command: &mut Command) {
+    let Some(script) = node_windows_hide_script() else {
+        return;
+    };
+    let flag = format!("--require={}", script.display());
+    let existing = command
+        .as_std()
+        .get_envs()
+        .find(|(k, _)| k.eq_ignore_ascii_case("NODE_OPTIONS"))
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+        .or_else(|| std::env::var("NODE_OPTIONS").ok());
+    let value = match existing {
+        Some(cur) if cur.contains(&flag) => cur,
+        Some(cur) if !cur.trim().is_empty() => format!("{cur} {flag}"),
+        _ => flag,
+    };
+    command.env("NODE_OPTIONS", value);
+}
+
+#[cfg(windows)]
+fn node_windows_hide_script() -> Option<&'static PathBuf> {
+    static SCRIPT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    SCRIPT
+        .get_or_init(|| {
+            const SOURCE: &str = r#"try {
+  const cp = require("node:child_process");
+  const patch = (fn) => function (...args) {
+    for (let i = 1; i < args.length; i++) {
+      const a = args[i];
+      if (a && typeof a === "object" && !Array.isArray(a) && !(a instanceof Date)) {
+        if (a.windowsHide === undefined) args[i] = { ...a, windowsHide: true };
+        return fn.apply(this, args);
+      }
+    }
+    if (typeof args[args.length - 1] === "function") {
+      args.splice(args.length - 1, 0, { windowsHide: true });
+    } else {
+      args.push({ windowsHide: true });
+    }
+    return fn.apply(this, args);
+  };
+  for (const k of ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"]) {
+    if (typeof cp[k] === "function") cp[k] = patch(cp[k]);
+  }
+} catch {}
+"#;
+            let path = std::env::temp_dir().join("crossagents-windows-hide.cjs");
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(SOURCE) {
+                std::fs::write(&path, SOURCE).ok()?;
+            }
+            // `--require` rejects paths with spaces inside `NODE_OPTIONS`, and `temp_dir`
+            // lives under `%USERPROFILE%`. If the path has spaces, skip rather than break
+            // `node` startup.
+            (!path.to_string_lossy().contains(' ')).then_some(path)
+        })
+        .as_ref()
+}
 
 /// Windows children inherit every inheritable handle of their parent, not just the ones
 /// given as their stdio, and this process's own stdin, stdout and stderr are inheritable
@@ -1286,5 +1360,27 @@ mod tests {
                 .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://127.0.0.1:7897")
         );
         set_auto_best_proxy(None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hide_console_preloads_the_node_windows_hide_patch() {
+        let Some(script) = node_windows_hide_script() else {
+            return;
+        };
+        assert!(script.is_file());
+        let mut cmd = Command::new("node");
+        cmd.env("NODE_OPTIONS", "--max-old-space-size=4096");
+        hide_console(&mut cmd);
+        hide_console(&mut cmd);
+        let opts = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "NODE_OPTIONS")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+            .expect("NODE_OPTIONS set");
+        let flag = format!("--require={}", script.display());
+        assert!(opts.starts_with("--max-old-space-size=4096 "), "{opts}");
+        assert_eq!(opts.matches(&flag).count(), 1, "{opts}");
     }
 }

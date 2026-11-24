@@ -25,6 +25,7 @@ import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
+import type { ImportableSession } from "@bindings/ImportableSession";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -135,6 +136,8 @@ export type MockState = {
   resume?: Record<string, ResumeCommandResponse>;
   /** A workspace's sessions as `GET /v1/session-candidates` answers; a scenario sets what it shows. */
   sessions?: SessionCandidate[];
+  /** Local external CLI sessions as `GET /v1/sessions/import` answers. */
+  importableSessions?: ImportableSession[];
   /** Whether this machine is Windows, which is how `approval.rs` decides Cursor may not run a
    * guarded session; unset: yes, as the GUI is built for Windows. */
   windows?: boolean;
@@ -444,9 +447,9 @@ export class MockBridge implements CrossAgentsBridge {
   private terminalRoute(method: string, p: string, body: unknown): HubResponse | undefined {
     if (p === "/v1/terminals" && method === "GET") return json(200, { terminals: [...this.terminals.values()].map((t) => t.info) });
     if (p === "/v1/terminals" && method === "POST") {
-      const req = body as { cwd: string; project?: string; cols: number; rows: number };
+      const req = body as { cwd: string; project?: string; tier?: "user" | "agent" | "system"; owner_agent?: string; cols: number; rows: number };
       const id = crypto.randomUUID();
-      const info = { id, project: req.project ?? null, cwd: req.cwd, shell: "mock", cols: req.cols, rows: req.rows, created_at: new Date().toISOString(), exited: false, exit_code: null, connections: 0, node: null };
+      const info = { id, tier: req.tier ?? "user", owner_agent: req.owner_agent, project: req.project ?? null, cwd: req.cwd, shell: "mock", cols: req.cols, rows: req.rows, created_at: new Date().toISOString(), exited: false, exit_code: null, connections: 0, node: null };
       const prompt = `${req.cwd}> `;
       this.terminals.set(id, { info, log: `\x1b[2mmock 终端：只回显，不执行。输入 exit 退出。\x1b[m\r\n${prompt}`, line: "", relayed: false });
       return json(201, info);
@@ -1069,6 +1072,7 @@ export class MockBridge implements CrossAgentsBridge {
           ],
         });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if (p === "/v1/sessions/import") return json(200, { candidates: s.importableSessions ?? [] });
       if (p === "/v1/session-candidates") {
         // The policy the sessions would be assigned under: the run named by `?run=`, else the
         // workspace's one plan awaiting approval (session_candidates in crates/hub/src/api.rs).
@@ -1204,6 +1208,14 @@ export class MockBridge implements CrossAgentsBridge {
         }
         a.config = config as Agent["config"];
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cwd$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return json(404, { error: { code: "not_found", message: "agent not found" } });
+        const { cwd } = body as { cwd: string };
+        a.cwd = cwd;
+        this.emit({ type: "agent.updated", data: { agent: a } });
         return json(200, a);
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/topic$/))) {

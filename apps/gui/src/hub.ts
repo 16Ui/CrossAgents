@@ -5,6 +5,8 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Event as HubEvent } from "@bindings/Event";
 import { api, errorText, getBridge, refuseRequests } from "./api";
+import { ResourceCache } from "./lib/resourceCache";
+import { catalogEvent } from "./lib/catalogEvents";
 
 export type { HubEvent };
 
@@ -26,6 +28,7 @@ let started = false;
 let transport: ConnectionStatus = "connecting";
 /** Numbers each check, so one for a stream that has since dropped is ignored. */
 let checks = 0;
+let connectionEpoch = 0;
 
 function setStatus(next: ConnectionStatus) {
   status = next;
@@ -37,6 +40,13 @@ function setStatus(next: ConnectionStatus) {
  * matches; a hub that speaks another one is refused, never half-used.
  */
 function setTransport(next: ConnectionStatus) {
+  clearTimeout(pluginRefresh);
+  pluginRefresh = undefined;
+  // A reconnect may reach a restarted or different hub. Discard old in-flight reads too.
+  if (next !== "connected") {
+    connectionEpoch++;
+    pluginCatalog.reset();
+  }
   transport = next;
   const mine = ++checks;
   if (next !== "connected") return setStatus(next);
@@ -81,8 +91,30 @@ function dispatch(data: string) {
 export function startEvents() {
   if (started) return;
   started = true;
+  // A CLI installed or removed in a terminal has no hub event. Re-read on return
+  // to the window; this does not force CLI version or quota probes.
+  window.addEventListener("focus", schedulePlugins);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") schedulePlugins();
+  });
   const bridge = getBridge();
   if (bridge) {
+    let identity: string | undefined;
+    let identityUpdates = 0;
+    const identify = (state: import("./bridge").ConnectionState) => {
+      const next = JSON.stringify([state.mode, state.remote?.deviceId, state.remote?.pairedAt, state.remote?.target]);
+      if (identity !== next) {
+        identity = next;
+        connectionEpoch++;
+        pluginCatalog.reset();
+        setTransport(transport);
+      }
+    };
+    if (bridge.connection) {
+      bridge.connection.onState((next) => { identityUpdates++; identify(next); });
+      const before = identityUpdates;
+      void bridge.connection.get().then((next) => { if (before === identityUpdates) identify(next); }, () => {});
+    }
     // Subscribe before starting the relay so no event is missed.
     bridge.onStatus(setTransport);
     bridge.onEvent(dispatch);
@@ -191,6 +223,36 @@ function writeSnapshot<T>(key: string | undefined, value: T): void {
   }
 }
 
+const pluginCatalog = new ResourceCache(() => api.listPlugins().then((r) => r.plugins));
+let pluginRefresh: ReturnType<typeof setTimeout> | undefined;
+function schedulePlugins() {
+  if (status !== "connected") return;
+  // Coalesce a burst without starving refreshes under a continuous quota event stream.
+  if (pluginRefresh !== undefined) return;
+  pluginRefresh = setTimeout(() => {
+    pluginRefresh = undefined;
+    if (status === "connected") void pluginCatalog.refresh();
+  }, 250);
+}
+onHubEvent((event) => {
+  const change = catalogEvent(event.type);
+  if (change) {
+    if (change === "reset") pluginCatalog.reset();
+    schedulePlugins();
+  }
+});
+// First usable connection has no event burst to debounce. Start immediately; mounts
+// join this read, and reconnect/identity resets have already discarded the old list.
+statusListeners.add(() => { if (status === "connected") pluginCatalog.ensure(); });
+const refreshPlugins = () => status === "connected" ? pluginCatalog.refresh() : Promise.resolve();
+
+/** A shared model list for every picker; no empty flash when Home is mounted again. */
+export function usePlugins() {
+  const state = useSyncExternalStore(pluginCatalog.subscribe, pluginCatalog.snapshot);
+  useEffect(() => { if (status === "connected") pluginCatalog.ensure(); }, []);
+  return { ...state, reload: refreshPlugins };
+}
+
 /**
  * Loads a resource (seeding immediately from a local snapshot when `cacheKey` is supplied),
  * then re-loads it (debounced) whenever `relevant` accepts an event and immediately when
@@ -200,8 +262,11 @@ export function useHubData<T>(
   load: () => Promise<T>,
   deps: unknown[],
   relevant: (event: HubEvent) => boolean,
-  cacheKey?: string,
+  cacheKeyOrCanLoad?: string | (() => boolean),
+  canLoadArg?: () => boolean,
 ): Loaded<T> {
+  const cacheKey = typeof cacheKeyOrCanLoad === "string" ? cacheKeyOrCanLoad : undefined;
+  const canLoad = typeof cacheKeyOrCanLoad === "function" ? cacheKeyOrCanLoad : canLoadArg;
   const fullKey = cacheKey ? (deps.length ? `${cacheKey}:${JSON.stringify(deps)}` : cacheKey) : undefined;
   const fullKeyRef = useRef(fullKey);
   fullKeyRef.current = fullKey;
@@ -211,15 +276,19 @@ export function useHubData<T>(
   });
   const relevantRef = useRef(relevant);
   relevantRef.current = relevant;
+  const canLoadRef = useRef(canLoad);
+  canLoadRef.current = canLoad;
   // Requests are numbered; a response is applied unless a newer one already was. (Dropping
   // every response but the latest starves the view while events keep arriving.)
   const generation = useRef(0);
   const applied = useRef(0);
 
   const reload = useCallback(() => {
+    if (status !== "connected" || canLoadRef.current?.() === false) return;
     const mine = ++generation.current;
     const keyAtStart = fullKeyRef.current;
-    const fresh = () => mine > applied.current && ((applied.current = mine), true);
+    const epoch = connectionEpoch;
+    const fresh = () => status === "connected" && epoch === connectionEpoch && mine > applied.current && ((applied.current = mine), true);
     load().then(
       (data) => {
         if (!fresh()) return;
@@ -248,10 +317,13 @@ export function useHubData<T>(
     const offEvent = onHubEvent((e) => relevantRef.current(e) && schedule());
     let prev = status;
     const onStatus = () => {
-      if (status === "connected" && prev !== "connected") {
+      if (status !== "connected") {
         clearTimeout(timer);
-        reload();
+        // Even a version recheck without a transport drop invalidates pending reads.
+        applied.current = generation.current;
+        setState({ loading: true });
       }
+      if (status === "connected" && prev !== "connected") schedule();
       prev = status;
     };
     statusListeners.add(onStatus);

@@ -13,6 +13,7 @@
 //! session files with token counts — per-turn tokens come from the driver's event stream.
 
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -23,11 +24,13 @@ use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, Credits, DataSource, LimitGroup,
     LoginCommand, ModelInfo, RateWindow, SessionUsage,
 };
+#[cfg(not(windows))]
+use crossagents_drivers::antigravity_native::prepare_query;
 use crossagents_drivers::antigravity_native::wire::parse_models;
 use crossagents_drivers::locate::Cli;
-use crossagents_drivers::process::{
-    apply_proxy_env, explicit_proxy_env, hide_console, resolve_program,
-};
+#[cfg(not(windows))]
+use crossagents_drivers::process::apply_proxy_env;
+use crossagents_drivers::process::{explicit_proxy_env, resolve_program};
 use serde_json::Value;
 
 /// Live status is refreshed at most this often.
@@ -55,7 +58,9 @@ pub struct AntigravityAccounts {
     login: Option<Vec<String>>,
     /// The description's model list, for when the CLI cannot be asked.
     models: Vec<String>,
-    live: Mutex<Option<(Instant, AccountStatus, Vec<ModelInfo>)>>,
+    live: Mutex<Option<(Instant, String, AccountStatus)>>,
+    model_epoch: std::sync::atomic::AtomicU64,
+    model_cache: tokio::sync::Mutex<Option<(Instant, String, Vec<ModelInfo>)>>,
 }
 
 impl Default for AntigravityAccounts {
@@ -71,6 +76,8 @@ impl AntigravityAccounts {
             login,
             models,
             live: Mutex::default(),
+            model_epoch: std::sync::atomic::AtomicU64::new(0),
+            model_cache: tokio::sync::Mutex::default(),
         }
     }
 
@@ -84,6 +91,8 @@ impl AntigravityAccounts {
                 .map(|config| config.models.clone())
                 .unwrap_or_default(),
             live: Mutex::default(),
+            model_epoch: std::sync::atomic::AtomicU64::new(0),
+            model_cache: tokio::sync::Mutex::default(),
         }
     }
 
@@ -92,6 +101,14 @@ impl AntigravityAccounts {
             CliLookup::Live(cli) => cli.as_ref().and_then(Cli::command),
             CliLookup::Fixed(cli) => cli.clone(),
         }
+    }
+
+    fn cache_key(&self, account: &Account) -> String {
+        format!(
+            "{}:{}",
+            self.model_epoch.load(std::sync::atomic::Ordering::SeqCst),
+            account_key(account)
+        )
     }
 
     /// Captures a bounded CLI query. `models` may exit 1 when signed out; headless
@@ -103,30 +120,77 @@ impl AntigravityAccounts {
         let (program, rest) = command
             .split_first()
             .ok_or_else(|| "empty Antigravity command".to_owned())?;
-        let mut child = tokio::process::Command::new(resolve_program(program));
-        child
-            .args(rest)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        apply_proxy_env(&mut child, account.proxy.as_deref());
-        hide_console(&mut child);
-        let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
+        #[cfg(windows)]
+        let (stdout, stderr, success) = {
+            let mut all_args: Vec<String> = rest.to_vec();
+            all_args.extend(args.iter().map(|s| (*s).to_owned()));
+            let mut env = explicit_proxy_env(account.proxy.as_deref());
+            env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+            let mut launched = crossagents_drivers::launch::launch(
+                crossagents_drivers::launch::LaunchSpec {
+                    program: resolve_program(program),
+                    args: all_args,
+                    cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    env,
+                    label: format!("agy {}", args.join(" ")),
+                    ..crossagents_drivers::launch::LaunchSpec::default()
+                },
+            )
             .await
-            .map_err(|_| {
-                format!(
-                    "`agy {}` did not answer in {} s",
-                    args.join(" "),
-                    CLI_TIMEOUT.as_secs()
-                )
-            })?
             .map_err(|e| format!("cannot run the Antigravity CLI: {e}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            drop(launched.stdin);
+            let mut out_buf = Vec::new();
+            let read_res = tokio::time::timeout(CLI_TIMEOUT, async {
+                let _ = tokio::io::AsyncReadExt::read_to_end(&mut launched.stdout, &mut out_buf)
+                    .await;
+                launched.process.wait().await
+            })
+            .await;
+            let exit = match read_res {
+                Ok(exit) => exit,
+                Err(_) => {
+                    launched.process.start_kill();
+                    return Err(format!(
+                        "`agy {}` did not answer in {} s",
+                        args.join(" "),
+                        CLI_TIMEOUT.as_secs()
+                    ));
+                }
+            };
+            let stderr = launched.stderr.text().await;
+            let stdout = String::from_utf8_lossy(&out_buf).into_owned();
+            (stdout, stderr, exit.and_then(|info| info.code) == Some(0))
+        };
+        #[cfg(not(windows))]
+        let (stdout, stderr, success) = {
+            let mut child = tokio::process::Command::new(resolve_program(program));
+            child
+                .args(rest)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            apply_proxy_env(&mut child, account.proxy.as_deref());
+            prepare_query(&mut child);
+            let output = tokio::time::timeout(CLI_TIMEOUT, child.output())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "`agy {}` did not answer in {} s",
+                        args.join(" "),
+                        CLI_TIMEOUT.as_secs()
+                    )
+                })?
+                .map_err(|e| format!("cannot run the Antigravity CLI: {e}"))?;
+            (
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                output.status.success(),
+            )
+        };
         let text = format!("{stdout}\n{stderr}");
-        if !output.status.success()
+        if !success
             && !text.to_ascii_lowercase().contains("sign in")
             && args == ["models"]
         {
@@ -147,10 +211,12 @@ impl AntigravityAccounts {
         let models: Vec<ModelInfo> = parse_models(&stdout)
             .into_iter()
             .map(|id| ModelInfo {
+                context_window: crossagents_drivers::antigravity_native::context_window_for(Some(
+                    &id,
+                )),
                 name: id.clone(),
                 id,
                 description: None,
-                context_window: None,
                 credit_multiplier: None,
             })
             .collect();
@@ -201,13 +267,15 @@ impl AccountProvider for AntigravityAccounts {
     }
 
     async fn status(&self, account: &Account) -> AccountStatus {
-        if let Some((at, status, _)) = self.live.lock().unwrap().as_ref()
+        let request_key = self.cache_key(account);
+        if let Some((at, key, status)) = self.live.lock().unwrap().as_ref()
+            && *key == request_key
             && at.elapsed() < LIVE_TTL
             && !(status.note.as_deref() == Some(NOT_INSTALLED) && self.command().is_some())
         {
             return status.clone();
         }
-        let (logged_in, models, note) = self.probe(account).await;
+        let (logged_in, _, note) = self.probe(account).await;
         let mut status = AccountStatus {
             logged_in,
             auth_mode: logged_in.then(|| "google".to_owned()),
@@ -225,8 +293,10 @@ impl AccountProvider for AntigravityAccounts {
             note,
         };
         if logged_in {
-            let (quota, credits) =
-                tokio::join!(self.report(account, "/usage"), self.report(account, "/credits"));
+            let (quota, credits) = tokio::join!(
+                self.report(account, "/usage"),
+                self.report(account, "/credits")
+            );
             let mut notes = Vec::new();
             match quota.and_then(|value| apply_quota(&mut status, &value)) {
                 Ok(()) => {}
@@ -238,7 +308,8 @@ impl AccountProvider for AntigravityAccounts {
             }
             status.note = (!notes.is_empty()).then(|| notes.join("\n"));
         }
-        *self.live.lock().unwrap() = Some((Instant::now(), status.clone(), models));
+        status.note = status.note.map(eligibility_note);
+        *self.live.lock().unwrap() = Some((Instant::now(), request_key, status.clone()));
         status
     }
 
@@ -249,19 +320,24 @@ impl AccountProvider for AntigravityAccounts {
     }
 
     async fn models(&self, account: &Account) -> Vec<ModelInfo> {
-        self.status(account).await;
-        let cached = self
-            .live
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|(_, _, models)| models.clone())
-            .unwrap_or_default();
-        if !cached.is_empty() {
-            return cached;
+        // Model discovery never runs headless /usage or /credits reports. Concurrent
+        // pickers share a query, scoped to the account and its proxy configuration.
+        let mut cache = self.model_cache.lock().await;
+        let key = self.cache_key(account);
+        if let Some((at, cached_key, models)) = cache.as_ref()
+            && *cached_key == key
+            && at.elapsed() < LIVE_TTL
+        {
+            return models.clone();
+        }
+        let (_, models, _) = self.probe(account).await;
+        if !models.is_empty() {
+            *cache = Some((Instant::now(), key, models.clone()));
+            return models;
         }
         // The description's list stands in when the CLI listed nothing (signed out).
-        self.models
+        let models = self
+            .models
             .iter()
             .map(|id| ModelInfo {
                 name: id.clone(),
@@ -270,7 +346,9 @@ impl AccountProvider for AntigravityAccounts {
                 context_window: None,
                 credit_multiplier: None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        *cache = Some((Instant::now(), key, models.clone()));
+        models
     }
 
     /// `<crossagents> agy-login --command <agy> --port <n>`: the helper serves the page the
@@ -300,7 +378,10 @@ impl AccountProvider for AntigravityAccounts {
             .filter(|(_, v)| v.is_empty())
             .map(|(k, _)| k.clone())
             .collect();
-        let env = proxy_env.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+        let env = proxy_env
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
         LoginCommand {
             command,
             env,
@@ -312,6 +393,9 @@ impl AccountProvider for AntigravityAccounts {
 
     fn forget_status(&self, _account: &Account) {
         *self.live.lock().unwrap() = None;
+        // A login or plugin change invalidates both query paths, including a running read.
+        self.model_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The credential is in the OS keyring, not in the account's home, so only an explicit
@@ -319,6 +403,23 @@ impl AccountProvider for AntigravityAccounts {
     fn agent_env(&self, account: &Account) -> Vec<(String, String)> {
         explicit_proxy_env(account.proxy.as_deref())
     }
+}
+
+fn account_key(account: &Account) -> String {
+    serde_json::to_string(account).unwrap()
+}
+
+fn eligibility_note(original: String) -> String {
+    let lower = original.to_ascii_lowercase();
+    if !(lower.contains("eligibility")
+        || lower.contains("ineligible")
+        || lower.contains("not eligible"))
+    {
+        return original;
+    }
+    format!(
+        "{original}\nAntigravity 资格由 Google 判定；美国代理出口不保证账号地区资格。请登录 https://policies.google.com/terms 查看账号关联国家；若有误，可通过 https://policies.google.com/country-association-form 申请更正。年龄及账号类型也可能影响资格。此提示未验证账号地区，也不代表拒绝已解决。官方 FAQ：https://antigravity.google/docs/faq"
+    )
 }
 
 /// The CLI's printmode quotaJSON -> groupJSON -> bucketJSON (wrapped in `command.data` on
@@ -480,6 +581,36 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    #[tokio::test]
+    async fn model_listing_does_not_run_quota_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("slow-reports.mjs");
+        let calls = dir.path().join("calls.txt");
+        std::fs::write(
+            &script,
+            format!(
+                r#"
+import {{ appendFileSync }} from 'node:fs';
+appendFileSync({:?}, process.argv.slice(2).join(' ') + '\n');
+if (process.argv[2] === 'models') console.log('gemini-3.8-flash-high');
+else {{ await new Promise(r => setTimeout(r, 800)); console.log('{{}}'); }}
+"#,
+                calls.display().to_string()
+            ),
+        )
+        .unwrap();
+        let provider = AntigravityAccounts::new(
+            Some(vec!["node".into(), script.display().to_string()]),
+            None,
+            Vec::new(),
+        );
+        let started = Instant::now();
+        let models = provider.models(&account(dir.path())).await;
+        eprintln!("model listing elapsed: {:?}", started.elapsed());
+        assert_eq!(models[0].id, "gemini-3.8-flash-high");
+        assert_eq!(std::fs::read_to_string(calls).unwrap(), "models\n");
+    }
+
     fn account(home: &std::path::Path) -> Account {
         Account {
             codebuddy_site: None,
@@ -624,7 +755,58 @@ else { console.log(JSON.stringify({status:'ERROR',error:'Eligibility check faile
         assert!(status.rate_limits.is_empty());
         assert!(status.credits.is_none());
         assert!(status.source.is_none() && status.as_of.is_none());
-        assert!(status.note.unwrap().contains("Eligibility check failed"));
+        let note = status.note.unwrap();
+        assert!(
+            note.starts_with("Antigravity /usage: Eligibility check failed: account unavailable")
+        );
+        assert!(
+            note.contains("Antigravity /credits: Eligibility check failed: account unavailable")
+        );
+        assert!(note.contains("美国代理出口不保证账号地区资格"));
+        assert!(note.contains("https://policies.google.com/terms"));
+        assert!(note.contains("https://policies.google.com/country-association-form"));
+        assert!(note.contains("未验证账号地区"));
+    }
+
+    #[test]
+    fn unrelated_errors_are_not_rewritten_as_eligibility_failures() {
+        assert_eq!(
+            eligibility_note("Error: network unavailable".into()),
+            "Error: network unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_cache_is_coalesced_and_invalidated_by_account_or_login_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("models.mjs");
+        let calls = dir.path().join("calls.txt");
+        std::fs::write(
+            &script,
+            format!(
+                r#"
+import {{ appendFileSync }} from 'node:fs';
+appendFileSync({:?}, 'models\n');
+console.log('gemini-3.8-flash-high');
+"#,
+                calls.display().to_string()
+            ),
+        )
+        .unwrap();
+        let provider = AntigravityAccounts::new(
+            Some(vec!["node".into(), script.display().to_string()]),
+            None,
+            Vec::new(),
+        );
+        let mut first = account(dir.path());
+        tokio::join!(provider.models(&first), provider.models(&first));
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 1);
+        first.proxy = Some("direct".into());
+        provider.models(&first).await;
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 2);
+        provider.forget_status(&first);
+        provider.models(&first).await;
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
     }
 
     #[tokio::test]
@@ -759,6 +941,8 @@ else { console.log(JSON.stringify({status:'ERROR',error:'Eligibility check faile
             login: Some(vec!["crossagents".into(), "agy-login".into()]),
             models: Vec::new(),
             live: Mutex::default(),
+            model_epoch: std::sync::atomic::AtomicU64::new(0),
+            model_cache: tokio::sync::Mutex::default(),
         };
 
         // Before the CLI is installed, status reports NOT_INSTALLED.
@@ -784,7 +968,10 @@ else { console.log(JSON.stringify({status:'ERROR',error:'Eligibility check faile
         }
 
         let login = accounts.login_command(&account(dir.path()));
-        assert_eq!(login.command[4..], ["--command", &bin.display().to_string()]);
+        assert_eq!(
+            login.command[4..],
+            ["--command", &bin.display().to_string()]
+        );
         let status = accounts.status(&account(dir.path())).await;
         assert_eq!(status.note.as_deref(), Some(SIGN_IN_NOTE));
     }

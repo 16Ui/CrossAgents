@@ -80,7 +80,7 @@ struct Outcome {
 
 /// Runs git in `dir`; a git that says no is an outcome, not an error.
 async fn run_git(dir: &Path, args: &[&str]) -> Result<Outcome, CoreError> {
-    let output = Command::new("git")
+    let output = Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(args)
         .current_dir(dir)

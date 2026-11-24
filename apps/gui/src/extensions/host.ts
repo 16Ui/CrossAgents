@@ -176,7 +176,8 @@ export function extensionEntryUrl(name: string, fingerprint: string, entry: stri
     .split("/")
     .map(encodeURIComponent)
     .join("/");
-  return `crossagents-ext://${name}/${fingerprint}/${path}`;
+  const base = typeof window === "undefined" ? undefined : window.crossagents?.extensions?.assetBase;
+  return base ? `${base}/${name}/${fingerprint}/${path}` : `crossagents-ext://${name}/${fingerprint}/${path}`;
 }
 
 export class ExtensionCallError extends Error {

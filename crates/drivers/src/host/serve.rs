@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossagents_core::process::Job;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::{Notify, mpsc, watch};
@@ -262,21 +262,8 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
         error: None,
     };
 
-    let mut command = Command::new(&spec.program);
-    command.args(&spec.args).current_dir(&spec.cwd);
-    for key in &spec.env_remove {
-        command.env_remove(key);
-    }
-    command
-        .envs(spec.env.iter().cloned())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    hide_console(&mut command);
-    #[cfg(unix)]
-    command.process_group(0);
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let (child_stdin, child_stdout, child_stderr, mut child) = match spawn_child(&spec) {
+        Ok(spawned) => spawned,
         Err(err) => {
             record.exited = true;
             record.error = Some(format!("cannot start {}: {err}", spec.program.display()));
@@ -284,7 +271,7 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
             return Err(record.error.unwrap_or_default());
         }
     };
-    record.child_pid = child.id();
+    record.child_pid = child.pid();
     write_record(&dir, &record).map_err(|e| format!("cannot write the record: {e}"))?;
 
     let state = Arc::new(State::default());
@@ -294,7 +281,7 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
     let (close_input, close_rx) = watch::channel(false);
     let hub_kill = Arc::new(AtomicBool::new(false));
     let writer = tokio::spawn(write_input(
-        child.stdin.take().expect("piped stdin"),
+        child_stdin,
         input_rx,
         close_rx,
         kill.clone(),
@@ -304,9 +291,8 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
 
     let mut out = tokio::spawn({
         let state = state.clone();
-        let stdout = child.stdout.take().expect("piped stdout");
         async move {
-            let mut lines = BufReader::new(stdout).lines();
+            let mut lines = BufReader::new(child_stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 state.push(|seq| FromHost::Out { seq, line });
             }
@@ -314,9 +300,8 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
     });
     let mut err = tokio::spawn({
         let state = state.clone();
-        let stderr = child.stderr.take().expect("piped stderr");
         async move {
-            let mut lines = BufReader::new(stderr).lines();
+            let mut lines = BufReader::new(child_stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 state.push(|seq| FromHost::Err { seq, line });
             }
@@ -348,12 +333,12 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
     });
 
     let pid = record.child_pid;
-    let status = tokio::select! {
-        status = child.wait() => status,
+    let code = tokio::select! {
+        code = child.wait_code() => code,
         _ = kill.notified() => {
             killed.store(true, Ordering::SeqCst);
-            kill_tree(&mut child, pid);
-            child.wait().await
+            child.kill_tree(pid);
+            child.wait_code().await
         }
     };
     writer.abort();
@@ -375,7 +360,6 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
             let _ = err.await;
         }
     }
-    let code = status.ok().and_then(|s| s.code());
     // Child stderr may continue after a kill. Keep the diagnostic last in the client's
     // bounded stderr tail while still publishing it before the kill as well.
     state.repeat_diagnostic();
@@ -411,6 +395,101 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
     // Closing the job ends whatever the agent left behind.
     drop(job);
     Ok(())
+}
+
+enum ChildProcess {
+    Standard(tokio::process::Child),
+    #[cfg(windows)]
+    ConPty(crate::launch::ProcessHandle),
+}
+
+impl ChildProcess {
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Standard(child) => child.id(),
+            #[cfg(windows)]
+            Self::ConPty(handle) => handle.pid(),
+        }
+    }
+
+    async fn wait_code(&mut self) -> Option<i32> {
+        match self {
+            Self::Standard(child) => child.wait().await.ok().and_then(|s| s.code()),
+            #[cfg(windows)]
+            Self::ConPty(handle) => handle.wait().await.and_then(|info| info.code),
+        }
+    }
+
+    fn kill_tree(&mut self, pid: Option<u32>) {
+        match self {
+            Self::Standard(child) => kill_tree(child, pid),
+            #[cfg(windows)]
+            Self::ConPty(handle) => handle.start_kill(),
+        }
+    }
+}
+
+type ChildStdio = (
+    Box<dyn AsyncWrite + Unpin + Send>,
+    Box<dyn AsyncRead + Unpin + Send>,
+    Box<dyn AsyncRead + Unpin + Send>,
+    ChildProcess,
+);
+
+fn spawn_child(spec: &HostSpec) -> std::io::Result<ChildStdio> {
+    #[cfg(windows)]
+    {
+        let launch_spec = crate::launch::LaunchSpec {
+            owner: None,
+            label: spec.label.clone(),
+            program: spec.program.clone(),
+            args: spec.args.clone(),
+            cwd: spec.cwd.clone(),
+            env: spec.env.clone(),
+            env_remove: spec.env_remove.clone(),
+        };
+        match crate::conpty::spawn_piped(&launch_spec, false) {
+            Ok(piped) => {
+                return Ok((
+                    Box::new(piped.stdin),
+                    Box::new(piped.stdout),
+                    Box::new(piped.stderr),
+                    ChildProcess::ConPty(piped.process),
+                ));
+            }
+            Err(err) => {
+                tracing::debug!(
+                    %err,
+                    program = %spec.program.display(),
+                    "runtime-host hidden ConPTY unavailable; falling back to CREATE_NO_WINDOW"
+                );
+            }
+        }
+    }
+
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.args).current_dir(&spec.cwd);
+    for key in &spec.env_remove {
+        command.env_remove(key);
+    }
+    command
+        .envs(spec.env.iter().cloned())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console(&mut command);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    Ok((
+        Box::new(stdin),
+        Box::new(stdout),
+        Box::new(stderr),
+        ChildProcess::Standard(child),
+    ))
 }
 
 fn kill_tree(child: &mut tokio::process::Child, pid: Option<u32>) {

@@ -45,6 +45,14 @@ type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 /// A status read, with when and the models listed alongside.
 type LiveEntry = (Instant, AccountStatus, Vec<ModelInfo>);
 
+/// Cached `initialize` answer from the CodeBuddy CLI so routine quota refreshes can ask
+/// `billing_summary` over HTTP without cold-spawning a `codebuddy -p` process every minute.
+#[derive(Clone)]
+struct InitCache {
+    init: Value,
+    models: Vec<ModelInfo>,
+}
+
 enum CliLookup {
     /// Look up the CLI on demand so an install while the hub runs is picked up.
     Live(Option<Cli>),
@@ -56,6 +64,7 @@ pub struct CodebuddyAccounts {
     /// How to run the CLI.
     command: CliLookup,
     live: Mutex<HashMap<PathBuf, LiveEntry>>,
+    init_cache: Mutex<HashMap<PathBuf, InitCache>>,
     scanned: Mutex<HashMap<PathBuf, ScanEntry>>,
 }
 
@@ -64,6 +73,7 @@ impl Default for CodebuddyAccounts {
         Self {
             command: CliLookup::Live(crate::builtin::cli("codebuddy")),
             live: Mutex::default(),
+            init_cache: Mutex::default(),
             scanned: Mutex::default(),
         }
     }
@@ -74,6 +84,7 @@ impl CodebuddyAccounts {
         Self {
             command: CliLookup::Fixed(command),
             live: Mutex::default(),
+            init_cache: Mutex::default(),
             scanned: Mutex::default(),
         }
     }
@@ -140,6 +151,36 @@ impl CodebuddyAccounts {
         )]
     }
 
+    async fn probe_init(&self, account: &Account, command: &[String]) -> Result<InitCache, CoreError> {
+        let init = codebuddy_native::probe(command, &self.env_for(account)).await?;
+        let mut models = models_of(&init);
+        let login = init.get("account").filter(|a| a.is_object());
+        if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
+            let home = account.home.clone();
+            let uid = uid.to_owned();
+            let rates = tokio::task::spawn_blocking(move || multipliers(&home, &uid))
+                .await
+                .unwrap_or_default();
+            for model in &mut models {
+                model.credit_multiplier = rates.get(&model.id).copied();
+            }
+        }
+        let entry = InitCache { init, models };
+        if entry
+            .init
+            .get("account")
+            .is_some_and(|a| a.is_object())
+        {
+            self.init_cache
+                .lock()
+                .unwrap()
+                .insert(account.home.clone(), entry.clone());
+        } else {
+            self.init_cache.lock().unwrap().remove(&account.home);
+        }
+        Ok(entry)
+    }
+
     async fn read_status(&self, account: &Account) -> (AccountStatus, Vec<ModelInfo>) {
         let mut status = AccountStatus {
             logged_in: false,
@@ -163,67 +204,78 @@ impl CodebuddyAccounts {
             );
             return (status, Vec::new());
         };
-        let init = match codebuddy_native::probe(&command, &self.env_for(account)).await {
-            Ok(init) => init,
-            Err(err) => {
-                status.note = Some(format!("cannot ask codebuddy: {err}"));
-                let home = account.home.clone();
-                let cached = tokio::task::spawn_blocking(move || cached_models(&home, None))
-                    .await
-                    .unwrap_or_default();
-                return (status, cached);
-            }
+        let cached = self.init_cache.lock().unwrap().get(&account.home).cloned();
+        let mut from_cache = cached.is_some();
+        let mut entry = match cached {
+            Some(entry) => entry,
+            None => match self.probe_init(account, &command).await {
+                Ok(entry) => entry,
+                Err(err) => {
+                    status.note = Some(format!("cannot ask codebuddy: {err}"));
+                    return (status, Vec::new());
+                }
+            },
         };
-        read_initialize(
-            &mut status,
-            &init,
-            account.codebuddy_site.is_none() && !self.env_for(account).is_empty(),
-        );
-        let mut models = models_of(&init);
-        let login = init.get("account").filter(|a| a.is_object());
-        let uid = login
-            .and_then(|a| a.get("uid"))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let home = account.home.clone();
-        let uid_clone = uid.clone();
-        let cached = tokio::task::spawn_blocking(move || {
-            let scoped = cached_models(&home, uid_clone.as_deref());
-            if scoped.is_empty() && uid_clone.is_some() {
-                cached_models(&home, None)
-            } else {
-                scoped
-            }
-        })
-        .await
-        .unwrap_or_default();
-        let rates: HashMap<String, f64> = cached
-            .iter()
-            .filter_map(|m| m.credit_multiplier.map(|r| (m.id.clone(), r)))
-            .collect();
-        for model in &mut models {
-            if model.credit_multiplier.is_none() {
-                model.credit_multiplier = rates.get(&model.id).copied();
-            }
-        }
-        for model in cached {
-            if !models.iter().any(|existing| existing.id == model.id) {
-                models.push(model);
-            }
-        }
-        // Billing: credentials never cross sites — an international login asks the
-        // international origin, a mainland (or machine) login the mainland origins.
+        let shares_login = account.codebuddy_site.is_none() && !self.env_for(account).is_empty();
+        read_initialize(&mut status, &entry.init, shares_login);
         let billing_origins: &[&str] = match account.codebuddy_site {
             Some(CodebuddySite::International) => INTL_BILLING_ORIGINS.as_slice(),
             _ => BILLING_ORIGINS.as_slice(),
         };
-        if status.logged_in
-            && let Some((token, uid)) =
-                login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
-        {
-            match billing_summary(token, uid, billing_origins).await {
-                Ok(summary) => read_summary(&mut status, &summary),
-                Err(err) => status.note = Some(format!("cannot read credits: {err}")),
+        if status.logged_in {
+            let creds = entry
+                .init
+                .get("account")
+                .filter(|a| a.is_object())
+                .and_then(|a| {
+                    Some((
+                        a.get("token")?.as_str()?.to_owned(),
+                        a.get("uid")?.as_str()?.to_owned(),
+                    ))
+                });
+            if let Some((token, uid)) = creds {
+                match billing_summary(&token, &uid, billing_origins).await {
+                    Ok(summary) => read_summary(&mut status, &summary),
+                    Err(_) if from_cache => {
+                        // Token may have rotated or signed out; re-probe the CLI once.
+                        from_cache = false;
+                        self.init_cache.lock().unwrap().remove(&account.home);
+                        match self.probe_init(account, &command).await {
+                            Ok(fresh) => {
+                                entry = fresh;
+                                read_initialize(&mut status, &entry.init, shares_login);
+                                if let Some((token, uid)) = entry
+                                    .init
+                                    .get("account")
+                                    .filter(|a| a.is_object())
+                                    .and_then(|a| {
+                                        Some((
+                                            a.get("token")?.as_str()?,
+                                            a.get("uid")?.as_str()?,
+                                        ))
+                                    })
+                                {
+                                    match billing_summary(token, uid, billing_origins).await {
+                                        Ok(summary) => read_summary(&mut status, &summary),
+                                        Err(err) => {
+                                            status.note =
+                                                Some(format!("cannot read credits: {err}"));
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                status.logged_in = false;
+                                status.auth_mode = None;
+                                status.source = None;
+                                status.as_of = None;
+                                status.note = Some(format!("cannot ask codebuddy: {err}"));
+                                return (status, Vec::new());
+                            }
+                        }
+                    }
+                    Err(err) => status.note = Some(format!("cannot read credits: {err}")),
+                }
             }
         } else if account.codebuddy_site == Some(CodebuddySite::International) && status.logged_in {
             status.note = Some(
@@ -232,7 +284,8 @@ impl CodebuddyAccounts {
                     .into(),
             );
         }
-        (status, models)
+        let _ = from_cache;
+        (status, entry.models)
     }
 }
 
@@ -404,7 +457,6 @@ fn cached_models(home: &Path, uid: Option<&str>) -> Vec<ModelInfo> {
 }
 
 /// Each model's credit multiplier for the user `uid`, backed by [`cached_models`].
-#[cfg(test)]
 fn multipliers(home: &Path, uid: &str) -> HashMap<String, f64> {
     cached_models(home, Some(uid))
         .into_iter()
@@ -691,6 +743,7 @@ impl AccountProvider for CodebuddyAccounts {
 
     fn forget_status(&self, account: &Account) {
         self.live.lock().unwrap().remove(&account.home);
+        self.init_cache.lock().unwrap().remove(&account.home);
     }
 
     fn agent_env(&self, account: &Account) -> Vec<(String, String)> {

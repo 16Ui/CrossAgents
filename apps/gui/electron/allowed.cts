@@ -2,146 +2,20 @@
 // Kept apart from main.cts so a test can check it against src/api.ts without Electron.
 
 export type Level = "read" | "write" | "admin";
+type Route = { method: string; path: string; level: Level };
 
 /**
  * What the page may ask the hub for. It mirrors `src/api.ts`: endpoints the GUI does not
  * call are refused here, so a page that got script injected cannot reach `/v1/shutdown`,
  * delete an account it never shows, or touch the agent-token routes. Adding a call to
- * `src/api.ts` means adding a row here; the refusal says so, and `allowed.test.cts` fails
+ * `src/api.ts` means adding a row to `shared/hub-routes.json`; `allowed.test.cts` fails
  * until it is done.
  *
  * `level` is not enforced here: the hub checks the token's level itself (crates/hub/src/access.rs).
  * It is kept equal to the hub's table so the two can be compared at a glance.
  */
-export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] = [
-  { method: "POST", path: /^\/v1\/runs\/[^/]+\/issues\/dismiss$/, level: "write" },
-  { method: "GET", path: /^\/v1\/info$/, level: "read" },
-  // The person's own terminals. `output` is not here: main.cts relays it, as it does events.
-  { method: "GET", path: /^\/v1\/terminals$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/terminals$/, level: "admin" },
-  { method: "DELETE", path: /^\/v1\/terminals\/[^/]+$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/terminals\/[^/]+\/(input|resize|takeover)$/, level: "admin" },
-  // The built-in browser's half of an agent's tool call (run note browser/contract §2): this
-  // window claims the request, runs it in one of its tabs, and posts what the tool answered.
-  { method: "POST", path: /^\/v1\/browser\/requests\/[^/]+\/(claim|result)$/, level: "write" },
-  { method: "GET", path: /^\/v1\/agents$/, level: "read" },
-  { method: "POST", path: /^\/v1\/agents$/, level: "write" },
-  // `?repo=` rides along; `route()` drops it before matching.
-  { method: "GET", path: /^\/v1\/session-candidates$/, level: "read" },
-  { method: "POST", path: /^\/v1\/agents\/[^/]+\/chat$/, level: "write" },
-  { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
-  {
-    method: "POST",
-    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|connect)$/,
-    level: "write",
-  },
-  { method: "POST", path: /^\/v1\/agents\/[^/]+\/settings$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages$/, level: "write" },
-  // Moves a waiting message to the front and interrupts the turn: the same message, same id.
-  { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+\/send-now$/, level: "write" },
-  { method: "DELETE", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+$/, level: "write" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/execution$/, level: "read" },
-  { method: "POST", path: /^\/v1\/agents\/[^/]+\/execution\/interrupt$/, level: "write" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/resume-command$/, level: "read" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/commands$/, level: "read" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/transcript$/, level: "read" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/turns\/[^/]+\/diff$/, level: "read" },
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/attachments\/[^/]+$/, level: "read" },
-  { method: "GET", path: /^\/v1\/avatars$/, level: "read" },
-  { method: "POST", path: /^\/v1\/avatars$/, level: "write" },
-  { method: "GET", path: /^\/v1\/avatars\/[^/]+$/, level: "read" },
-  { method: "DELETE", path: /^\/v1\/avatars\/[^/]+$/, level: "write" },
-  { method: "GET", path: /^\/v1\/notes$/, level: "read" },
-  { method: "GET", path: /^\/v1\/background$/, level: "read" },
-  { method: "DELETE", path: /^\/v1\/background\/reminders\/[^/]+$/, level: "write" },
-  { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
-  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
-  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade|self-check)$/, level: "admin" },
-  // Extensions (docs/EXTENSIONS.md §3, §5). Enabling one and switching auto-trust are the
-  // person's: the hub's admin level is the real check. A GUI-side call's tool name is bare.
-  { method: "GET", path: /^\/v1\/extensions$/, level: "read" },
-  { method: "GET", path: /^\/v1\/extensions\/[^/]+\/logs$/, level: "read" },
-  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/enable$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/disable$/, level: "write" },
-  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/auto-trust$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/extensions\/[^/]+\/pending\/diff$/, level: "read" },
-  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/tools\/[^/]+$/, level: "write" },
-  { method: "GET", path: /^\/v1\/extensions\/calls\/[^/]+$/, level: "read" },
-  { method: "DELETE", path: /^\/v1\/extensions\/calls\/[^/]+$/, level: "write" },
-  // Looking for the CLIs again runs their version commands, as install and upgrade do.
-  // `?plugin=` rides along; `route()` drops it before matching.
-  { method: "POST", path: /^\/v1\/plugins\/refresh$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/runs$/, level: "read" },
-  // Work groups and their rounds (docs/tasks/G1.md): the page reads them, and nothing writes here.
-  { method: "GET", path: /^\/v1\/works$/, level: "read" },
-  { method: "GET", path: /^\/v1\/works\/[^/]+$/, level: "read" },
-  // What ended runs left in a workspace, deleted rounds too; `?repo=` rides along.
-  { method: "GET", path: /^\/v1\/history$/, level: "read" },
-  // Projects and their checkouts: the id a project's expertise profile is keyed by.
-  { method: "GET", path: /^\/v1\/projects$/, level: "read" },
-  { method: "POST", path: /^\/v1\/runs$/, level: "write" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
-  // `?branches=&force=` rides along; `route()` drops it before matching.
-  { method: "DELETE", path: /^\/v1\/runs\/[^/]+$/, level: "write" },
-  { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish|policy)$/, level: "write" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/diff$/, level: "read" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/trace$/, level: "read" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/cost$/, level: "read" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },
-  { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
-  // 应用到原目录 (LEAD §6): reading what the workers did, then writing it into the person's
-  // own directory. The run page's apply button is the only caller.
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/integration$/, level: "read" },
-  { method: "POST", path: /^\/v1\/runs\/[^/]+\/apply$/, level: "write" },
-  { method: "POST", path: /^\/v1\/repos\/init$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/usage$/, level: "read" },
-  // `?range=&group=&source=` rides along; `route()` drops it before matching.
-  { method: "GET", path: /^\/v1\/usage\/series$/, level: "read" },
-  { method: "GET", path: /^\/v1\/expertise$/, level: "read" },
-  { method: "GET", path: /^\/v1\/expertise\/(candidates|card|maintenance|export)$/, level: "read" },
-  { method: "POST", path: /^\/v1\/expertise\/candidates\/[^/]+\/(accept|reject)$/, level: "write" },
-  // Troubleshooting records of a project and the problems a run recorded (read-only here).
-  { method: "GET", path: /^\/v1\/projects\/[^/]+\/lessons(\/export)?$/, level: "read" },
-  { method: "GET", path: /^\/v1\/lessons\/[^/]+$/, level: "read" },
-  { method: "GET", path: /^\/v1\/runs\/[^/]+\/issues$/, level: "read" },
-  // The person settles what a project is: a remote or checkout bound to it, or two projects
-  // merged (LESSONS §4.2). Only a person does this; no agent tool reaches it.
-  { method: "POST", path: /^\/v1\/projects\/[^/]+\/bind$/, level: "write" },
-  { method: "POST", path: /^\/v1\/projects\/merge$/, level: "write" },
-  { method: "GET", path: /^\/v1\/questions$/, level: "read" },
-  { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
-  { method: "GET", path: /^\/v1\/quota$/, level: "read" },
-  // Devices (docs/API-AUTH.md §2.2). The GUI lists them and revokes one; issuing lives in the
-  // CLI this round (`crossagents device add`), so POST /v1/devices is deliberately absent.
-  { method: "GET", path: /^\/v1\/devices$/, level: "read" },
-  { method: "DELETE", path: /^\/v1\/devices\/[^/]+$/, level: "admin" },
-  // Built-in hole punching (docs/MULTI-NODE.md §14): the status is read; switching it and making a
-  // one-time pairing code are admin, as on the hub.
-  { method: "GET", path: /^\/v1\/link$/, level: "read" },
-  { method: "POST", path: /^\/v1\/link$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/link\/invites$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/accounts\/import$/, level: "read" },
-  { method: "POST", path: /^\/v1\/accounts\/import$/, level: "admin" },
-  { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
-  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/rearm$/, level: "admin" },
-  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/egress$/, level: "admin" },
-  { method: "GET", path: /^\/v1\/egress\/candidates$/, level: "read" },
-  { method: "POST", path: /^\/v1\/egress\/proxies$/, level: "admin" },
-  // Files of a scope: a session's cwd, a run's checkout, a task's worktree.
-  { method: "GET", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/(tree|content|status|search)$/, level: "read" },
-  { method: "POST", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/resolve$/, level: "read" },
-  // An image a tool call named by path, for a thumbnail (agents only: it is the agent's cwd).
-  { method: "GET", path: /^\/v1\/agents\/[^/]+\/files\/image$/, level: "read" },
-  // The commit graph and one commit's diff.
-  { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/graph$/, level: "read" },
-  { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },
-  // The Git page of a project (`?path=` rides along).
-  { method: "GET", path: /^\/v1\/git\/(branches|status|graph)$/, level: "read" },
-  { method: "GET", path: /^\/v1\/git\/commits\/[^/]+(\/diff)?$/, level: "read" },
-];
+const routes = require("../shared/hub-routes.json") as Route[];
+export const ALLOWED = routes.map(({ method, path, level }) => ({ method, path: new RegExp(path), level }));
 
 /** How long the main process waits for an answer before giving up on the hub. */
 export const REQUEST_TIMEOUT_MS = 30_000;

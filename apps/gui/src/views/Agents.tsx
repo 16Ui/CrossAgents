@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } fr
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
-import { RefreshCw } from "lucide-react";
+import { ArrowUpRight, RefreshCw } from "lucide-react";
 import { api, errorText } from "../api";
 import {
   AVATAR_COLORS,
@@ -14,14 +14,12 @@ import {
   StatusChip,
   Vendor,
   VendorMark,
-  RelationChip,
   agentTone,
   sessionLabel,
-  strengthsOf,
   sessionHref,
   useAgents,
 } from "../components";
-import { onHubEvent, useHubData } from "../hub";
+import { onHubEvent, useHubData, usePlugins } from "../hub";
 import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
@@ -30,19 +28,13 @@ import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
 import { useOperation } from "../lib/features";
-import { EgressPicker, proxyOf, shortProxyLabel } from "../egressPicks";
+import { EgressPicker, proxyOf } from "../egressPicks";
 import { PermissionPicks } from "../permissionPicks";
 import { unusableOf } from "../lib/unusable";
 import { useWorkspaces } from "../workspace";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
 
-/**
- * 设置 → 智能体: every agent the hub knows, external ones connected here. There is no team to
- * manage by hand: a Chat's agent brings in helpers itself (or the ones named with @), a Work's
- * lead recruits its own; this page is for looking them over, editing a card and connecting
- * agents that run elsewhere.
- */
 export function AgentsPage() {
   const agents = useAgents();
   const runs = useHubData(
@@ -63,7 +55,18 @@ export function AgentsPage() {
     const id = `tpl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
     saveTemplatesList([...templates, { ...draft, id }]);
   };
+  const [query, setQuery] = useState("");
   const list = (agents.data ?? []).filter((a) => !a.archived_at);
+  const external = list.filter((a) => a.plugin === "external");
+  const managed = list.filter((a) => a.plugin !== "external");
+  const needle = query.trim().replace(/^@/, "").toLowerCase();
+  const visible = managed
+    .filter((agent) =>
+      !needle || (typeof editing === "object" && editing.id === agent.id) ||
+      [agent.topic, sessionLabel(agent), agent.name, agent.home || agent.cwd, agent.model, vendorLabel(agent.plugin)]
+        .some((value) => value?.toLowerCase().includes(needle)),
+    )
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   // A run that was deleted no longer exists to link to (docs/tasks/R1.md §3.2).
   const runIds = runs.data ?? new Set<string>();
   const edit = (agent: Agent, atPermission = false) => {
@@ -74,12 +77,22 @@ export function AgentsPage() {
     setFocusPermission(false);
     setEditing(undefined);
   };
+  const renderAgent = (agent: Agent) =>
+    typeof editing === "object" && editing.id === agent.id ? (
+      <ProfileEditor key={agent.id} agent={agent} focusPermission={focusPermission} onSaveTemplate={addTemplate} onDone={done} />
+    ) : (
+      <SessionRow
+        key={agent.id}
+        agent={agent}
+        runIds={runIds}
+        onEdit={() => edit(agent)}
+        onPermission={() => edit(agent, true)}
+        onConnect={() => api.connectAgent(agent.id).then(setConnect)}
+      />
+    );
 
   return (
     <div className="team-page">
-      <p className="settings-lead">
-        这里列出 hub 里所有的 agent。不用手动组队：Chat 里的 agent 会按需要自己找帮手，也可以在消息里用 @ 点名；Work 的主导 agent 会自己招人。改名、换头像和人设也可以在会话里点头像。
-      </p>
       <VendorClis />
       <AgentTemplates
         templates={templates}
@@ -87,45 +100,47 @@ export function AgentsPage() {
         allAgents={agents.data ?? []}
         onCreated={() => agents.reload()}
       />
-      <div className="row">
-        <span className="chip">{list.length} 个</span>
-        <div className="spacer" />
-        {editing !== "external" && (
-          <button className="ghost" onClick={() => setEditing("external")} title="让别处运行的 agent 通过 MCP 接入 hub">
-            接入外部 agent
-          </button>
-        )}
-      </div>
-      {editing === "external" && <ConnectExternal onDone={() => setEditing(undefined)} />}
-      {connect && <ConnectInstructions info={connect} onDone={() => setConnect(undefined)} />}
       <ErrorBox error={agents.error} />
-      <TeamNotes />
-      {agents.data && !list.length && (
-        <div className="empty">
-          <h1>还没有 agent</h1>
-          <p>
-            在 <a href="#/">首页</a> 发起一个 Chat 或 Work，用到的 agent 都会出现在这里。
-          </p>
+      <section className="settings-section">
+        <div className="settings-head">
+          <h2>外部智能体</h2>
+          <div className="spacer" />
+          {editing !== "external" && (
+            <button className="ghost" onClick={() => setEditing("external")} title="让别处运行的智能体通过 MCP 接入">
+              接入外部智能体
+            </button>
+          )}
         </div>
-      )}
-      <div className="team-grid">
-        {list.map((agent) =>
-          typeof editing === "object" && editing.id === agent.id ? (
-            <div key={agent.id} className="team-wide">
-              <ProfileEditor agent={agent} focusPermission={focusPermission} onSaveTemplate={addTemplate} onDone={done} />
-            </div>
-          ) : (
-            <MemberCard
-              key={agent.id}
-              agent={agent}
-              runIds={runIds}
-              onEdit={() => edit(agent)}
-              onPermission={() => edit(agent, true)}
-              onConnect={() => api.connectAgent(agent.id).then(setConnect)}
-            />
-          ),
+        {editing === "external" && <ConnectExternal onDone={done} />}
+        {connect && <ConnectInstructions info={connect} onDone={() => setConnect(undefined)} />}
+        {external.length > 0 && <div className="settings-session-list">{external.map(renderAgent)}</div>}
+        {agents.data && external.length === 0 && editing !== "external" && (
+          <p className="setting-hint">还没有接入外部智能体。</p>
         )}
-      </div>
+      </section>
+      {agents.data && (
+        <details className="settings-sessions">
+          <summary>托管会话 <span className="chip">{managed.length}</span></summary>
+          <div className="settings-session-content">
+            <p className="setting-hint">点击会话名查看记录。给已停止的会话发送新消息时，系统会尝试恢复上下文。</p>
+            {managed.length > 0 && (
+              <input
+                type="search"
+                aria-label="搜索托管会话"
+                placeholder="搜索名称、项目或模型"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            )}
+            {visible.length > 0 ? (
+              <div className="settings-session-list">{visible.map(renderAgent)}</div>
+            ) : (
+              <p className="setting-hint">{managed.length ? "没有匹配的会话。" : "还没有托管会话。"}</p>
+            )}
+          </div>
+        </details>
+      )}
+      <TeamNotes />
     </div>
   );
 }
@@ -147,20 +162,12 @@ const PROBE_POLLS = 40;
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
  *
- * The list is not only what the hub saw when it started: entering the page and coming back to
- * the window read it again, and the button asks the hub to look again and probe the versions,
+ * The shared list revalidates on window focus and when an old page is reopened;
+ * the button asks the hub to look again and probe the versions,
  * so a CLI installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
-  const plugins = useHubData(
-    () => api.listPlugins().then((r) => r.plugins),
-    [],
-    (e) =>
-      e.type.startsWith("account.") ||
-      e.type === "plugin.changed" ||
-      e.type.startsWith("cli.install."),
-    "plugins",
-  );
+  const plugins = usePlugins();
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
   // A click the hub refused because that plugin already has a job: said in words, per row.
@@ -204,23 +211,8 @@ function VendorClis() {
       });
   }, [reload]);
 
-  // Entering the page and coming back to the window only read the list. Reading it is enough
-  // for a CLI installed in a terminal to appear: a miss is never cached, and a file that
-  // changed is asked its version again. Triggering a full look here instead kept asking the
-  // CLIs -- and kept their rows saying "probing" for as long as the person kept alt-tabbing
-  // back to the window.
-  useEffect(() => {
-    const onFocus = () => reload();
-    const onVisible = () => {
-      if (document.visibilityState === "visible") reload();
-    };
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [reload]);
+  // hub.ts shares focus/visibility refreshes with Home and the other pickers. These
+  // only read the list; a full version probe remains the person's explicit action.
 
   useEffect(
     () =>
@@ -643,29 +635,7 @@ function TeamNotes() {
   );
 }
 
-/** What the agent is doing now and what it is good at; nothing when the hub says neither. */
-function MemberTags({ agent }: { agent: Agent }) {
-  const strengths = strengthsOf(agent);
-  const proxy = proxyOf(agent);
-  return (
-    <div className="member-tags">
-      <RelationChip agent={agent} />
-      {proxy && (
-        <span className="chip small" title={`独立出口：${proxy}`}>
-          出口: {shortProxyLabel(proxy)}
-        </span>
-      )}
-      {strengths.length > 0 && <span className="muted small">擅长</span>}
-      {strengths.map((s) => (
-        <span key={s} className="chip small strength" title={`擅长：${s}`}>
-          {s}
-        </span>
-      ))}
-    </div>
-  );
-}
-
-function MemberCard({
+function SessionRow({
   agent,
   runIds,
   onEdit,
@@ -682,20 +652,36 @@ function MemberCard({
 }) {
   const spawnedBy = (agent.config as Record<string, unknown> | null)?.spawned_by_run;
   const runId = typeof spawnedBy === "string" ? spawnedBy : undefined;
-  // This machine cannot hand it work (Cursor on Windows in a guard run, a model the account no
-  // longer offers): greyed out, with the hub's reason in words and in the tooltip.
+  const label = agent.topic?.trim() || sessionLabel(agent);
+  const workspace = agent.home || agent.cwd;
+  const project = workspace.split(/[\\/]/).filter(Boolean).at(-1) ?? workspace;
   const unusable = unusableOf(agent);
   return (
-    <div className={`member ${unusable ? "unusable" : ""}`} data-unusable={unusable ? "" : undefined}>
-      <div className="member-head">
-        <Avatar agent={agent} size={40} status />
-        <div className="member-who">
-          <a className="member-name" href={sessionHref(agent)} title={unusable}>
-            {sessionLabel(agent)}
-          </a>
-          {agent.profile.title && <span className="member-title muted">{agent.profile.title}</span>}
+    <article className="settings-session" data-unusable={unusable ? "" : undefined}>
+      <div className="settings-session-row">
+        <div className="settings-session-identity">
+          <Avatar agent={agent} size={30} />
+          <div className="settings-session-who">
+            <a className="settings-session-link" href={sessionHref(agent)} title={`打开会话：${label}`}>
+              <span>{label}</span>
+              <ArrowUpRight size={14} aria-hidden />
+            </a>
+            <div className="settings-session-context">
+              {project && <span className="muted" title={workspace}>{project}</span>}
+              {runId && runIds.has(runId) && <a href={`#/runs/${runId}`}>所属工作</a>}
+              <Vendor plugin={agent.plugin} model={agent.model} title={agent.driver ?? undefined} />
+            </div>
+          </div>
         </div>
-        <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+        <div className="settings-session-actions">
+          <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+          {agent.plugin === "external" && (
+            <button className="ghost small" onClick={onConnect} title="重新生成令牌和 MCP 配置">
+              连接配置
+            </button>
+          )}
+          <button className="ghost small" onClick={onEdit} aria-label={`编辑 ${label} 的设置`}>设置</button>
+        </div>
       </div>
       {unusable && (
         <p className="member-unusable" title={unusable}>
@@ -715,28 +701,7 @@ function MemberCard({
           )}
         </p>
       )}
-      <MemberTags agent={agent} />
-      <div className="member-foot">
-        {runId && runIds.has(runId) && (
-          <a className="chip accent" href={`#/runs/${runId}`} title="由 run 的 lead 招来的队友">
-            run 招募
-          </a>
-        )}
-        <Vendor plugin={agent.plugin} model={agent.model} title={agent.driver ?? undefined} />
-        <span className="mono small muted member-addr" title={agent.cwd}>
-          @{agent.name}
-        </span>
-        <div className="spacer" />
-        {agent.plugin === "external" && (
-          <button className="ghost" onClick={onConnect} title="重新生成令牌和 MCP 配置">
-            连接配置
-          </button>
-        )}
-        <button className="ghost" onClick={onEdit}>
-          编辑
-        </button>
-      </div>
-    </div>
+    </article>
   );
 }
 
@@ -752,7 +717,7 @@ export function ProfileEditor({
   focusPermission?: boolean;
   onSaveTemplate?: (tpl: Omit<AgentTemplate, "id">) => void;
 }) {
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
   const [name, setName] = useState(agent.name);

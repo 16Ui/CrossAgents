@@ -180,7 +180,7 @@ async fn new_file(dir: &Path, file: &str, extra: &[&str]) -> Result<String, Core
 /// `git <args>` in `dir`, whose exit code may say "there are differences" (1, as
 /// `--no-index` does) as well as success; its standard output.
 async fn git_may_differ(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
-    let out = tokio::process::Command::new("git")
+    let out = tokio::process::Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(args)
         .current_dir(dir)
@@ -231,7 +231,7 @@ async fn hash_content(hash: &mut Hash, file: &Path) {
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>, CoreError> {
-    let out = tokio::process::Command::new("git")
+    let out = tokio::process::Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(args)
         .current_dir(dir)

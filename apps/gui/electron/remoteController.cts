@@ -2,6 +2,7 @@
 // pairing a new device and the tunnel to the hub. Electron stays outside (the crypto, the
 // windows), so tests drive it with a fake ssh and a stand-in crypto.
 
+import { sealTransfer } from "./transfer.cjs";
 import {
   checkDeviceName, checkTarget, describeTarget, openToken, publicState, readRecord, removeRecord, REPAIR, sealToken,
   writeRecord, type ConnectionState, type Crypto, type PairStep, type RemoteRecord, type RemoteTarget, type TunnelState,
@@ -85,6 +86,14 @@ export class RemoteController {
   /** A request in remote mode got 401: the device was revoked. */
   unauthorized(): void {
     if (this.mode() === "remote") this.tunnel?.unauthorized();
+  }
+
+  exportPairing(): { file: string; key: string } {
+    const record = this.record;
+    const token = record && openToken(this.opts.crypto, record.token);
+    if (!record || !token) throw new Error("没有可导出的配对");
+    const { token: _sealed, ...metadata } = record;
+    return sealTransfer("crossagents-pairing-v1", { ...metadata, token });
   }
 
   pair(target: unknown, deviceName: unknown): Promise<ConnectionState> {

@@ -6,8 +6,8 @@
 /** A file a reply points at: the path as written (relative or absolute), and a line. */
 export type FileTarget = { path: string; line?: number; col?: number };
 
-/** `:12`, `:12:5`, `#L12`, `#L12C5`, `#L12-L20` at the end of a path. */
-const LINE_SUFFIX = /(?::(\d+)(?::(\d+))?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)$/;
+/** `:12`, `:12:5`, `:12-20`, `:12:5-20:8`, `#L12`, `#L12C5`, `#L12-L20` at the end of a path. */
+const LINE_SUFFIX = /(?::(\d+)(?::(\d+))?(?:-\d+(?::\d+)?)?|#L(\d+)(?:C(\d+))?(?:-L?\d+(?:C\d+)?)?)$/;
 /** `C:\` or `C:/`: a Windows drive, not a scheme. */
 const DRIVE = /^[a-zA-Z]:[\\/]/;
 /** `javascript:`, `file:`, `vscode:`, `data:`… */

@@ -87,6 +87,11 @@ const zhCN = {
 
   "quota.mini": "额度 {pct}% · {window}",
   "quota.miniTitle": "{name} · {window}已用 {pct}%",
+  "quota.fleet": "号池 {ok}/{total} 可用",
+  "quota.peekTitle": "账号号池状态",
+  "quota.unlogged": "未登录",
+  "quota.noLimit": "无额度限制",
+  "quota.atRisk": "风控暂停",
 
   "hub.connected": "hub 已连接",
   "hub.connecting": "连接中…",
@@ -204,6 +209,10 @@ const zhCN = {
   "draft.filesTooBig": "图片太大，没能暂存；文本留着了",
   "draft.notKept": "这台机器不让暂存，离开本页会丢",
   "session.existing": "已有会话",
+  "session.localCodex": "本地 Codex 会话",
+  "session.importTag": "导入",
+  "session.importTurns": "{n} 轮",
+  "session.importHint": "直接点发送即可导入并查看历史，也可以直接输入下一句继续聊",
   "session.state.idle": "空闲",
   "session.state.busy": "占用中",
   "session.state.archived": "已归档",

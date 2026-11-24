@@ -27,6 +27,8 @@ import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
 import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
 import type { ImportAccountsResponse } from "@bindings/ImportAccountsResponse";
+import type { ImportSessionRequest } from "@bindings/ImportSessionRequest";
+import type { ImportSessionsResponse } from "@bindings/ImportSessionsResponse";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
@@ -362,6 +364,12 @@ export const api = {
     const query = [repo && `repo=${enc(repo)}`, run && `run=${enc(run)}`].filter(Boolean).join("&");
     return request<ListSessionCandidatesResponse>("GET", `/v1/session-candidates${query ? `?${query}` : ""}`);
   },
+  /** Local external CLI sessions (Codex) found on this machine, newest first. */
+  importableSessions: (cwd?: string) =>
+    request<ImportSessionsResponse>("GET", `/v1/sessions/import${cwd ? `?cwd=${enc(cwd)}` : ""}`),
+  /** Imports a local external CLI session as a CrossAgents agent. */
+  importSession: (req: ImportSessionRequest) =>
+    request<Agent>("POST", "/v1/sessions/import", req),
   /** Continues an existing conversation; `restore` brings an archived session back first. */
   chat: (key: string, req: StartChatRequest) => request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/chat`, req),
   sendMessage: (key: string, req: SendMessageRequest) =>
@@ -381,6 +389,7 @@ export const api = {
   setModel: (key: string, model: string | null, effort?: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model, effort }),
   renameAgent: (key: string, name: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/name`, { name }),
   setTopic: (key: string, topic: string | null) => request<Agent>("POST", `/v1/agents/${enc(key)}/topic`, { topic }),
+  setAgentCwd: (key: string, cwd: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/cwd`, { cwd }),
   archiveAgent: (key: string, archived: boolean) => request<Agent>("POST", `/v1/agents/${enc(key)}/archive`, { archived }),
   /** What the session works on for a run now (docs/tasks/S1.md §3.3). */
   agentExecution: (key: string) => request<AgentExecutionResponse>("GET", `/v1/agents/${enc(key)}/execution`),
@@ -560,6 +569,9 @@ export const api = {
   dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
 
   listTerminals: () => request<ListTerminalsResponse>("GET", "/v1/terminals"),
+  profile: () => request<{ name: string; avatar: string | null }>("GET", "/v1/profile"),
+  setProfile: (profile: { name: string; avatar: string | null }) =>
+    request<{ name: string; avatar: string | null }>("POST", "/v1/profile", profile),
   createTerminal: (req: CreateTerminalRequest) => request<TerminalInfo>("POST", "/v1/terminals", req),
   closeTerminal: (id: string) => request<void>("DELETE", `/v1/terminals/${enc(id)}`),
   terminalInput: (id: string, req: TerminalInputRequest) => request<TerminalInputResponse>("POST", `/v1/terminals/${enc(id)}/input`, req),
@@ -575,6 +587,8 @@ export const api = {
     request<void>("POST", `/v1/browser/requests/${enc(id)}/result`, result),
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
+  /** Online execution nodes (built-in local hub + connected remote `crossagents node run` daemons). */
+  listNodes: () => request<import("@bindings/ListNodesResponse").ListNodesResponse>("GET", "/v1/nodes"),
   /** Every device the hub has issued, revoked ones included; no tokens or hashes (docs/API-AUTH.md §2.2). */
   listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),
   /** Revokes a device's credential; idempotent, answers the device as it now stands (`admin`). */

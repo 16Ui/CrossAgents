@@ -109,10 +109,12 @@ pub struct AppState {
     pub terminals: Arc<crate::terminal::Terminals>,
     /// The built-in hole-punching entrance (docs/MULTI-NODE.md §14).
     pub link: Arc<crate::link::LinkService>,
+    /// Connected remote execution nodes (`crossagents node run`).
+    pub remote_nodes: Arc<crate::remote_nodes::RemoteNodes>,
 }
 
 impl AppState {
-    fn store(&self) -> &Arc<dyn Store> {
+    pub(crate) fn store(&self) -> &Arc<dyn Store> {
         self.bus.store()
     }
 }
@@ -126,6 +128,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/session-candidates", get(session_candidates))
+        .route(
+            "/v1/sessions/import",
+            get(crate::session_import::import_candidates)
+                .post(crate::session_import::import_session),
+        )
         .route(
             "/v1/agents/{key}/chat",
             post(start_chat).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
@@ -156,6 +163,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/model", post(set_model))
         .route("/v1/agents/{key}/name", post(rename_agent))
         .route("/v1/agents/{key}/topic", post(set_topic))
+        .route("/v1/agents/{key}/cwd", post(set_agent_cwd))
         .route("/v1/agents/{key}/archive", post(archive_agent))
         .route("/v1/agents/{key}/execution", get(agent_execution))
         .route(
@@ -171,6 +179,12 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
         )
         .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
+        .route(
+            "/v1/profile",
+            get(get_user_profile)
+                .post(set_user_profile)
+                .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
+        )
         .route("/v1/notes", get(list_notes))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
@@ -297,6 +311,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_projects::router())
         .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
+        .merge(crate::api_nodes::control_router())
         .merge(crate::browser::router())
         .merge(crate::api_bytes::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -309,10 +324,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             require_agent_token,
         ));
+    let node_channel = crate::api_nodes::node_channel_router(state.clone());
     Router::new()
         .route("/v1/health", get(health))
         .merge(authed)
         .merge(me)
+        .merge(node_channel)
         .with_state(state)
 }
 
@@ -332,7 +349,7 @@ impl AppError {
         Self(status, ApiError::new(code, message))
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
     }
 
@@ -630,8 +647,10 @@ fn hostname() -> String {
     .filter(|v| !v.is_empty());
     from_env
         .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
+            use crossagents_core::process::NoWindow;
+            let mut cmd = std::process::Command::new("hostname");
+            cmd.no_window();
+            cmd.output()
                 .ok()
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
@@ -972,6 +991,7 @@ async fn create_agent(
         }
     }
     let id = AgentId::new();
+    let mut config = req.config;
     // No directory: a chat outside any project gets its own under the hub home (by id: the
     // name can change).
     let dir = if req.cwd.trim().is_empty() {
@@ -984,6 +1004,61 @@ async fn create_agent(
             )
         })?;
         dir
+    } else if req.worktree == Some(true) {
+        let base = dunce::canonicalize(&req.cwd)
+            .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
+        if !base.is_dir() {
+            return Err(AppError::bad_request(format!(
+                "cwd {:?} is not a directory",
+                req.cwd
+            )));
+        }
+        let short = id.to_string().chars().take(8).collect::<String>();
+        let branch = format!("ca/chat-{short}");
+        let wt_root = state.home.join("worktrees");
+        let wt_dir = wt_root.join(format!("chat-{short}"));
+        let base_clone = base.clone();
+        let wt_clone = wt_dir.clone();
+        let branch_clone = branch.clone();
+        let repo_root = tokio::task::spawn_blocking(move || -> Result<String, String> {
+            let rev = std::process::Command::new("git")
+                .args(["-C", &base_clone.to_string_lossy(), "rev-parse", "--show-toplevel"])
+                .output()
+                .map_err(|e| format!("running git: {e}"))?;
+            if !rev.status.success() {
+                return Err("该目录不是 Git 仓库，无法创建独立 worktree".into());
+            }
+            let top = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
+            if let Some(parent) = wt_clone.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("creating worktree dir: {e}"))?;
+            }
+            let add = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &top,
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch_clone,
+                    &wt_clone.to_string_lossy(),
+                    "HEAD",
+                ])
+                .output()
+                .map_err(|e| format!("running git worktree add: {e}"))?;
+            if !add.status.success() {
+                let stderr = String::from_utf8_lossy(&add.stderr).trim().to_owned();
+                return Err(format!("创建 Git worktree 失败：{stderr}"));
+            }
+            Ok(top)
+        })
+        .await
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, format!("worktree task: {e}")))?
+        .map_err(AppError::bad_request)?;
+        if let Some(obj) = config.as_object_mut() {
+            obj.insert("worktree_repo".into(), serde_json::Value::String(repo_root));
+            obj.insert("worktree_branch".into(), serde_json::Value::String(branch));
+        }
+        wt_dir
     } else {
         req.cwd.clone().into()
     };
@@ -1012,7 +1087,7 @@ async fn create_agent(
         model: req.model,
         role: req.role.unwrap_or_default(),
         cwd,
-        config: req.config,
+        config,
         status: AgentStatus::Stopped,
         created_at: Utc::now(),
         profile,
@@ -1318,6 +1393,29 @@ async fn set_topic(
         state
             .runtime
             .set_topic(&AgentKey::parse(&key), req.topic)
+            .await?,
+    ))
+}
+
+/// Moves a session to another working directory (rehoming a chat into a project).
+async fn set_agent_cwd(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<crossagents_api_types::SetCwdRequest>,
+) -> ApiResult<Json<Agent>> {
+    let raw = req.cwd.trim();
+    if raw.is_empty() {
+        return Err(AppError::bad_request("cwd must not be empty"));
+    }
+    let cwd = dunce::canonicalize(raw)
+        .map_err(|e| AppError::bad_request(format!("cwd {raw:?}: {e}")))?;
+    if !cwd.is_dir() {
+        return Err(AppError::bad_request(format!("cwd {raw:?} is not a directory")));
+    }
+    Ok(Json(
+        state
+            .runtime
+            .place(&AgentKey::parse(&key), &cwd, false)
             .await?,
     ))
 }
@@ -1831,6 +1929,52 @@ async fn get_avatar(
         .ok_or_else(|| CoreError::NotFound { kind: "avatar", id }.into())
 }
 
+const USER_PROFILE_MAX_AVATAR_BYTES: usize = 512 * 1024;
+
+async fn get_user_profile(
+    State(state): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::UserProfile> {
+    let path = state.home.join("profile.json");
+    let profile = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<crossagents_api_types::UserProfile>(&bytes).ok())
+        .unwrap_or_default();
+    Json(profile)
+}
+
+async fn set_user_profile(
+    State(state): State<Arc<AppState>>,
+    Json(mut req): Json<crossagents_api_types::UserProfile>,
+) -> ApiResult<Json<crossagents_api_types::UserProfile>> {
+    req.name = req.name.trim().chars().take(32).collect();
+    if let Some(avatar) = &req.avatar {
+        if avatar.is_empty() {
+            req.avatar = None;
+        } else if !avatar.starts_with("data:image/") || avatar.len() > USER_PROFILE_MAX_AVATAR_BYTES {
+            return Err(AppError::bad_request("invalid user avatar"));
+        }
+    }
+    let path = state.home.join("profile.json");
+    let bytes = serde_json::to_vec_pretty(&req).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            e.to_string(),
+        )
+    })?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, bytes).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            e.to_string(),
+        )
+    })?;
+    Ok(Json(req))
+}
+
 async fn delete_avatar(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1985,6 +2129,10 @@ async fn set_plugin_models(
             id: name.clone(),
         })?;
     state.models.set(&name, req.shown)?;
+    state
+        .bus
+        .publish(EventKind::PluginChanged { name: name.clone() })
+        .await?;
     Ok(Json(plugin_info(&state, driver.as_ref()).await))
 }
 
@@ -3362,7 +3510,8 @@ async fn my_tools(
     State(state): State<Arc<AppState>>,
     Extension(agent): Extension<Agent>,
 ) -> Json<ListToolsResponse> {
-    let tools = state.orchestrator.tools_for(&agent).await;
+    let mut tools = state.orchestrator.tools_for(&agent).await;
+    tools.extend(crate::api_nodes::mcp_tools());
     Json(ListToolsResponse { tools })
 }
 
@@ -3389,11 +3538,17 @@ async fn call_tool(
     }
     // Detached: a tool may end the caller's own session (e.g. a reviewer's verdict removes
     // the reviewer), which drops this request. The state change must still finish.
+    let state_for_task = state.clone();
     let orchestrator = state.orchestrator.clone();
     let bus = state.bus.clone();
     let (id, tool) = (agent.id, name.clone());
     let call = tokio::spawn(async move {
-        let result = orchestrator.call_tool(&agent, &name, input).await;
+        let result =
+            if let Some(res) = crate::api_nodes::call_mcp_tool(&state_for_task, &name, input.clone()).await {
+                res
+            } else {
+                orchestrator.call_tool(&agent, &name, input).await
+            };
         // What the agent did is in its round (`agent.round`, rounds.rs). Recorded in the same
         // detached task, so a request that was dropped still counts. An external agent's calls
         // land in its next round, since the hub starts and ends its turns at the reads (rounds.rs).

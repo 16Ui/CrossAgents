@@ -1,18 +1,21 @@
 // Flat project/member navigation. Domain grouping and human work live in pure views.
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Work } from "@bindings/Work";
 import type { WorkDetail } from "@bindings/WorkDetail";
-import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
+import { deliveryOf, lastError, markAllSeen, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
-import { Avatar, BrandMark, Icon, ModelMark, VendorMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel, vendorName } from "./components";
+import { Avatar, BrandMark, Icon, ModelMark, VendorMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
 import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
+import { ChatAvatar } from "./ChatAvatar";
+import { useChatProfile } from "./lib/chatProfile";
+import { vendorLabel } from "./lib/models";
 import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
@@ -21,7 +24,7 @@ import { sessionWork } from "./lib/projectView";
 import { stepLine } from "./lib/workGroups";
 import { WorkDetails } from "./lib/workDetails";
 import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
-import { CENTRE_MACHINE, machineFoldKey, machineGroups, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
+import { CENTRE_MACHINE, machineFoldKey, machineGroups, reorderIds, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { IssueNoticeActions } from "./lessons/IssueNoticeActions";
@@ -29,7 +32,7 @@ import { useUnboundProjects } from "./lessons/projects";
 import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
-import { level, tightest, windowLabel } from "./lib/quota";
+import { level, resetText, tightest } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
@@ -42,6 +45,51 @@ import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspac
 const Confirmed = createContext(true);
 const Needs = createContext<readonly TodoItem[]>([]);
 const Runs = createContext<readonly RunDetail[]>([]);
+/** Persisted per-group session drag-and-drop order. */
+const SESSION_ORDER_KEY = "crossagents.sessionOrder";
+const sessionOrderListeners = new Set<() => void>();
+let sessionOrderRaw: string | null | undefined;
+let sessionOrderCache: Record<string, string[]> = {};
+function readSessionOrder(): Record<string, string[]> {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(SESSION_ORDER_KEY);
+  } catch {
+    raw = null;
+  }
+  if (raw === sessionOrderRaw) return sessionOrderCache;
+  sessionOrderRaw = raw;
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    sessionOrderCache = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string[]>) : {};
+  } catch {
+    sessionOrderCache = {};
+  }
+  return sessionOrderCache;
+}
+function saveSessionOrder(group: string, ids: string[]) {
+  const next = { ...readSessionOrder(), [group]: ids };
+  const raw = JSON.stringify(next);
+  try {
+    localStorage.setItem(SESSION_ORDER_KEY, raw);
+  } catch {
+    // Ignore storage failures.
+  }
+  sessionOrderRaw = raw;
+  sessionOrderCache = next;
+  for (const fn of sessionOrderListeners) fn();
+}
+function useSessionOrder(): Record<string, string[]> {
+  return useSyncExternalStore(
+    (cb) => {
+      sessionOrderListeners.add(cb);
+      return () => sessionOrderListeners.delete(cb);
+    },
+    readSessionOrder,
+    readSessionOrder,
+  );
+}
+let draggingSession: { group: string; id: string } | null = null;
 /** How long a row stays lit after its turn ends. */
 const DONE_FLASH = 1800;
 /** An entry the hub refused (403): still readable, so its reason shows, but not clickable. */
@@ -52,6 +100,109 @@ const CRAWL_DELAY = 200;
 const CRAWL_PX_PER_MS = 0.04;
 /** Clipped by less than this, moving reads as jitter, not as showing more. */
 const CRAWL_MIN_PX = 8;
+/** Minimalist 44px collapsed icon rail: expand, new, search, live/waiting session avatars, tools popover, settings. */
+export function SidebarRail({ route, onExpand }: { route: string[]; onExpand: () => void }) {
+  const agents = useHubData(() => api.listAgents().then((r) => r.agents), [], (e) => e.type.startsWith("agent."));
+  const questions = useQuestions();
+  const unread = useUnread();
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const inToolRoute = ["usage", "expertise", "git", "lessons", "extensions", "ext"].includes(route[0] ?? "");
+  const waitingIds = new Set((questions.data?.items ?? []).filter((q) => q.status === "open").map((q) => q.from));
+
+  const liveAgents = (agents.data ?? [])
+    .filter((a) => !a.archived_at)
+    .map((a) => {
+      const state = deliveryOf(a.id)?.state;
+      const running = state ? state !== "idle" : a.status === "running";
+      const waiting = waitingIds.has(a.id);
+      const err = a.status === "error" || unread[a.id]?.kind === "error";
+      const done = unread[a.id]?.kind === "done";
+      const priority = err ? 4 : waiting ? 3 : running ? 2 : done ? 1 : 0;
+      return { agent: a, running, waiting, err, done, priority };
+    })
+    .filter((x) => x.priority > 0)
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, 6);
+
+  return (
+    <nav className="sidebar-rail" aria-label="极简导航栏">
+      <button type="button" className="rail-btn brand-btn" onClick={onExpand} title="展开侧栏 (Ctrl+B)" aria-label="展开侧栏">
+        <BrandMark size={18} />
+      </button>
+      <a className={`rail-btn ${!route[0] ? "active" : ""}`} href="#/" onClick={() => selectWorkspace("")} title="新建会话 (Ctrl+N)" aria-label="新建会话">
+        <Icon name="plus" size={16} />
+      </a>
+      <button
+        type="button"
+        className="rail-btn"
+        title="搜索会话 (Ctrl+K)"
+        aria-label="搜索会话"
+        onClick={() => {
+          onExpand();
+          requestAnimationFrame(() => document.querySelector<HTMLInputElement>(".sidebar .search input")?.focus());
+        }}
+      >
+        <Icon name="search" size={15} />
+      </button>
+      {liveAgents.length > 0 && <div className="rail-sep" />}
+      <div className="rail-live">
+        {liveAgents.map(({ agent, running, waiting, err }) => {
+          const active = route[0] === "s" && isAgent(agent, route[1]);
+          const dotClass = err ? "danger" : waiting ? "warn" : running ? "live" : "";
+          const hint = `${sessionLabel(agent)} · ${err ? "出错" : waiting ? "等你处理" : running ? "运行中" : "有新回复"}`;
+          return (
+            <a key={agent.id} className={`rail-btn ${active ? "active" : ""}`} href={sessionHref(agent)} title={hint} aria-label={hint}>
+              <Avatar agent={agent} size={22} />
+              <span className={`rail-dot ${dotClass}`} aria-hidden="true" />
+            </a>
+          );
+        })}
+      </div>
+      <div className="rail-sep" />
+      <button
+        type="button"
+        className={`rail-btn ${toolsOpen || inToolRoute ? "active" : ""}`}
+        title="更多工具（用量、专长、Git、排障、扩展）"
+        aria-label="更多工具"
+        aria-expanded={toolsOpen}
+        onClick={() => setToolsOpen((v) => !v)}
+      >
+        <Icon name="sliders" size={15} />
+      </button>
+      <a className={`rail-btn ${route[0] === "settings" ? "active" : ""}`} href="#/settings" title="设置" aria-label="设置">
+        <Icon name="settings" size={16} />
+      </a>
+      {toolsOpen && (
+        <>
+          <div className="menu-scrim" onClick={() => setToolsOpen(false)} />
+          <div className="context-menu rail-tools-pop" role="menu">
+            <a className="menu-item" href="#/usage" onClick={() => setToolsOpen(false)}>
+              <Icon name="chart" size={14} />
+              <span className="menu-label">{t("nav.usage")}</span>
+            </a>
+            <a className="menu-item" href="#/expertise" onClick={() => setToolsOpen(false)}>
+              <Icon name="brain" size={14} />
+              <span className="menu-label">{t("nav.expertise")}</span>
+            </a>
+            <a className="menu-item" href="#/git" onClick={() => setToolsOpen(false)}>
+              <Icon name="branch" size={14} />
+              <span className="menu-label">Git</span>
+            </a>
+            <a className="menu-item" href="#/lessons" onClick={() => setToolsOpen(false)}>
+              <Icon name="tasks" size={14} />
+              <span className="menu-label">{t("nav.lessons")}</span>
+            </a>
+            <a className="menu-item" href="#/extensions" onClick={() => setToolsOpen(false)}>
+              <Icon name="panel" size={14} />
+              <span className="menu-label">扩展</span>
+            </a>
+          </div>
+        </>
+      )}
+    </nav>
+  );
+}
+
 /** How long a row's archive can be taken back from the sidebar. */
 const UNDO_WINDOW = 8000;
 const Archiving = createContext<(agent: Agent) => void>(() => {});
@@ -344,14 +495,96 @@ export function Sidebar({ route }: { route: string[] }) {
   const unboundProjects = useUnboundProjects(runs);
   // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
   const extensionPages = [...useExtensions().pages.values()];
-  const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
-  const shown = searchGroups(groups, query);
+  const [onlyActive, setOnlyActive] = useState(false);
+  const inToolRoute = ["usage", "expertise", "git", "lessons", "extensions", "ext"].includes(route[0] ?? "");
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const showTools = toolsOpen || inToolRoute;
+  const sessionOrder = useSessionOrder();
+  const [ctxMenu, setCtxMenu] = useState<{ agent: Agent; x: number; y: number } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ agent: Agent; value: string } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const flashToast = (msg: string) => {
+    clearTimeout(toastTimer.current);
+    setToast(msg);
+    toastTimer.current = setTimeout(() => setToast(null), 3200);
+  };
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
+  const copyResume = async (agent: Agent) => {
+    try {
+      const res = await api.resumeCommand(agent.id);
+      if (res.command) {
+        await navigator.clipboard.writeText(res.command);
+        flashToast(`已复制 ${displayName(agent)} 的终端恢复命令`);
+      } else {
+        flashToast(res.unavailable ?? "这个会话暂时没有终端恢复命令");
+      }
+    } catch (err) {
+      flashToast(errorText(err));
+    }
+  };
+  const submitRename = async () => {
+    if (!renameTarget) return;
+    const { agent, value } = renameTarget;
+    setRenameTarget(null);
+    try {
+      await api.setTopic(agent.id, value.trim() || null);
+      flashToast("已更新会话标题");
+    } catch (err) {
+      flashToast(errorText(err));
+    }
+  };
+  const batchArchiveIdle = async (cwd: string) => {
+    const key = wsKey(cwd);
+    const targets = everyone.filter(
+      (a) =>
+        !a.archived_at &&
+        wsKey(a.cwd) === key &&
+        !isSession(a) &&
+        !pinned.has(sessionKey(a)) &&
+        a.status !== "running" &&
+        deliveryOf(a.id)?.state !== "turn",
+    );
+    if (!targets.length) {
+      flashToast("没有可归档的空闲会话");
+      return;
+    }
+    await Promise.allSettled(targets.map((a) => api.archiveAgent(a.id, true)));
+    flashToast(`已归档 ${targets.length} 个空闲会话`);
+  };
+  const groups = sidebarGroups(everyone, runs, list, pinned, [...order], sessionOrder);
+  const isActiveMember = (m: SidebarMember) => {
+    const state = deliveryOf(m.agent.id)?.state;
+    const running = state ? state !== "idle" : m.agent.status === "running";
+    return running || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id);
+  };
+  const filteredGroups = onlyActive
+    ? groups.map((g) => ({ ...g, members: g.members.filter(isActiveMember) })).filter((g) => g.members.length > 0)
+    : groups;
+  const shown = searchGroups(filteredGroups, query);
   // A work group belongs to the project its `repo` names; one no project claims goes last.
   const projectKeys = new Set(groups.map((g) => g.key));
   const otherWorks = workList.filter((w) => !projectKeys.has(workProject(w)));
   const archived = everyone.filter((a) => a.archived_at);
   const isSession = (a: Agent) => route[0] === "s" && isAgent(a, route[1]);
-  const row = (member: SidebarMember) => <SessionRow key={member.agent.id} member={member} active={isSession(member.agent)} />;
+  const reorderInGroup = (groupKey: string, currentIds: string[], fromId: string, toId: string, after: boolean) => {
+    saveSessionOrder(groupKey, reorderIds(currentIds, fromId, toId, after));
+  };
+  const openRowMenu = (agent: Agent) => (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setCtxMenu({ agent, x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 220) });
+  };
+  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[]) => (
+    <SessionRow
+      key={member.agent.id}
+      member={member}
+      active={isSession(member.agent)}
+      dragKey={groupKey ? { group: groupKey, id: member.agent.id } : undefined}
+      onReorder={groupKey && groupIds ? (fromId, toId, after) => reorderInGroup(groupKey, groupIds, fromId, toId, after) : undefined}
+      onMenu={openRowMenu(member.agent)}
+    />
+  );
   const pinnedMembers = [
     ...new Map(
       groups
@@ -380,51 +613,80 @@ export function Sidebar({ route }: { route: string[] }) {
                 <Icon name="close" size={12} />
               </button>
             )}
+            <button
+              type="button"
+              className={`search-filter-btn ${onlyActive ? "on" : ""}`}
+              onClick={(e) => {
+                e.preventDefault();
+                setOnlyActive((v) => !v);
+              }}
+              title={onlyActive ? "显示全部会话" : "仅看运行中 / 待处理 / 未读会话"}
+              aria-pressed={onlyActive}
+              aria-label="仅看活跃会话"
+            >
+              <Icon name="info" size={13} />
+            </button>
           </label>
-          <div className="side-nav">
-            <a className={"nav-new " + (!route[0] ? "active" : "")} href="#/" onClick={() => selectWorkspace("")}>
+          <div className="side-nav-primary">
+            <a className={"nav-new-full " + (!route[0] ? "active" : "")} href="#/" onClick={() => selectWorkspace("")}>
               <Icon name="plus" size={16} />
               <span>{t("sidebar.new")}</span>
               <kbd>Ctrl N</kbd>
             </a>
-            <a className={"nav-usage " + (route[0] === "usage" ? "active" : "")} href="#/usage">
-              <Icon name="chart" size={16} />
-              <span>{t("nav.usage")}</span>
-            </a>
-            <a className={"nav-expertise " + (route[0] === "expertise" ? "active" : "")} href="#/expertise">
-              <Icon name="brain" size={16} />
-              <span>{t("nav.expertise")}</span>
-            </a>
-            {git.show && (
-              <a
-                className={"nav-git " + (route[0] === "git" ? "active" : "")}
-                href="#/git"
-                title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
-                aria-disabled={git.disabled || undefined}
-                style={git.disabled ? REFUSED : undefined}
-                onClick={git.disabled ? (e) => e.preventDefault() : undefined}
-              >
-                <Icon name="branch" size={16} />
-                <span>Git</span>
-              </a>
+            <button
+              type="button"
+              className={`nav-tools-toggle ${inToolRoute ? "on" : ""}`}
+              aria-expanded={showTools}
+              onClick={() => setToolsOpen((v) => !v)}
+            >
+              <Icon name="sliders" size={14} />
+              <span>更多工具</span>
+              <span className="tools-chev">
+                <Icon name={showTools ? "chevron" : "chevronRight"} size={12} />
+              </span>
+            </button>
+            {showTools && (
+              <div className="nav-tools-list">
+                <a className={route[0] === "usage" ? "active" : ""} href="#/usage">
+                  <Icon name="chart" size={14} />
+                  <span>{t("nav.usage")}</span>
+                </a>
+                <a className={route[0] === "expertise" ? "active" : ""} href="#/expertise">
+                  <Icon name="brain" size={14} />
+                  <span>{t("nav.expertise")}</span>
+                </a>
+                {git.show && (
+                  <a
+                    className={route[0] === "git" ? "active" : ""}
+                    href="#/git"
+                    title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
+                    aria-disabled={git.disabled || undefined}
+                    style={git.disabled ? REFUSED : undefined}
+                    onClick={git.disabled ? (e) => e.preventDefault() : undefined}
+                  >
+                    <Icon name="branch" size={14} />
+                    <span>Git</span>
+                  </a>
+                )}
+                {lessons.show && (
+                  <a
+                    className={route[0] === "lessons" ? "active" : ""}
+                    href="#/lessons"
+                    title={lessons.disabled ? lessons.reason : undefined}
+                    aria-disabled={lessons.disabled || undefined}
+                    style={lessons.disabled ? REFUSED : undefined}
+                    onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
+                  >
+                    <Icon name="tasks" size={14} />
+                    <span>{t("nav.lessons")}</span>
+                  </a>
+                )}
+                <a className={route[0] === "extensions" || route[0] === "ext" ? "active" : ""} href="#/extensions">
+                  <Icon name="panel" size={14} />
+                  <span>扩展</span>
+                </a>
+              </div>
             )}
-            {lessons.show && (
-              <a
-                className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")}
-                href="#/lessons"
-                title={lessons.disabled ? lessons.reason : undefined}
-                aria-disabled={lessons.disabled || undefined}
-                style={lessons.disabled ? REFUSED : undefined}
-                onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
-              >
-                <Icon name="tasks" size={16} />
-                <span>{t("nav.lessons")}</span>
-              </a>
-            )}
-            <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
-              <Icon name="panel" size={16} />
-              <span>扩展</span>
-            </a>
           </div>
           <div className="scroll">
             {extensionPages.length > 0 && (
@@ -449,7 +711,14 @@ export function Sidebar({ route }: { route: string[] }) {
               </section>
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
-            {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
+            {done > 0 && (
+              <div className="sidebar-unread-bar">
+                <span>{t("sidebar.doneUnread", { n: done })}</span>
+                <button type="button" className="link" onClick={markAllSeen}>
+                  全部已读
+                </button>
+              </div>
+            )}
             {!searching && work.show && work.disabled && (
               <div className="works-refused nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
                 <span className="row-link">
@@ -462,7 +731,7 @@ export function Sidebar({ route }: { route: string[] }) {
                 <div className="group-head static">
                   <span className="group-name">{t("sidebar.pinned")}</span>
                 </div>
-                {pinnedMembers.map(row)}
+                {pinnedMembers.map((m) => row(m))}
                 {pinnedRuns.map((d) => (
                   <Row
                     key={d.run.id}
@@ -476,49 +745,209 @@ export function Sidebar({ route }: { route: string[] }) {
                 ))}
               </section>
             )}
-            {machineGroups(shown).map((machine) => (
-              <Machine key={machine.key} machine={machine} searching={searching}>
-            {machine.groups.map((g) => {
-              const groupWorks = workList.filter((w) => workProject(w) === g.key);
-              const workLeads = new Set(groupWorks.map((w) => w.lead));
-              const sessionMembers = searching
-                ? g.members
-                : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
-              return (
-              <Group
-                key={g.key}
-                group={g}
-                searching={searching}
-                active={route[0] === "w" && route[1] === g.key}
-                onMove={
-                  g.key === CHATS
-                    ? undefined
-                    : () => {
-                        const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
-                        const i = keys.indexOf(g.key);
-                        if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
-                        projectOrder.replace(keys);
-                      }
-                }
-              >
-                <Capped
-                  items={sessionMembers}
-                  keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
-                  searching={searching}
-                >
-                  {row}
-                </Capped>
-                {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
-              </Group>
-              );
-            })}
-            {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
-              </Machine>
-            ))}
+            {(() => {
+              const machines = machineGroups(shown);
+              const singleLocal = machines.length === 1 && machines[0].key === CENTRE_MACHINE;
+              return machines.map((machine) => {
+                const body = (
+                  <>
+                    {machine.groups.map((g) => {
+                      const groupWorks = workList.filter((w) => workProject(w) === g.key);
+                      const workLeads = new Set(groupWorks.map((w) => w.lead));
+                      const sessionMembers = searching
+                        ? g.members
+                        : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
+                      return (
+                        <Group
+                          key={g.key}
+                          group={g}
+                          searching={searching}
+                          active={route[0] === "w" && route[1] === g.key}
+                          onMove={
+                            g.key === CHATS
+                              ? undefined
+                              : () => {
+                                  const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
+                                  const i = keys.indexOf(g.key);
+                                  if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
+                                  projectOrder.replace(keys);
+                                }
+                          }
+                        >
+                          <Capped
+                            items={sessionMembers}
+                            keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
+                            searching={searching}
+                          >
+                            {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
+                          </Capped>
+                          {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
+                        </Group>
+                      );
+                    })}
+                    {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
+                  </>
+                );
+                return singleLocal ? (
+                  <div key={machine.key}>{body}</div>
+                ) : (
+                  <Machine key={machine.key} machine={machine} searching={searching}>
+                    {body}
+                  </Machine>
+                );
+              });
+            })()}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
+          {renameTarget && (
+            <form
+              className="rename-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitRename();
+              }}
+            >
+              <input
+                value={renameTarget.value}
+                onChange={(e) => setRenameTarget({ ...renameTarget, value: e.target.value })}
+                onKeyDown={(e) => e.key === "Escape" && setRenameTarget(null)}
+                placeholder={`给 ${displayName(renameTarget.agent)} 起个标题…`}
+                autoFocus
+              />
+              <button type="submit" className="primary small">
+                保存
+              </button>
+              <button type="button" className="ghost small" onClick={() => setRenameTarget(null)}>
+                取消
+              </button>
+            </form>
+          )}
+          {ctxMenu && (
+            <>
+              <div className="menu-scrim" onClick={() => setCtxMenu(null)} />
+              <div className="context-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} role="menu">
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    setRenameTarget({ agent: ctxMenu.agent, value: ctxMenu.agent.topic ?? "" });
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">重命名标题…</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    togglePinned(sessionKey(ctxMenu.agent));
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{pinned.has(sessionKey(ctxMenu.agent)) ? "取消置顶" : "置顶会话"}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    openBeside(ctxMenu.agent.id);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{t("sidebar.openBeside")}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    void copyResume(ctxMenu.agent);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">复制终端恢复命令</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    archiving.archive(ctxMenu.agent);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">{t("sidebar.archive")}</span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="menu-item"
+                  onClick={() => {
+                    void batchArchiveIdle(ctxMenu.agent.cwd);
+                    setCtxMenu(null);
+                  }}
+                >
+                  <span className="menu-text">
+                    <span className="menu-label">归档本项目空闲会话</span>
+                  </span>
+                </button>
+                {Object.keys(unread).length > 0 && (
+                  <button
+                    type="button"
+                    className="menu-item"
+                    onClick={() => {
+                      markAllSeen();
+                      setCtxMenu(null);
+                    }}
+                  >
+                    <span className="menu-text">
+                      <span className="menu-label">全部标为已读</span>
+                    </span>
+                  </button>
+                )}
+                {list.filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd)).length > 0 && (
+                  <>
+                    <div className="menu-head">移入项目</div>
+                    {list
+                      .filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd))
+                      .map((w) => (
+                        <button
+                          key={w.key}
+                          type="button"
+                          className="menu-item"
+                          onClick={() => {
+                            void api.setAgentCwd(ctxMenu.agent.id, w.path);
+                            setCtxMenu(null);
+                          }}
+                        >
+                          <span className="menu-text">
+                            <span className="menu-label">{w.name}</span>
+                            <span className="menu-sub">{w.path}</span>
+                          </span>
+                        </button>
+                      ))}
+                  </>
+                )}
+              </div>
+            </>
+          )}
+          {toast && !archiving.note && (
+            <div className="archive-note" role="status">
+              <span className="archive-note-text">{toast}</span>
+              <button className="icon-btn" onClick={() => setToast(null)} aria-label="关闭">
+                <Icon name="close" size={12} />
+              </button>
+            </div>
+          )}
           {archiving.note && (
             <div className={"archive-note " + (archiving.note.error ? "failed" : "")} role="status">
               <span className="archive-note-text">{archiving.note.error ?? t("sidebar.archivedOne", { name: displayName(archiving.note.agent) })}</span>
@@ -536,13 +965,7 @@ export function Sidebar({ route }: { route: string[] }) {
             <UpdateNotice />
             <DevHubNotice />
             <OldHubNotice />
-            <QuotaMini />
-            <div className="foot-row">
-              <Connection />
-              <a className={"icon-btn " + (route[0] === "settings" ? "on" : "")} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
-                <Icon name="settings" size={15} />
-              </a>
-            </div>
+            <SidebarFooter route={route} />
           </div>
         </nav>
         </Archiving.Provider>
@@ -754,7 +1177,19 @@ function Capped<T>({
 }
 
 type Dot = "live" | "warn" | "danger" | "unread" | undefined;
-function SessionRow({ member, active }: { member: SidebarMember; active: boolean }) {
+function SessionRow({
+  member,
+  active,
+  dragKey,
+  onReorder,
+  onMenu,
+}: {
+  member: SidebarMember;
+  active: boolean;
+  dragKey?: { group: string; id: string };
+  onReorder?: (fromId: string, toId: string, after: boolean) => void;
+  onMenu?: (e: ReactMouseEvent) => void;
+}) {
   const { agent } = member;
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
@@ -847,6 +1282,9 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       pinKey={sessionKey(agent)}
       beside={agent.id}
       archive={agent}
+      dragKey={dragKey}
+      onReorder={onReorder}
+      onMenu={onMenu}
       lead={
         <span className={"face " + (running ? "running" : "")}>
           <Avatar agent={agent} size={compact ? 18 : 24} />
@@ -859,6 +1297,11 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{sessionLabel(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
+          {typeof (agent.config as Record<string, unknown> | null)?.worktree_branch === "string" && (
+            <span className="member-branch" title={`Worktree 分支：${String((agent.config as Record<string, unknown>).worktree_branch)}`}>
+              {String((agent.config as Record<string, unknown>).worktree_branch).replace(/^ca\//, "")}
+            </span>
+          )}
           {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
@@ -939,6 +1382,8 @@ function Row({
   pinKey,
   beside,
   archive,
+  dragKey,
+  onReorder,
   onMenu,
 }: {
   href: string;
@@ -962,6 +1407,9 @@ function Row({
   beside?: string;
   /** The conversation this row archives from its hover actions. */
   archive?: Agent;
+  /** Drag-and-drop identity within a sidebar group. */
+  dragKey?: { group: string; id: string };
+  onReorder?: (fromId: string, toId: string, after: boolean) => void;
   /** The right-click menu of this row. */
   onMenu?: (e: ReactMouseEvent) => void;
 }) {
@@ -1012,8 +1460,48 @@ function Row({
     onFocus: (e: ReactFocusEvent<HTMLDivElement>) => e.target.matches(":focus-visible") && showPeek(e.currentTarget, 0),
     onBlur: hidePeek,
   };
+  const [dragging, setDragging] = useState(false);
+  const [dropPos, setDropPos] = useState<"before" | "after" | null>(null);
+  const dnd = dragKey
+    ? {
+        draggable: true,
+        onDragStart: (e: ReactDragEvent<HTMLDivElement>) => {
+          hidePeek();
+          draggingSession = dragKey;
+          setDragging(true);
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", dragKey.id);
+        },
+        onDragEnd: () => {
+          draggingSession = null;
+          setDragging(false);
+          setDropPos(null);
+        },
+        onDragOver: (e: ReactDragEvent<HTMLDivElement>) => {
+          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          const rect = e.currentTarget.getBoundingClientRect();
+          setDropPos(e.clientY > rect.top + rect.height / 2 ? "after" : "before");
+        },
+        onDragLeave: () => setDropPos(null),
+        onDrop: (e: ReactDragEvent<HTMLDivElement>) => {
+          if (!draggingSession || draggingSession.group !== dragKey.group || draggingSession.id === dragKey.id) return;
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          const after = e.clientY > rect.top + rect.height / 2;
+          onReorder?.(draggingSession.id, dragKey.id, after);
+          draggingSession = null;
+          setDropPos(null);
+        },
+      }
+    : undefined;
   return (
-    <div className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""}`} {...hover}>
+    <div
+      className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""} ${dragging ? "dragging" : ""} ${dropPos ? `drag-over-${dropPos}` : ""}`}
+      {...hover}
+      {...dnd}
+    >
       {peek && anchor && <SessionPeek anchor={anchor} facts={peek} />}
       <a
         className="row-link"
@@ -1117,41 +1605,190 @@ const togglePinned = pins.toggle;
 const useCollapsed = collapsedGroups.use;
 const toggleCollapsed = collapsedGroups.toggle;
 
-/** Each account that reports quota windows, shown as a compact strip at the foot of the sidebar. */
-function QuotaMini() {
-  const quota = useQuota();
-  const items = (quota.data?.accounts ?? [])
-    .map((account) => {
-      const found = tightest([{ ...account, windows: account.status.rate_limits }]);
-      return found ? { account, window: found.window } : undefined;
-    })
-    .filter((item): item is NonNullable<typeof item> => !!item);
-  if (!items.length) return null;
+/** Compact user profile footer card + grouped quota popover. */
+function SidebarFooter({ route }: { route: string[] }) {
+  const profile = useChatProfile();
+  const status = useConnectionStatus();
+  const conn = useConnectionState();
+  const [info, setInfo] = useState<HubInfo>();
+  useEffect(() => {
+    if (status === "connected") api.info().then(setInfo, () => {});
+  }, [status, conn?.mode]);
+
+  const statusTone = status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger";
+  const statusText =
+    status === "connected"
+      ? t("hub.connected")
+      : status === "connecting"
+        ? t("hub.connecting")
+        : t("hub.offline", { reason: status.replace(/^offline: /, "") });
+
+  const host = info?.machine?.hostname;
+  const remote = conn?.mode === "remote";
+  const customName = profile.name.trim();
+  const displayTitle = customName || host || "本机";
+  const where = remote ? "远程" : customName ? host || "本机" : undefined;
+
+  const cardTitle = [
+    displayTitle,
+    statusText,
+    info?.version ? `v${info.version}` : undefined,
+    info?.home,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <div className="quota-mini-list">
-      {items.map(({ account, window }) => {
-        const usedPct = Math.max(0, Math.min(100, Math.round(window.used_percent)));
-        const remPct = Math.max(0, Math.min(100, Math.round(100 - window.used_percent)));
-        const site = account.account.codebuddy_site;
-        const entry = site === "china" ? "workbuddy-cn" : site === "international" ? "workbuddy-intl" : undefined;
-        const shortName = site === "china" ? "WB 国内" : site === "international" ? "WB 国际" : vendorName(account.account.provider);
-        const fullName = account.account.label || account.account.id;
-        return (
-          <a
-            key={account.account.id}
-            className="quota-mini"
-            href="#/usage"
-            title={`${fullName} · ${windowLabel(window)} 剩 ${remPct}%（已用 ${usedPct}%）`}
-          >
-            <VendorMark plugin={account.account.provider} entry={entry} size={12} />
-            <span className="quota-mini-name">{shortName}</span>
-            <span className={`quota-bar ${level(usedPct, account.status.limit_reached)}`}>
-              <span style={{ width: `${remPct}%` }} />
+    <div className="foot-user-wrap">
+      <div className="foot-user">
+        <a className="foot-profile" href="#/settings" title={cardTitle}>
+          <span className="foot-avatar-wrap">
+            <ChatAvatar image={profile.avatar} size={30} />
+            <span
+              className={`foot-status-dot ${statusTone} ${status === "connecting" ? "pulse" : ""}`}
+              role="img"
+              aria-label={statusText}
+              title={statusText}
+            />
+          </span>
+          <span className="foot-identity">
+            <span className="foot-name">{displayTitle}</span>
+            <span className="foot-meta">
+              {status !== "connected" ? (
+                <span className={`foot-meta-state ${statusTone}`}>{statusText}</span>
+              ) : (
+                <>
+                  {where && <span className="foot-meta-where">{where}</span>}
+                  {info && <Versions hub={info} />}
+                </>
+              )}
             </span>
-            <span className="quota-mini-pct">剩 {remPct}%</span>
+          </span>
+        </a>
+        <div className="foot-actions">
+          <QuotaPill />
+          <a
+            className={"icon-btn foot-settings-btn " + (route[0] === "settings" ? "on" : "")}
+            href="#/settings"
+            title={t("nav.settings")}
+            aria-label={t("nav.settings")}
+          >
+            <Icon name="settings" size={15} />
           </a>
-        );
-      })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Compact quota pill (`4/8`) with a hover/focus popover grouped by vendor. */
+function QuotaPill() {
+  const quota = useQuota();
+  const accounts = quota.data?.accounts ?? [];
+  if (!accounts.length) return null;
+
+  const cells = accounts.map((a) => {
+    const top = tightest([{ ...a, windows: a.status.rate_limits }])?.window;
+    const used = top ? Math.max(0, Math.min(100, Math.round(top.used_percent))) : 0;
+    const unavailable = !a.status.logged_in || a.at_risk || a.egress_block || a.status.limit_reached || used >= 100;
+    const tone = unavailable ? "danger" : top ? level(top.used_percent, a.status.limit_reached) : "ok";
+    const rank = tone === "ok" ? 0 : tone === "warn" ? 1 : 2;
+    return { a, top, used, tone, unavailable, rank };
+  });
+
+  const okCount = cells.filter((c) => !c.unavailable).length;
+  const pillTone =
+    okCount === 0
+      ? "danger"
+      : okCount < accounts.length || cells.some((c) => c.tone === "warn")
+        ? "warn"
+        : "ok";
+
+  // Group by provider in stable order, sorting healthy accounts before exhausted/unavailable ones.
+  const byVendor = new Map<string, typeof cells>();
+  for (const c of cells) {
+    const list = byVendor.get(c.a.account.provider) ?? [];
+    list.push(c);
+    byVendor.set(c.a.account.provider, list);
+  }
+  const vendorGroups = [...byVendor.entries()].map(([provider, list]) => {
+    const sorted = [...list].sort((x, y) => x.rank - y.rank || x.used - y.used);
+    const ok = sorted.filter((c) => !c.unavailable).length;
+    return { provider, label: vendorLabel(provider), items: sorted, ok, total: sorted.length };
+  });
+
+  return (
+    <div className="foot-quota-wrap">
+      <a
+        className={`foot-quota-pill ${pillTone}`}
+        href="#/usage"
+        title={t("quota.fleet", { ok: okCount, total: accounts.length })}
+        aria-label={t("quota.fleet", { ok: okCount, total: accounts.length })}
+      >
+        <span className={`dot ${pillTone}`} aria-hidden="true" />
+        <span className="foot-quota-count">
+          {okCount}/{accounts.length}
+        </span>
+      </a>
+      <div className="quota-peek" role="region" aria-label={t("quota.peekTitle")}>
+        <div className="quota-peek-head">
+          <span>账号号池</span>
+          <span className="quota-peek-head-right">
+            <span className="quota-peek-summary">
+              {okCount}/{accounts.length} 可用
+            </span>
+            <a className="quota-peek-manage" href="#/usage">
+              管理
+            </a>
+          </span>
+        </div>
+        <div className="quota-peek-groups">
+          {vendorGroups.map((g) => (
+            <div key={g.provider} className="quota-peek-group">
+              <div className="quota-peek-vendor">
+                <VendorMark plugin={g.provider} size={12} />
+                <span className="quota-peek-vendor-name">{g.label}</span>
+                <span className={`quota-peek-vendor-count ${g.ok === 0 ? "danger" : g.ok < g.total ? "warn" : "ok"}`}>
+                  {g.ok}/{g.total}
+                </span>
+              </div>
+              <div className="quota-peek-list">
+                {g.items.map(({ a, top, used, tone, unavailable }) => {
+                  const statusLabel = a.at_risk
+                    ? t("quota.atRisk")
+                    : a.egress_block
+                      ? "出口异常"
+                      : !a.status.logged_in
+                        ? t("quota.unlogged")
+                        : a.status.limit_reached || used >= 100
+                          ? "已耗尽"
+                          : top
+                            ? `已用 ${used}%`
+                            : "充足";
+                  const reset = top?.resets_at ? resetText(top.resets_at) : undefined;
+                  return (
+                    <div key={a.account.id} className={"quota-peek-item" + (unavailable ? " is-down" : "")}>
+                      <div className="quota-peek-row">
+                        <span className={`dot ${tone}`} aria-hidden="true" />
+                        <span className="quota-peek-name">{a.account.label || a.account.id}</span>
+                        <span className={`quota-peek-val ${tone}`}>{statusLabel}</span>
+                      </div>
+                      {(a.agents.length > 0 || reset) && (
+                        <div className="quota-peek-sub">
+                          {a.agents.length > 0 && (
+                            <span className="quota-peek-agents">{a.agents.map((ag) => `@${ag}`).join(" ")}</span>
+                          )}
+                          {reset && <span className="quota-peek-reset">{reset}</span>}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1264,30 +1901,6 @@ function Machine({ machine, searching, children }: { machine: SidebarMachine; se
       </div>
       {!closed && <div className="machine-body">{children}</div>}
     </section>
-  );
-}
-
-function Connection() {
-  const status = useConnectionStatus();
-  const [info, setInfo] = useState<HubInfo>();
-  useEffect(() => {
-    if (status === "connected") api.info().then(setInfo, () => {});
-  }, [status]);
-  const color = status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger";
-  const text =
-    status === "connected"
-      ? t("hub.connected")
-      : status === "connecting"
-        ? t("hub.connecting")
-        : t("hub.offline", { reason: status.replace(/^offline: /, "") });
-  return (
-    <div className="connection" title={info?.home}>
-      <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} role="img" aria-label={text} title={text} />
-      <span className="text" title={text}>
-        {text}
-      </span>
-      {info && status === "connected" && <Versions hub={info} />}
-    </div>
   );
 }
 

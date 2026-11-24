@@ -47,6 +47,13 @@ function typeInto(selector: string, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function showUnavailableSession() {
+  const panel = document.querySelector<HTMLDetailsElement>(".settings-sessions");
+  if (!panel) return;
+  panel.open = true;
+  panel.querySelector("[data-unusable]")?.scrollIntoView({ block: "center" });
+}
+
 export const SCENARIOS: Scenario[] = [
   { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏里工作组落在各自的项目下，一个项目只列最近三个", build: () => {
     const scene = workRounds();
@@ -210,17 +217,26 @@ export const SCENARIOS: Scenario[] = [
   { key: "cursor-account", label: "Cursor 账号", hint: "登录后读状态、邮箱和模型；额度留空，显示暂无额度数据", build: () => {
     const state = usageScene();
     return { state, route: "#/usage", script: [
-      { at: 700, act: () => [...document.querySelectorAll<HTMLButtonElement>(".account-who")].find((b) => b.textContent?.includes("Cursor"))?.click() },
+      { at: 700, act: () => [...document.querySelectorAll(".account-row")].find((row) =>
+        row.querySelector(".account-name")?.textContent?.includes("Cursor"),
+      )?.querySelector<HTMLButtonElement>(".account-who")?.click() },
     ] };
   } },
-  { key: "accounts-risk", label: "账号：出口变了与 at-risk", hint: "每行都有出口（IP、国家、ASN、经代理/直连/无法确认、上次变化）；换国家被拦住等人确认；风控暂停的账号显眼，重新登录被禁用并写明原因", build: () => {
+  { key: "accounts-risk", label: "账号：出口待确认与风控暂停", hint: "卡片标出出口待确认与风控暂停，展开详情查看原因、出口信息及登录限制。", build: () => {
     const state = accountsRiskScene();
     return { state, route: "#/usage", script: [
       { at: 600, act: () => {
-        const rows = document.querySelectorAll(".account-egress").length;
-        if (rows !== state.quota.accounts.length) throw new Error(`exit line missing: ${rows}/${state.quota.accounts.length}`);
-        if (!document.querySelector(".account-alert.danger")) throw new Error("at-risk block missing");
+        if (document.querySelector(".account-egress")) throw new Error("exit line should only show in account details");
+        if (!document.querySelector(".account-row.is-blocked .health")) throw new Error("exit held badge missing");
+        document.querySelector<HTMLButtonElement>(".account-row.is-blocked .account-who")?.click();
+      } },
+      { at: 850, act: () => {
         if (!document.querySelector(".account-alert.warn")) throw new Error("exit held block missing");
+        document.querySelector<HTMLButtonElement>(".account-row.is-risk .account-who")?.click();
+      } },
+      { at: 1100, act: () => {
+        if (!document.querySelector(".account-alert.danger")) throw new Error("at-risk block missing");
+        if (!document.querySelector(".account-row.is-risk .account-egress")) throw new Error("exit line missing from account details");
         if (!document.querySelector<HTMLButtonElement>(".account-alert.danger")?.closest(".account-row")?.querySelector("button[disabled]")) throw new Error("re-login should be disabled for the at-risk account");
         document.querySelector(".account-alert.danger")?.scrollIntoView({ block: "center" });
       } },
@@ -391,7 +407,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: "#/agents",
       script: [
-        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 700, act: showUnavailableSession },
         { at: 1200, act: verify },
       ],
     };
@@ -420,7 +436,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: "#/agents",
       script: [
-        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 700, act: showUnavailableSession },
         { at: 1000, act: () => {
           const link = [...document.querySelectorAll<HTMLButtonElement>(".member-unusable button")].find((b) => b.textContent?.includes("去设置权限"));
           if (!link) throw new Error("the unusable card has no link to the permission setting");
@@ -618,7 +634,7 @@ export const SCENARIOS: Scenario[] = [
       el.dispatchEvent(new Event("input", { bubbles: true }));
     };
     const verify = () => {
-      const card = document.querySelector<HTMLElement>(".member.unusable .member-unusable");
+      const card = document.querySelector<HTMLElement>(".settings-session[data-unusable] .member-unusable");
       const row = document.querySelector<HTMLButtonElement>(".mention-menu .menu-item.disabled");
       if (location.hash.startsWith("#/agents")) {
         if (!card) throw new Error("the stale-model agent is not greyed out on the Agents page");
@@ -630,7 +646,7 @@ export const SCENARIOS: Scenario[] = [
     };
     return { ...scene, route: "#/agents", script: [
       // The CLI list comes first; bring the greyed card into view at any width.
-      { at: 600, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+      { at: 600, act: showUnavailableSession },
       { at: 900, act: typeAt },
       { at: 1300, act: verify },
     ] };
@@ -764,6 +780,64 @@ export const SCENARIOS: Scenario[] = [
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
   { key: "moderation", label: "上下文被内容审查拦下", hint: "网关拒绝整段上下文：错误行写「上下文已被污染」，输入框上方给「新开会话」「压缩上下文」「仍要发送」", build: () => moderationSession() },
   { key: "context-lost", label: "上下文没延续（手动）", hint: "Pia 已归档、带 context_lost：自己点「恢复对话」，再发一条消息；顶部提示条要手动关", build: () => contextLost() },
+  {
+    key: "codex-import",
+    label: "导入本地 Codex 会话",
+    hint: "首页会话选择器里列出当前项目下的本地 Codex 会话，点选后可直接导入查看历史或继续发消息",
+    build: () => {
+      const solo = soloSession();
+      const repo = solo.state.agents[0]?.cwd ?? "C:/work/CrossAgents";
+      const now = Date.now();
+      return {
+        ...solo,
+        state: {
+          ...solo.state,
+          sessions: solo.state.agents.map((a) => ({
+            agent: a,
+            state: "idle" as const,
+            busy_with: null,
+            can_use: true,
+            reason: null,
+            last_execution: null,
+            unguarded: false,
+          })),
+          importableSessions: [
+            {
+              plugin: "codex",
+              session_id: "01a1e44f-e35c-7bd0-9dd2-1b32a1f0a1ac",
+              cwd: repo,
+              title: "帮我排查一下 Windows 代理在 Codex 里的回退逻辑",
+              updated_at: new Date(now - 12 * 60_000).toISOString(),
+              turns: 8,
+              model: "gpt-5.4",
+              effort: "medium",
+            },
+            {
+              plugin: "codex",
+              session_id: "01a1e0a5-cb75-7143-8bbe-2f98d872770f",
+              cwd: repo,
+              title: "把 session_import 的 rollout 去重和历史回填单元测试补全",
+              updated_at: new Date(now - 3 * 3600_000).toISOString(),
+              turns: 5,
+              model: "gpt-5.4-mini",
+              effort: "high",
+            },
+            {
+              plugin: "codex",
+              session_id: "01a1dac1-356c-75b3-91be-819039d41be1",
+              cwd: repo,
+              title: "分析一下前端 ChipMenu 在窄屏下的换行和滚动表现",
+              updated_at: new Date(now - 26 * 3600_000).toISOString(),
+              turns: 3,
+              model: "gpt-5.4",
+            },
+          ],
+        },
+        script: [],
+        route: "#/",
+      };
+    },
+  },
   { key: "context-lost-restored", label: "恢复后：上下文带不回来", hint: "自动恢复 Pia：顶部提示「对话记录恢复了，但……下一条消息会开新会话」", build: () => contextLost([]) },
   { key: "context-lost-new", label: "发消息：这是新会话", hint: "恢复后发一条消息：再提示「这是新会话，没有带上之前的上下文」，标记随之清掉", build: () => contextLost(["接着把回调页的错误处理补上"]) },
   { key: "context-lost-cleared", label: "标记清掉后不再提示", hint: "第二条消息不再提示；点「终端恢复」可以复制命令了", build: () => contextLost(["接着把回调页的错误处理补上", "再加一个重试按钮"]) },

@@ -1,3 +1,4 @@
+import { writeClipboard } from "../../lib/clipboard";
 import { useState } from "react";
 import { api } from "../../api";
 import { ErrorBox, Icon, ago, time } from "../../components";
@@ -134,7 +135,7 @@ function Export({ project }: { project: string }) {
   const text = exported.data ?? "";
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboard(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {

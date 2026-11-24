@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, McpServerSpec,
-    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage,
-    TurnOutcome,
+    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
+    McpServerSpec, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, TokenUsage, TurnOutcome,
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -89,6 +89,11 @@ impl Driver for CursorNativeDriver {
             resume: true,
             set_model: true,
             usage: true,
+            // The CLI takes no images or documents as such: files go in the prompt as a
+            // path the agent reads with its own Read tool, so what it can see is up to the
+            // model the turn runs on. Images and PDFs are therefore accepted rather than
+            // refused, and text is inlined or named by path (docs/TODO.md §7).
+            attachments: Some(AttachmentSupport::ALL),
             ..Capabilities::default()
         }
     }
@@ -1059,6 +1064,7 @@ sleep 60
                 resume: true,
                 set_model: true,
                 usage: true,
+                attachments: Some(AttachmentSupport::ALL),
                 ..Capabilities::default()
             }
         );

@@ -41,7 +41,7 @@ import {
 } from "../components";
 import { ChipMenu, type MenuItem } from "../menu";
 import { sessionStateKey } from "../lib/sessionChoice";
-import { onHubEvent, useHubData, type HubEvent } from "../hub";
+import { onHubEvent, useHubData, type HubEvent, usePlugins } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib/policy";
 import {
@@ -883,7 +883,7 @@ const capOf = (text: string) => (text.trim() ? Number(text) : null);
  */
 export function usePlanApproval(run: Run, busy: boolean) {
   const agents = useAgents();
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = usePlugins();
   const quota = useQuota();
   // What each workspace session is doing and did last, so the person can pick by it. The run
   // names the plan being settled: `unusable` follows its approvals policy, and a session this

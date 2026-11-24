@@ -13,7 +13,65 @@ pub use job::Job;
 #[cfg(unix)]
 pub use job::kill_group;
 
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::sync::OnceLock;
+
+/// Resolves `git` to the real binary on Windows.
+///
+/// Git for Windows puts a small wrapper (`...\cmd\git.exe`) on `PATH` that spawns the real
+/// `...\mingw64\bin\git.exe` without `CREATE_NO_WINDOW`. When a detached process without a
+/// console runs that wrapper with `CREATE_NO_WINDOW`, Windows opens a brief visible `conhost.exe`
+/// window for the child `mingw64\bin\git.exe`. Bypassing the wrapper stops the flash and saves an
+/// extra process spawn on every git command.
+pub fn git_program() -> &'static OsStr {
+    static GIT: OnceLock<OsString> = OnceLock::new();
+    GIT.get_or_init(resolve_git_program).as_os_str()
+}
+
+#[cfg(windows)]
+fn resolve_git_program() -> OsString {
+    use std::path::PathBuf;
+    let Some(path) = std::env::var_os("PATH") else {
+        return OsString::from("git");
+    };
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("git.exe");
+        if candidate.is_file() {
+            return unwrap_git_wrapper(candidate).into_os_string();
+        }
+    }
+    PathBuf::from("git").into_os_string()
+}
+
+#[cfg(windows)]
+fn unwrap_git_wrapper(candidate: std::path::PathBuf) -> std::path::PathBuf {
+    let Some(dir) = candidate.parent() else {
+        return candidate;
+    };
+    let is_cmd_dir = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("cmd"));
+    if !is_cmd_dir {
+        return candidate;
+    }
+    let Some(root) = dir.parent() else {
+        return candidate;
+    };
+    for subdir in ["mingw64", "clangarm64", "mingw32"] {
+        let real = root.join(subdir).join("bin").join("git.exe");
+        if real.is_file() {
+            return real;
+        }
+    }
+    candidate
+}
+
+#[cfg(not(windows))]
+fn resolve_git_program() -> OsString {
+    OsString::from("git")
+}
 
 /// Lets programs started from now on stop on Ctrl+C. A process started in a new process group,
 /// as a detached hub is, ignores it, and its children inherit that: a person's `ping -t` in a

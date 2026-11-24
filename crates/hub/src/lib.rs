@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod api;
 pub mod api_bytes;
 pub mod api_expertise;
+pub mod api_nodes;
 pub mod api_projects;
 pub mod api_terminal;
 pub mod attachments;
@@ -31,6 +32,7 @@ pub mod paths;
 pub mod prices;
 pub mod project_quota;
 pub mod refresh;
+pub mod remote_nodes;
 pub mod replies;
 pub mod resume;
 pub mod retro;
@@ -40,6 +42,7 @@ pub mod rules;
 pub mod run_cost;
 pub mod runtime;
 pub mod self_check;
+pub mod session_import;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;
@@ -422,6 +425,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     })
     .start(shutdown.clone());
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
+    crossagents_drivers::launch::set_system_host_observer(terminals.clone());
     terminals.start_reclaiming(shutdown.clone());
     let extension_poll = extensions.start(shutdown.clone());
     // Event hooks and resident services run beside the hub and end with it
@@ -460,6 +464,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         self_check: Arc::new(self_check::SelfCheck::new()),
         terminals: terminals.clone(),
         link: Arc::new(link::LinkService::new(&paths.home)),
+        remote_nodes: Arc::new(remote_nodes::RemoteNodes::new()),
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     tokio::spawn({

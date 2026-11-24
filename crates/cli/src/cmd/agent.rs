@@ -126,6 +126,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                     color: args.color,
                     persona: args.persona,
                 },
+                worktree: None,
             };
             let agent: Agent = client.post("/v1/agents", &req).await?;
             if ctx.json {

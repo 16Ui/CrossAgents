@@ -260,7 +260,7 @@ function preview(text: string): string {
  * `↙ 编排 · #a 已合并  first line ›`, or `↙ 来自 [avatar] Rex  first line ›`. Only a person's own
  * messages are bubbles on the right.
  */
-export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agents: Agent[]; tree?: RunDetail[] }) {
+export function PeerMessage({ turn, agents, tree, showAvatars }: { turn: TranscriptTurn; agents: Agent[]; tree?: RunDetail[]; showAvatars: boolean }) {
   const [open, setOpen] = useState(false);
   const from = turn.from!;
   const sender = from.kind === "agent" ? agents.find((a) => a.id === from.agent_id) : undefined;
@@ -275,7 +275,7 @@ export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agen
         </span>
         {from.kind === "agent" ? (
           <span className="peer-from">
-            来自 {sender && <Avatar agent={sender} size={16} />}
+            来自 {showAvatars && sender && <Avatar agent={sender} size={16} />}
             {sender ? displayName(sender) : "另一个 agent"}
           </span>
         ) : from.kind === "notice" ? (

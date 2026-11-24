@@ -6,6 +6,8 @@
 //! cheaper than restarting it per turn, and the process holds the conversation; when it is
 //! gone (an interrupt, a crash), the next turn starts a new one with
 //! `--conversation <id>`, which is also what [`Driver::resume`] does.
+//! Image turns use `agy acp` with the same conversation id because headless input
+//! supports only text blocks.
 //!
 //! - The conversation id is the CLI's: it arrives in `init`/`result`, and the session
 //!   reports it as [`SessionEventKind::Started`] once it has it. A new session therefore
@@ -32,19 +34,26 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, McpServerSpec,
-    OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
-    StopReason, TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
+    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
+    McpServerSpec, OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
+    SessionSpec, StopReason, TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
+use crate::acp::{AcpLaunch, AcpOptions, AcpSession, ImageTurnOptions};
 use crate::launch::{BoxWrite, LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
 use crate::process::{StderrTail, hide_console, resolve_program, system_proxy_env};
 use wire::{Event, Step};
+
+const ATTACHMENTS: AttachmentSupport = AttachmentSupport {
+    image: true,
+    pdf: false,
+    text: true,
+};
 
 /// How long `agy models` gets.
 pub const COORDINATION_ENV: &str = "CROSSAGENTS_INTERNAL_COORDINATION_ROLE";
@@ -79,6 +88,14 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// A coordinated session with no running tools must release the queue if its stream goes silent.
 const LEAD_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const TASK_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Windows' `agy` updater launches its own visible `agy --version` console.
+/// Skip that updater for background queries while still letting the query run.
+pub fn prepare_query(command: &mut Command) {
+    #[cfg(windows)]
+    command.env("AGY_CLI_DISABLE_AUTO_UPDATE", "true");
+    hide_console(command);
+}
 
 pub struct AntigravityDriver {
     name: String,
@@ -130,20 +147,55 @@ impl AntigravityDriver {
         let Some((program, extra)) = command.split_first() else {
             return;
         };
-        let mut child = Command::new(resolve_program(program));
-        child
-            .args(extra)
-            .arg("models")
-            .envs(system_proxy_env())
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        hide_console(&mut child);
-        let Ok(Ok(output)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, child.output()).await else {
-            tracing::debug!("agy models did not answer");
-            return;
+        let output = if cfg!(windows) {
+            let mut args: Vec<String> = extra.to_vec();
+            args.push("models".into());
+            let mut env = system_proxy_env();
+            env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+            let Ok(mut launched) = crate::launch::launch(LaunchSpec {
+                program: resolve_program(program),
+                args,
+                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                env,
+                label: "agy models".into(),
+                ..LaunchSpec::default()
+            })
+            .await
+            else {
+                tracing::debug!("agy models failed to start");
+                return;
+            };
+            drop(launched.stdin);
+            let mut buf = Vec::new();
+            let read = tokio::time::timeout(
+                MODEL_LIST_TIMEOUT,
+                tokio::io::AsyncReadExt::read_to_end(&mut launched.stdout, &mut buf),
+            )
+            .await;
+            launched.process.start_kill();
+            if read.is_err() {
+                tracing::debug!("agy models did not answer");
+                return;
+            }
+            buf
+        } else {
+            let mut child = Command::new(resolve_program(program));
+            child
+                .args(extra)
+                .arg("models")
+                .envs(system_proxy_env())
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            prepare_query(&mut child);
+            let Ok(Ok(output)) = tokio::time::timeout(MODEL_LIST_TIMEOUT, child.output()).await
+            else {
+                tracing::debug!("agy models did not answer");
+                return;
+            };
+            output.stdout
         };
-        let models = wire::parse_models(&String::from_utf8_lossy(&output.stdout));
+        let models = wire::parse_models(&String::from_utf8_lossy(&output));
         if !models.is_empty() {
             *self.listed.lock().expect("model list") = models;
         }
@@ -168,6 +220,7 @@ impl Driver for AntigravityDriver {
             set_model: true,
             mcp: true,
             usage: true,
+            attachments: Some(ATTACHMENTS),
             // Conversations are stored per project directory.
             move_cwd: false,
             ..Capabilities::default()
@@ -228,6 +281,31 @@ struct Live {
     stderr: StderrTail,
 }
 
+/// Best-known context window (in tokens) for an Antigravity model slug, or `None` when the
+/// model family is unknown so the UI does not fabricate a percentage.
+pub fn context_window_for(model: Option<&str>) -> Option<u64> {
+    let m = model?.trim().to_ascii_lowercase();
+    if m.is_empty() || m == "auto" {
+        return None;
+    }
+    if m.contains("gemini") {
+        return Some(1_000_000);
+    }
+    if m.contains("claude") {
+        return Some(if m.contains("1m") { 1_000_000 } else { 200_000 });
+    }
+    if m.starts_with("gpt-4.1") {
+        return Some(1_000_000);
+    }
+    if m.starts_with("gpt-5") || m.contains("codex") {
+        return Some(272_000);
+    }
+    if m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-4") {
+        return Some(200_000);
+    }
+    None
+}
+
 pub struct AntigravitySession {
     id: String,
     agent_id: crossagents_core::AgentId,
@@ -239,11 +317,15 @@ pub struct AntigravitySession {
     env: Vec<(String, String)>,
     mcp_servers: Vec<McpServerSpec>,
     model: Mutex<Option<String>>,
+    /// The concrete model the CLI reported in `init` (resolves `"auto"`).
+    resolved_model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
     permission: PermissionPolicy,
     instructions: Option<String>,
     instructions_pending: AtomicBool,
     tokens: Mutex<TokenUsage>,
+    /// Single-step prompt/context size from the latest `step_update.usage`.
+    context_used: std::sync::atomic::AtomicU64,
     /// Tool calls already announced, so a `DONE` step updates instead of adding another.
     tools: Mutex<HashSet<String>>,
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -251,6 +333,7 @@ pub struct AntigravitySession {
     child: tokio::sync::Mutex<Option<Live>>,
     running: Mutex<Option<Arc<ProcessHandle>>>,
     cancelled: AtomicBool,
+    interrupt_image: Notify,
     closed: AtomicBool,
     consecutive_stream_timeouts: AtomicUsize,
     context_rotated: AtomicBool,
@@ -308,17 +391,20 @@ impl AntigravitySession {
             env,
             mcp_servers: spec.mcp_servers,
             model: Mutex::new(spec.agent.model.filter(|m| !m.is_empty())),
+            resolved_model: Mutex::new(None),
             effort: Mutex::new(None),
             permission: spec.permission,
             instructions: spec.instructions,
             instructions_pending: AtomicBool::new(true),
             tokens: Mutex::new(TokenUsage::default()),
+            context_used: std::sync::atomic::AtomicU64::new(0),
             tools: Mutex::new(HashSet::new()),
             events: spec.events,
             turn: tokio::sync::Mutex::new(()),
             child: tokio::sync::Mutex::new(None),
             running: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            interrupt_image: Notify::new(),
             closed: AtomicBool::new(false),
             consecutive_stream_timeouts: AtomicUsize::new(0),
             context_rotated: AtomicBool::new(false),
@@ -331,8 +417,7 @@ impl AntigravitySession {
         let _ = self.events.send(kind.into());
     }
 
-    /// The message as the CLI gets it: the opening instructions once, then the text and
-    /// its attachments as `@path` references (which the CLI reads as files).
+    /// The headless message includes the opening instructions once and references to text files.
     fn prompt_text(&self, prompt: &Prompt) -> String {
         let mut text = match &self.instructions {
             Some(instructions) if self.instructions_pending.swap(false, Ordering::SeqCst) => {
@@ -502,6 +587,8 @@ impl AntigravitySession {
                 env.push((k.clone(), v.clone()));
             }
         }
+        #[cfg(windows)]
+        env.push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
         let launched = crate::launch::launch(LaunchSpec {
             program,
             args: all_args,
@@ -542,6 +629,16 @@ impl AntigravitySession {
         if let Some(id) = &step.conversation_id {
             self.remember(id);
         }
+        if let Some(usage) = step.usage {
+            let step_ctx = if usage.input > 0 {
+                usage.input.saturating_add(usage.output)
+            } else {
+                usage.total
+            };
+            if step_ctx > 0 {
+                self.context_used.store(step_ctx, Ordering::Relaxed);
+            }
+        }
         if step.is_answer() {
             if let Some(delta) = step.text_delta.as_deref().filter(|d| !d.is_empty()) {
                 self.emit(SessionEventKind::Output {
@@ -562,17 +659,34 @@ impl AntigravitySession {
             .or_else(|| info.and_then(|i| i.name.clone()))
             .unwrap_or_else(|| "tool".to_owned());
         let kind = tool_kind(&name);
+        let title = tool_title(&name, info);
+        let detail = tool_detail(&name, step);
         if step.running() {
-            self.tools.lock().expect("tools").insert(id.clone());
-            self.emit(SessionEventKind::ToolCall {
-                tool_call_id: id,
-                title: name,
-                kind: Some(kind.to_owned()),
-                status: ToolStatus::InProgress,
-            });
+            let first_sight = self.tools.lock().expect("tools").insert(id.clone());
+            if first_sight {
+                self.emit(SessionEventKind::ToolCall {
+                    tool_call_id: id.clone(),
+                    title,
+                    kind: Some(kind.to_owned()),
+                    status: ToolStatus::InProgress,
+                });
+            } else {
+                self.emit(SessionEventKind::ToolCallUpdated {
+                    tool_call_id: id.clone(),
+                    title: (title != name).then_some(title),
+                    status: None,
+                });
+            }
+            if detail != ToolDetail::default() {
+                self.emit(SessionEventKind::ToolDetail {
+                    tool_call_id: id,
+                    detail,
+                });
+            }
             return;
         }
-        let failed = info.and_then(|i| i.error.as_ref()).is_some();
+        let failed = info.and_then(|i| i.error.as_ref()).is_some()
+            || detail.exit_code.is_some_and(|code| code != 0);
         let status = if failed {
             ToolStatus::Failed
         } else {
@@ -582,31 +696,31 @@ impl AntigravitySession {
         if first_sight {
             self.emit(SessionEventKind::ToolCall {
                 tool_call_id: id.clone(),
-                title: name,
+                title,
                 kind: Some(kind.to_owned()),
                 status,
             });
         } else {
             self.emit(SessionEventKind::ToolCallUpdated {
                 tool_call_id: id.clone(),
-                title: None,
+                title: (title != name).then_some(title),
                 status: Some(status),
             });
         }
-        let detail = ToolDetail {
-            arguments: info
-                .and_then(|i| i.parameters.as_ref())
-                .map(|parameters| parameters.to_string()),
-            result: info.and_then(|i| i.output.clone()),
-            error: info.and_then(|i| i.error.clone()),
-            ..ToolDetail::default()
-        };
         if detail != ToolDetail::default() {
             self.emit(SessionEventKind::ToolDetail {
                 tool_call_id: id,
                 detail,
             });
         }
+    }
+
+    fn context_window(&self) -> u64 {
+        let resolved = self.resolved_model.lock().expect("resolved model").clone();
+        let configured = self.model.lock().expect("model").clone();
+        context_window_for(resolved.as_deref())
+            .or_else(|| context_window_for(configured.as_deref()))
+            .unwrap_or(0)
     }
 
     /// The `result` event: the conversation, the answer when it never streamed, and the
@@ -625,9 +739,17 @@ impl AntigravitySession {
                 totals.total = usage.total;
                 totals.clone()
             };
+            let step_ctx = self.context_used.load(Ordering::Relaxed);
+            let used = if step_ctx > 0 {
+                step_ctx
+            } else if usage.input > 0 {
+                usage.input.saturating_add(usage.output)
+            } else {
+                usage.total
+            };
             self.emit(SessionEventKind::Usage {
-                used: usage.total,
-                size: 0,
+                used,
+                size: self.context_window(),
                 cost_usd: None,
                 tokens: Some(tokens),
             });
@@ -641,6 +763,14 @@ impl AntigravitySession {
             return Err(CoreError::Agent("the session has ended".into()));
         }
         self.cancelled.store(false, Ordering::SeqCst);
+        self.tools.lock().expect("tools").clear();
+        if prompt
+            .attachments
+            .iter()
+            .any(|attachment| attachment.is_image())
+        {
+            return self.run_image_turn(prompt).await;
+        }
         let mut original_text = self.prompt_text(prompt);
         if self.context_rotated.swap(false, Ordering::SeqCst) {
             original_text = format!(
@@ -725,6 +855,10 @@ impl AntigravitySession {
                     Some(Event::Init(init)) => {
                         if let Some(id) = &init.conversation_id {
                             self.remember(id);
+                        }
+                        if let Some(model) = &init.model {
+                            *self.resolved_model.lock().expect("resolved model") =
+                                Some(model.clone());
                         }
                     }
                     Some(Event::Step(step)) => {
@@ -878,6 +1012,95 @@ impl AntigravitySession {
         unreachable!("retry loop always returns on the final attempt")
     }
 
+    async fn run_image_turn(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        let cancelled = || TurnOutcome {
+            stop_reason: StopReason::Cancelled,
+            turn_id: None,
+        };
+        let interrupted = self.interrupt_image.notified();
+        tokio::pin!(interrupted);
+        if self.cancelled.load(Ordering::SeqCst) || self.closed.load(Ordering::SeqCst) {
+            return Ok(cancelled());
+        }
+        // Flush the headless process before another process opens the same conversation.
+        if let Some(live) = self.child.lock().await.take() {
+            drop(live.stdin);
+            if live
+                .process
+                .exit_within(Duration::from_secs(5))
+                .await
+                .is_none()
+            {
+                live.process.start_kill();
+                if live
+                    .process
+                    .exit_within(Duration::from_secs(5))
+                    .await
+                    .is_none()
+                {
+                    return Err(CoreError::Agent(
+                        "could not stop the Antigravity headless process".into(),
+                    ));
+                }
+            }
+        }
+
+        let mut launch = AcpLaunch::from_command(&self.command, self.cwd.clone())?;
+        launch.args.push("acp".into());
+        if self.permission == PermissionPolicy::Bypass {
+            launch.args.push("--dangerously-skip-permissions".into());
+        }
+        launch.env = system_proxy_env();
+        launch.env.extend(self.env.iter().cloned());
+        #[cfg(windows)]
+        launch
+            .env
+            .push(("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "true".into()));
+
+        let opts = AcpOptions {
+            launch,
+            mcp_servers: Vec::new(),
+            // Guard accepts edits through the ACP mode. Other permission requests are declined.
+            permission: if self.permission == PermissionPolicy::Bypass {
+                PermissionPolicy::Bypass
+            } else {
+                PermissionPolicy::Deny
+            },
+            permissions: None,
+            model: self.model.lock().expect("model").clone(),
+            effort: self.effort.lock().expect("effort").clone(),
+            instructions: self.instructions.clone(),
+            events: self.events.clone(),
+        };
+        let image = ImageTurnOptions {
+            resume: self.conversation.lock().expect("conversation").clone(),
+            effort: self.effort.lock().expect("effort").clone(),
+            mode: match self.permission {
+                PermissionPolicy::Bypass => None,
+                PermissionPolicy::Guard => Some("accept-edits"),
+                PermissionPolicy::Deny => Some("default"),
+            },
+        };
+        let acp = tokio::select! {
+            biased;
+            () = &mut interrupted => return Ok(cancelled()),
+            session = AcpSession::start_for_image(opts, image) => session?,
+        };
+        self.remember(acp.session_id());
+        let send = acp.prompt_with_images(prompt);
+        tokio::pin!(send);
+        let outcome = tokio::select! {
+            biased;
+            () = &mut interrupted => {
+                let _ = acp.interrupt().await;
+                Ok(cancelled())
+            }
+            result = &mut send => result,
+        };
+        acp.close_image_turn().await;
+        outcome
+    }
+
     fn stop_reason(&self, result: &wire::Result) -> StopReason {
         if self.cancelled.load(Ordering::SeqCst) {
             return StopReason::Cancelled;
@@ -922,6 +1145,7 @@ impl AntigravitySession {
 
     fn stop(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
+        self.interrupt_image.notify_waiters();
         if let Some(process) = self.running.lock().expect("running").as_ref() {
             process.start_kill();
         }
@@ -973,11 +1197,82 @@ fn is_transient_stream_error(message: &str) -> bool {
 fn tool_kind(name: &str) -> &'static str {
     match name {
         "run_command" => "execute",
-        "write_to_file" | "replace_file_content" | "multi_replace_file_content" => "edit",
+        "write_file" | "edit_file" | "write_to_file" | "replace_file_content"
+        | "multi_replace_file_content" => "edit",
         "read_file" | "list_directory" | "find_by_name" | "view_file" => "read",
         "search" | "grep_search" | "codebase_search" | "google_web_search" => "search",
         "web_fetch" | "browser_navigate" => "fetch",
         _ => "tool",
+    }
+}
+
+fn param_str<'a>(info: Option<&'a wire::ToolInfo>, keys: &[&str]) -> Option<&'a str> {
+    let params = info?.parameters.as_ref()?.as_object()?;
+    keys.iter()
+        .find_map(|key| params.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn tool_title(name: &str, info: Option<&wire::ToolInfo>) -> String {
+    if name == "run_command" {
+        if let Some(cmd) = param_str(info, &["CommandLine", "command", "command_line"]) {
+            return cmd.lines().next().unwrap_or(cmd).trim().to_owned();
+        }
+        if let Some(summary) = param_str(info, &["toolSummary"]) {
+            return summary.to_owned();
+        }
+    }
+    if let Some(path) = param_str(info, &["Path", "path", "TargetFile", "file_path"]) {
+        match tool_kind(name) {
+            "read" => return format!("Read {path}"),
+            "edit" => return format!("Edit {path}"),
+            _ => {}
+        }
+    }
+    name.to_owned()
+}
+
+fn parse_exit_code(output: &str) -> Option<i32> {
+    for line in output.lines().take(8) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("Command exited with code ") {
+            let digits = rest.trim_end_matches('.');
+            if let Ok(code) = digits.parse::<i32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn tool_detail(name: &str, step: &wire::Step) -> ToolDetail {
+    let info = step.tool_info.as_ref();
+    let duration_ms = step
+        .duration_seconds
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(|s| (s * 1000.0).round() as u64);
+    if name == "run_command" {
+        let command = param_str(info, &["CommandLine", "command", "command_line"]).map(str::to_owned);
+        let output = info.and_then(|i| i.output.clone());
+        let exit_code = output.as_deref().and_then(parse_exit_code);
+        return ToolDetail {
+            command,
+            exit_code,
+            duration_ms,
+            output,
+            error: info.and_then(|i| i.error.clone()),
+            ..ToolDetail::default()
+        };
+    }
+    ToolDetail {
+        duration_ms,
+        arguments: info
+            .and_then(|i| i.parameters.as_ref())
+            .map(|parameters| parameters.to_string()),
+        result: info.and_then(|i| i.output.clone()),
+        error: info.and_then(|i| i.error.clone()),
+        ..ToolDetail::default()
     }
 }
 
@@ -997,6 +1292,10 @@ impl DriverSession for AntigravitySession {
 
     async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
         self.run(prompt).await
+    }
+
+    fn attachment_support(&self) -> Option<AttachmentSupport> {
+        Some(ATTACHMENTS)
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
@@ -1325,6 +1624,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_image_turn_resumes_via_acp_and_text_returns_to_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log.txt");
+        let (mut spec, _) = spec(dir.path());
+        spec.agent.model = None;
+        spec.env = vec![("CROSSAGENTS_AGY_TEST_LOG".into(), log.display().to_string())];
+        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":true},"sessionCapabilities":{"resume":{},"close":{}}}}}"#;
+        let resume = r#"{"jsonrpc":"2.0","id":2,"result":{}}"#;
+        let prompt_result = r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#;
+        let close = r#"{"jsonrpc":"2.0","id":4,"result":{}}"#;
+        let windows = format!(
+            r#"
+if ($args[0] -eq 'acp') {{
+    foreach ($response in @('{init}', '{resume}', '{prompt_result}', '{close}')) {{
+        $line = [Console]::In.ReadLine()
+        Add-Content -Path $env:CROSSAGENTS_AGY_TEST_LOG -Value $line
+        [Console]::Out.WriteLine($response)
+        [Console]::Out.Flush()
+    }}
+    exit
+}}
+{}"#,
+            stream_for(true),
+        );
+        let unix = format!(
+            r#"
+if [ "$1" = acp ]; then
+    for response in '{init}' '{resume}' '{prompt_result}' '{close}'; do
+        IFS= read -r line || exit 1
+        printf '%s\n' "$line" >> "$CROSSAGENTS_AGY_TEST_LOG"
+        printf '%s\n' "$response"
+    done
+    exit
+fi
+{}"#,
+            stream_for(false),
+        );
+        let command = mock_cli(dir.path(), &windows, &unix);
+        let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
+        assert!(driver.capabilities().attachments.unwrap().image);
+        let session = driver.open(spec).await.unwrap();
+        session.prompt("before").await.unwrap();
+
+        let path = dir.path().join("shot.png");
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        std::fs::write(&path, bytes).unwrap();
+        let image = crossagents_core::Attachment {
+            id: "shot".into(),
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            size: bytes.len() as u64,
+            path,
+        };
+        let outcome = session
+            .prompt_with(&Prompt {
+                text: "look".into(),
+                attachments: vec![image],
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+        session.prompt("after").await.unwrap();
+        session.shutdown().await;
+
+        let log = read_log(&log);
+        let requests: Vec<serde_json::Value> = log
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(requests[1]["method"], "session/resume");
+        assert_eq!(requests[1]["params"]["sessionId"], "conv-1");
+        assert_eq!(requests[2]["method"], "session/prompt");
+        assert_eq!(requests[2]["params"]["sessionId"], "conv-1");
+        assert_eq!(
+            requests[2]["params"]["prompt"],
+            json!([
+                { "type": "text", "text": "look" },
+                { "type": "image", "mimeType": "image/png", "data": "iVBORw0KGgo=" }
+            ])
+        );
+        assert_eq!(requests[3]["method"], "session/close");
+        assert!(
+            logged_args(&log)
+                .windows(2)
+                .any(|pair| pair == ["--conversation", "conv-1"])
+        );
+    }
+
+    #[tokio::test]
     async fn a_turn_streams_the_answer_the_tool_and_the_totals() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log.txt");
@@ -1631,5 +2019,36 @@ cat >/dev/null
         assert_eq!(saw_error, after_tool);
         assert_eq!(saw_tool_call, after_tool);
         session.shutdown().await;
+    }
+
+    #[test]
+    fn run_command_extracts_title_command_output_exit_code_and_duration() {
+        let step = wire::Step {
+            state: "DONE".into(),
+            step_type: "tool".into(),
+            tool_name: Some("run_command".into()),
+            duration_seconds: Some(1.25),
+            tool_info: Some(wire::ToolInfo {
+                name: Some("run_command".into()),
+                parameters: Some(serde_json::json!({
+                    "CommandLine": "cargo test -p crossagents-core",
+                    "toolSummary": "Run core tests"
+                })),
+                output: Some("Created At: 2026-11-22\nCommand exited with code 1.\n\nCommand output:\nfailed\n".into()),
+                error: None,
+            }),
+            ..wire::Step::default()
+        };
+        assert_eq!(
+            tool_title("run_command", step.tool_info.as_ref()),
+            "cargo test -p crossagents-core"
+        );
+        let detail = tool_detail("run_command", &step);
+        assert_eq!(detail.command.as_deref(), Some("cargo test -p crossagents-core"));
+        assert_eq!(detail.exit_code, Some(1));
+        assert_eq!(detail.duration_ms, Some(1250));
+        assert!(detail.output.as_deref().unwrap().contains("failed"));
+        assert!(detail.arguments.is_none());
+        assert!(detail.result.is_none());
     }
 }

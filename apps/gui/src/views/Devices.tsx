@@ -7,6 +7,7 @@
 import { useEffect, useState } from "react";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { Device } from "@bindings/Device";
+import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
@@ -31,6 +32,12 @@ export function DevicesPage() {
   const refused = revoke.refused ? revoke.reason : undefined;
   const [error, setError] = useState<string>();
   const list = sortDevices(devices.data ?? []);
+  const nodes = useHubData(
+    () => api.listNodes().then((r) => r.nodes),
+    [],
+    (e) => e.type === "device.created" || e.type === "device.revoked",
+  );
+  const remoteNodes = (nodes.data ?? []).filter((n) => !n.local);
   const [hub, setHub] = useState<HubInfo>();
   useEffect(() => {
     api.info().then(setHub, () => {});
@@ -65,6 +72,22 @@ export function DevicesPage() {
             {!hub?.machine && <div className="setting-hint">{hub ? "这台 hub 还不报告所在机器" : "正在读取…"}</div>}
           </div>
         </div>
+        {remoteNodes.length > 0 ? (
+          remoteNodes.map((node) => <RemoteNodeRow key={node.id} node={node} />)
+        ) : (
+          <div className="setting-line">
+            <div className="device-name">
+              <div className="setting-label">
+                远端执行节点
+                <span className="chip small">0 在线</span>
+              </div>
+              <div className="setting-hint">
+                在中心运行 <code>crossagents device add &lt;名字&gt; --kind node</code> 拿到凭据，再到 Mac / Linux / Windows 目标机运行{" "}
+                <code>crossagents node run --hub &lt;hub地址&gt; --token &lt;token&gt;</code>，本机 agent 即可跨系统读写文件、执行命令。
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       <ErrorBox error={devices.error ?? error} />
       {refused && (
@@ -91,6 +114,31 @@ export function DevicesPage() {
         </div>
       )}
     </>
+  );
+}
+
+function RemoteNodeRow({ node }: { node: RemoteNodeInfo }) {
+  const os = node.os === "windows" || node.os === "macos" || node.os === "linux" ? node.os : undefined;
+  return (
+    <div className="setting-line device-row">
+      <div className="device-name">
+        <div className="setting-label">
+          <OsIcon os={os} size={15} />
+          {node.name}
+          <span className="chip small ok">在线节点</span>
+          <span className="chip small">{node.os}/{node.arch}</span>
+          <span className="chip small">{node.shell}</span>
+        </div>
+        <div className="device-times">
+          <span className="setting-hint">主机 {node.hostname}</span>
+          {node.default_cwd && <span className="setting-hint">目录 {node.default_cwd}</span>}
+          <span className="setting-hint">v{node.version}</span>
+          <span className="setting-hint" title={`连接于 ${full(node.connected_at)}`}>
+            连接 {when(node.connected_at)}
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 

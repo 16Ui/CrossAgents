@@ -1,3 +1,4 @@
+import { writeClipboard } from "./lib/clipboard";
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { useAvatarImage } from "./avatarImages";
 import { MermaidBlock } from "./mermaid";
@@ -909,7 +910,7 @@ export function CopyButton({
   const copy = async () => {
     clearTimeout(timer.current);
     try {
-      await navigator.clipboard.writeText(text);
+      await writeClipboard(text);
       setState("copied");
       timer.current = setTimeout(() => setState("idle"), 1500);
     } catch {

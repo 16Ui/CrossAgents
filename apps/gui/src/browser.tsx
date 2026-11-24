@@ -9,10 +9,11 @@
 // tool against the tab and posts the result. The person can take a tab over meanwhile; while it
 // is theirs, a request for it is answered `human_control` until they hand it back.
 
+import { writeClipboard } from "./lib/clipboard";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { api, errorText, getBridge, scopeKey, type FileScope } from "./api";
+import { api, errorText, getBridge, scopeKey, scopePath, type FileScope } from "./api";
 import type { BookmarkEntry, BrowserBridge, ChromeBridgeStatus } from "./bridge";
-import { Icon } from "./components";
+import { CopyButton, ErrorBox, Icon } from "./components";
 import { resolvePath } from "./fileResolve";
 import { onHubEvent } from "./hub";
 import { holdAfterRequest, holdLapsed, type Hold } from "./lib/browserControl";
@@ -87,6 +88,7 @@ type Page = {
 };
 
 const pages = new Map<string, Page>();
+const nativeViews = new WeakMap<HTMLElement, { dispose(): void; attach(host: HTMLElement): () => void }>();
 const listeners = new Set<() => void>();
 let view: Page[] = [];
 let created = 0;
@@ -131,7 +133,7 @@ export function pageName(page: Page): string {
   if (!page.url || page.url === "about:blank") return "新标签页";
   try {
     const url = new URL(page.url);
-    if (url.protocol === "crossagents-file:") return decodeURIComponent(url.pathname.split("/").pop() || url.host);
+    if (url.protocol === "crossagents-file:" || url.protocol === "crossagents-preview:" || url.hostname === "crossagents-preview.localhost") return decodeURIComponent(url.pathname.split("/").pop() || url.host);
     return url.host || url.pathname;
   } catch {
     return page.url;
@@ -142,7 +144,7 @@ export function pageName(page: Page): string {
 export function browserUrl(text: string): string | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  return /^(https?|about|crossagents-file|file):/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return /^(https?|about|crossagents-file|crossagents-preview|file):/i.test(trimmed) ? trimmed : `https://${trimmed}`;
 }
 
 /**
@@ -232,8 +234,105 @@ async function whenAttached(page: Page): Promise<number> {
 }
 
 /** A tab's page, with its events. `src` is set before it is attached, so it starts loading then. */
+function makeNativeWebview(page: Page, url: string): WebviewTag {
+  const native = getBridge()!.nativeBrowser!;
+  const id = page.created;
+  const el = document.createElement("div") as unknown as WebviewTag;
+  el.className = "native-webview";
+  let disposed = false;
+  let index = -1;
+  let direction = 0;
+  const history: string[] = [];
+  const dispatch = (name: string, values: Partial<NavEvent> = {}) => el.dispatchEvent(Object.assign(new Event(name), values));
+  const failed = (err: unknown) => dispatch("did-fail-load", { errorDescription: errorText(err), isMainFrame: true });
+  const ready = native.create(id, url, (event) => {
+    if (disposed) return;
+    if (event.kind === "title") dispatch("page-title-updated", { title: event.title });
+    if (event.kind === "started") dispatch("did-start-loading");
+    if (event.kind === "finished") {
+      if (direction === 0 && history[index] !== event.url) {
+        history.splice(index + 1, history.length, event.url);
+        index = history.length - 1;
+      }
+      direction = 0;
+      dispatch("did-navigate", { url: event.url });
+      dispatch("dom-ready");
+      dispatch("did-stop-loading");
+    }
+  });
+  void ready.catch(failed);
+  const step = (action: "back" | "forward" | "reload" | "stop") => {
+    direction = action === "back" ? -1 : action === "forward" ? 1 : 0;
+    index += direction;
+    void ready.then(() => native.step(id, action)).catch(failed);
+  };
+  Object.assign(el, {
+    getWebContentsId: () => {
+      if (index < 0) throw new Error("浏览器标签还在加载");
+      return id;
+    },
+    loadURL: (next: string) => ready.then(() => native.navigate(id, next)),
+    goBack: () => step("back"),
+    goForward: () => step("forward"),
+    reload: () => step("reload"),
+    stop: () => step("stop"),
+    canGoBack: () => index > 0,
+    canGoForward: () => index >= 0 && index < history.length - 1,
+    insertCSS: (css: string) => ready.then(() => native.style(id, css)).then(() => ""),
+  });
+
+  nativeViews.set(el, {
+    dispose() {
+      disposed = true;
+      void ready.then(() => native.close(id)).catch(() => {});
+    },
+    attach(host) {
+      let active = true;
+      let pending = 0;
+      let previous = "";
+      const send = (bounds: Parameters<typeof native.bounds>[1]) => {
+        const key = JSON.stringify(bounds);
+        if (key === previous) return;
+        previous = key;
+        void ready.then(() => {
+          if (!disposed && (active || bounds === null)) return native.bounds(id, bounds);
+        }).catch(() => {});
+      };
+      const measure = () => {
+        pending = 0;
+        if (!active) return;
+        const rect = host.getBoundingClientRect();
+        const visible = rect.width > 2 && rect.height > 2 && host.contains(
+          document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2),
+        );
+        if (!visible || rect.left < 0 || rect.top < 0) send(null);
+        else send({ x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) });
+      };
+      const schedule = () => { if (!pending) pending = requestAnimationFrame(measure); };
+      const resize = new ResizeObserver(schedule);
+      resize.observe(host);
+      const mutations = new MutationObserver(schedule);
+      mutations.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style", "open", "hidden"] });
+      window.addEventListener("resize", schedule);
+      window.addEventListener("scroll", schedule, true);
+      schedule();
+      return () => {
+        active = false;
+        resize.disconnect();
+        mutations.disconnect();
+        window.removeEventListener("resize", schedule);
+        window.removeEventListener("scroll", schedule, true);
+        cancelAnimationFrame(pending);
+        send(null);
+      };
+    },
+  });
+  return el;
+}
+
 function makeWebview(page: Page, url: string): WebviewTag {
-  const el = document.createElement("webview") as WebviewTag;
+  const native = getBridge()?.nativeBrowser;
+  const el = native ? makeNativeWebview(page, url) : document.createElement("webview") as WebviewTag;
   el.setAttribute("partition", "persist:browser");
   el.setAttribute("data-crossagents-browser", "1");
   // Without this Electron blocks the guest's window.open / target=_blank before any handler runs,
@@ -313,7 +412,7 @@ function createPage(id: string, url: string, title?: string): Page {
       page.title = shown.title;
     }
     page.loading = false;
-  } else if (supportsWebview()) {
+  } else if (getBridge()?.nativeBrowser || supportsWebview()) {
     page.el = makeWebview(page, url);
     // In the document from the start: a page loads (and an agent can drive it) even when no dock
     // is on screen; showing the tab moves it into the dock's box.
@@ -326,6 +425,7 @@ function createPage(id: string, url: string, title?: string): Page {
 
 function dispose(page: Page) {
   clearHold(page);
+  if (page.el) nativeViews.get(page.el)?.dispose();
   page.el?.remove();
   pages.delete(page.id);
   mockBrowser()?.close(page.tab);
@@ -391,6 +491,11 @@ export const isHtmlPath = (path: string) => /\.html?$/i.test(path.trim());
 export async function openBrowserFile(scope: FileScope, path: string, dock?: DockId) {
   const browser = getBridge()?.browser;
   if (!browser) throw new Error("这个窗口没有内置浏览器");
+  if (browser.scopedFileUrl) {
+    const url = await browser.scopedFileUrl(scopePath(scope), path);
+    openBrowserTab({ url, dock, title: path.split(/[\\/]/).pop() });
+    return;
+  }
   const rel = await resolvePath(scope, path);
   if (!rel) throw new Error("文件不存在，或不在这个工作区内");
   const root = (await rootOf(scope)).replace(/[\\/]+$/, "");
@@ -750,6 +855,7 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
     // Switching tabs remounts this body with the new tab's key, so the previous page is already
     // back in the vault (its effect cleanup) before this one is attached here.
     host.appendChild(el);
+    const detachNative = nativeViews.get(el)?.attach(host);
     // Attached again: if the guest survived (no dom-ready to come), its id is readable now.
     if (page.wcId === null) {
       try {
@@ -764,6 +870,7 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
     // A re-attached one gets a new guest (Electron may recreate it when it moves between docks),
     // which `dom-ready` reports, so the id of the old one is dropped here and never used again.
     return () => {
+      detachNative?.();
       page.wcId = null;
       // A closing tab's page is already disposed (element removed, page dropped) before this
       // cleanup runs; putting the element back in the vault would attach it again and start the
@@ -776,6 +883,7 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
   return (
     <div className="web-pane">
       <BrowserBar key={tab} page={page} />
+      <BrowserSessionTransfer key={page.url} page={page} />
       <ControlBar page={page} />
       {page.problem && (
         <p className="web-problem" role="alert">
@@ -785,6 +893,71 @@ export function BrowserBody({ tab }: { tab: WebTab }) {
       <div className="web-box" ref={box}>
         {!page.el && <MockPage page={page} />}
       </div>
+    </div>
+  );
+}
+
+function BrowserSessionTransfer({ page }: { page: Page }) {
+  const browser = getBridge()?.browser;
+  const [open, setOpen] = useState(false);
+  const [exported, setExported] = useState<{ file: string; key: string }>();
+  const [file, setFile] = useState<File>();
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [count, setCount] = useState<number>();
+  if (!page.url.startsWith("https:") || (!browser?.exportSession && !browser?.importSession)) return null;
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(undefined);
+    try { await action(); } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  const download = () => {
+    if (!exported) return;
+    const url = URL.createObjectURL(new Blob([exported.file], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "CrossAgents-网站会话.json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  return (
+    <div className="web-session-transfer">
+      <button type="button" className="ghost small" aria-expanded={open} onClick={() => {
+        setOpen(!open);
+        if (open) { setExported(undefined); setKey(""); }
+      }}>迁移网站登录状态</button>
+      {open && (
+        <>
+          <p className="small muted">仅迁移 {hostLabel(page.url)} 的安全 Cookie。部分网站可能仍需重新登录。</p>
+          {browser.exportSession && <button type="button" className="ghost small" disabled={busy || page.wcId === null} onClick={() => void run(async () => {
+            setExported(await browser.exportSession!(await whenAttached(page)));
+          })}>生成加密文件</button>}
+          {exported && <div className="row">
+            <CopyButton text={exported.key} label="复制迁移密钥" />
+            <button type="button" onClick={download}>下载加密文件</button>
+          </div>}
+          {browser.importSession && <form className="row" onSubmit={(event) => {
+            event.preventDefault();
+            if (!file || !key.trim()) return;
+            void run(async () => {
+              if (file.size > 2 * 1024 * 1024) throw new Error("迁移文件超过 2 MiB");
+              const result = await browser.importSession!(await whenAttached(page), await file.text(), key);
+              setCount(result.count);
+              setKey("");
+            });
+          }}>
+            <input type="file" aria-label="网站会话迁移文件" accept=".json,application/json" onChange={(event) => setFile(event.target.files?.[0])} />
+            <input type="password" autoComplete="off" aria-label="网站会话迁移密钥" placeholder="迁移密钥" value={key} onChange={(event) => setKey(event.target.value)} />
+            <button disabled={busy || !file || !key.trim()}>导入当前网站</button>
+          </form>}
+          {count !== undefined && <p className="small" role="status">已导入 {count} 条 Cookie</p>}
+          <ErrorBox error={error} />
+        </>
+      )}
     </div>
   );
 }
@@ -873,7 +1046,7 @@ function BrowserBar({ page }: { page: Page }) {
 
   const copyExtensionsUrl = async () => {
     try {
-      await navigator.clipboard.writeText("chrome://extensions");
+      await writeClipboard("chrome://extensions");
       setCopiedExtUrl(true);
       setTimeout(() => setCopiedExtUrl(false), 1500);
     } catch {}
@@ -953,7 +1126,7 @@ function BrowserBar({ page }: { page: Page }) {
               <div className="web-chrome-head">
                 <strong>{chromeState?.connected ? "本机 Chrome 已连接" : "连接本机真 Chrome"}</strong>
                 <div className="web-chrome-head-actions">
-                  {chromeState?.connected && (
+                  {chromeState?.connected && getBridge()?.browser?.chromeSyncCookies && (
                     <button
                       type="button"
                       className="ghost small"
@@ -973,7 +1146,7 @@ function BrowserBar({ page }: { page: Page }) {
               {chromeState?.connected ? (
                 <>
                   <p className="small muted web-chrome-note">
-                    点标题或「内置打开」会自动带上 Chrome 登录态在当前面板打开；Agent 也可通过 <code>chrome:&lt;id&gt;</code> 直接控制真 Chrome：
+                    {getBridge()?.browser?.chromeSyncCookies ? "内置打开时会同步 Chrome 登录状态。" : "可直接使用 Chrome 已登录的标签页。"} Agent 可通过 <code>chrome:&lt;id&gt;</code> 操作：
                   </p>
                   <ul className="web-chrome-tabs">
                     {chromeState.tabs.map((t) => (

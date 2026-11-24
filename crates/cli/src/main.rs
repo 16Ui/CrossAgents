@@ -65,6 +65,9 @@ pub enum Command {
     /// Issue, list and revoke device credentials.
     #[command(subcommand)]
     Device(cmd::device::DeviceCommand),
+    /// Run a remote execution node or control connected Windows/macOS/Linux nodes.
+    #[command(subcommand)]
+    Node(cmd::node::NodeCommand),
     /// The built-in hole-punching entrance: on, off, status and one-time pairing codes.
     #[command(subcommand)]
     Link(cmd::link::LinkCommand),

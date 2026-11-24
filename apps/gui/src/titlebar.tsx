@@ -11,9 +11,10 @@ import { isMac, shortcut, shortcutPlatform } from "./lib/shortcuts";
 import { MenuBar } from "./menubar";
 
 /** Only the desktop app has a window to draw a title bar for. */
+export const inTauri = typeof window !== "undefined" && "__TAURI__" in window;
 export const inDesktop =
   typeof navigator !== "undefined" &&
-  (/Electron/i.test(navigator.userAgent) || (__MOCK__ && new URLSearchParams(location.search).has("titlebar")));
+  (/Electron/i.test(navigator.userAgent) || inTauri || (__MOCK__ && new URLSearchParams(location.search).has("titlebar")));
 
 // ---- The sidebar: docked unless hidden (remembered per browser). In a small window it has no
 // column: it floats over the page while the pointer is on its button or on it (like Claude's
@@ -120,8 +121,23 @@ export function Titlebar({ title }: { title?: string }) {
     };
   }, []);
 
+  const onBarMouseDown = (event: React.MouseEvent<HTMLElement>) => {
+    if (!inTauri || event.button !== 0) return;
+    if ((event.target as Element).closest("button, a, input, [role='menu'], [role='menuitem']")) return;
+    window.crossagents?.command?.("drag");
+  };
+  const onBarDoubleClick = (event: React.MouseEvent<HTMLElement>) => {
+    if (!inTauri) return;
+    if ((event.target as Element).closest("button, a, input, [role='menu'], [role='menuitem']")) return;
+    window.crossagents?.command?.("maximize");
+  };
+
   return (
-    <header className={`titlebar ${isMac ? "mac" : ""} ${focused ? "" : "blurred"}`}>
+    <header
+      className={`titlebar ${isMac ? "mac" : ""} ${focused ? "" : "blurred"}`}
+      onMouseDown={onBarMouseDown}
+      onDoubleClick={onBarDoubleClick}
+    >
       <div className="titlebar-nav">
         <button className="tb-btn" onClick={() => history.back()} disabled={!back} title="后退（Alt+←）" aria-label="后退">
           <Icon name="back" size={16} />
@@ -135,6 +151,19 @@ export function Titlebar({ title }: { title?: string }) {
       </div>
       <MenuBar />
       {title && <div className="titlebar-title">{title}</div>}
+      {inTauri && !isMac && (
+        <div className="titlebar-controls">
+          <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("minimize")} title="最小化" aria-label="最小化">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1 5h8" stroke="currentColor" strokeWidth="1.2" /></svg>
+          </button>
+          <button type="button" className="titlebar-win-btn" onClick={() => window.crossagents?.command?.("maximize")} title="最大化" aria-label="最大化">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1.1" /></svg>
+          </button>
+          <button type="button" className="titlebar-win-btn close" onClick={() => window.crossagents?.command?.("close")} title="关闭" aria-label="关闭">
+            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" strokeWidth="1.2" /></svg>
+          </button>
+        </div>
+      )}
     </header>
   );
 }

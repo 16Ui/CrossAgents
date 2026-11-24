@@ -266,6 +266,12 @@ pub struct AcpOptions {
     pub events: mpsc::UnboundedSender<SessionEvent>,
 }
 
+pub(crate) struct ImageTurnOptions {
+    pub resume: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<&'static str>,
+}
+
 pub struct AcpSession {
     peer: RpcPeer,
     session_id: String,
@@ -284,6 +290,7 @@ pub struct AcpSession {
     shutting_down: Arc<AtomicBool>,
     /// What the agent said it takes at `initialize` (docs/TODO.md §7).
     attachments: AttachmentSupport,
+    can_close: bool,
     pub agent_info: Option<Implementation>,
 }
 
@@ -294,6 +301,21 @@ fn emit(events: &mpsc::UnboundedSender<SessionEvent>, kind: SessionEventKind) {
 impl AcpSession {
     /// Spawns the agent, performs the ACP handshake and opens a session.
     pub async fn start(opts: AcpOptions) -> Result<Self, CoreError> {
+        Self::start_inner(opts, None).await
+    }
+
+    /// Opens the ACP side of an Antigravity conversation for an image turn.
+    pub(crate) async fn start_for_image(
+        opts: AcpOptions,
+        image: ImageTurnOptions,
+    ) -> Result<Self, CoreError> {
+        Self::start_inner(opts, Some(image)).await
+    }
+
+    async fn start_inner(
+        opts: AcpOptions,
+        image: Option<ImageTurnOptions>,
+    ) -> Result<Self, CoreError> {
         let AcpOptions {
             launch,
             mcp_servers,
@@ -331,6 +353,7 @@ impl AcpSession {
         let (peer, reader) = RpcPeer::spawn(stdout, stdin, handler);
 
         let shutting_down = Arc::new(AtomicBool::new(false));
+        let watch_exit = image.is_none();
         tokio::spawn({
             let events = events.clone();
             let tail = tail.clone();
@@ -338,7 +361,7 @@ impl AcpSession {
             let exit = process.watch();
             async move {
                 let _ = reader.await;
-                if !shutting_down.load(Ordering::SeqCst) {
+                if watch_exit && !shutting_down.load(Ordering::SeqCst) {
                     let info = exit.within(Duration::from_secs(2)).await;
                     let what = match info {
                         Some(info) => info.describe("agent process"),
@@ -371,32 +394,66 @@ impl AcpSession {
                     },
                 )
                 .await?;
-            let session: NewSessionResponse = {
-                // Campus/OIDC `dsh` plugins (e.g. `@ustc/tokenworks-bootstrap`) finish registering
-                // their provider route shortly after `initialize`. Retry `session/new` briefly while
-                // the provider adapter is still coming up instead of failing the cold boot.
-                let mut attempt = 0u32;
-                loop {
-                    let req = NewSessionRequest {
+            if image.is_some() && !init.agent_capabilities.prompt_capabilities.image {
+                return Err(RpcError::new(
+                    crate::jsonrpc::INVALID_PARAMS,
+                    "this Antigravity CLI does not support ACP image prompts",
+                ));
+            }
+            let session: NewSessionResponse =
+                if let Some(id) = image.as_ref().and_then(|image| image.resume.as_ref()) {
+                    if init
+                        .agent_capabilities
+                        .session_capabilities
+                        .resume
+                        .is_none()
+                    {
+                        return Err(RpcError::method_not_found(method::SESSION_RESUME));
+                    }
+                    let request = NewSessionRequest {
                         cwd: launch.cwd.display().to_string(),
                         mcp_servers: mcp_servers.iter().map(to_wire_mcp).collect(),
                     };
-                    match peer.request(method::SESSION_NEW, req).await {
-                        Ok(session) => break session,
-                        Err(err)
-                            if attempt < 8 && {
-                                let msg = err.to_string().to_lowercase();
-                                msg.contains("no adapter registered for provider")
-                                    || msg.contains("does not own provider")
-                            } =>
-                        {
-                            attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(800)).await;
-                        }
-                        Err(err) => return Err(err),
+                    let response: ResumeSessionResponse = peer
+                        .request(
+                            method::SESSION_RESUME,
+                            ResumeSessionRequest {
+                                session_id: id.clone(),
+                                session: request,
+                            },
+                        )
+                        .await?;
+                    NewSessionResponse {
+                        session_id: id.clone(),
+                        modes: response.modes,
+                        config_options: response.config_options,
                     }
-                }
-            };
+                } else {
+                    // Campus/OIDC `dsh` plugins (e.g. `@ustc/tokenworks-bootstrap`) finish registering
+                    // their provider route shortly after `initialize`. Retry `session/new` briefly while
+                    // the provider adapter is still coming up instead of failing the cold boot.
+                    let mut attempt = 0u32;
+                    loop {
+                        let req = NewSessionRequest {
+                            cwd: launch.cwd.display().to_string(),
+                            mcp_servers: mcp_servers.iter().map(to_wire_mcp).collect(),
+                        };
+                        match peer.request(method::SESSION_NEW, req).await {
+                            Ok(session) => break session,
+                            Err(err)
+                                if attempt < 8 && {
+                                    let msg = err.to_string().to_lowercase();
+                                    msg.contains("no adapter registered for provider")
+                                        || msg.contains("does not own provider")
+                                } =>
+                            {
+                                attempt += 1;
+                                tokio::time::sleep(Duration::from_millis(800)).await;
+                            }
+                            Err(err) => return Err(err),
+                        }
+                    }
+                };
             Ok::<_, RpcError>((init, session))
         };
         let (init, session) = match tokio::time::timeout(INIT_TIMEOUT, handshake).await {
@@ -415,15 +472,17 @@ impl AcpSession {
             );
         }
 
-        let _ = events.send(SessionEvent::with_raw(
-            SessionEventKind::Started {
-                session_id: session.session_id.clone(),
-            },
-            serde_json::json!({
-                "protocolVersion": init.protocol_version,
-                "sessionId": session.session_id,
-            }),
-        ));
+        if image.is_none() {
+            let _ = events.send(SessionEvent::with_raw(
+                SessionEventKind::Started {
+                    session_id: session.session_id.clone(),
+                },
+                serde_json::json!({
+                    "protocolVersion": init.protocol_version,
+                    "sessionId": session.session_id,
+                }),
+            ));
+        }
         let wire_mcp: Vec<McpServerStdio> = mcp_servers.iter().map(to_wire_mcp).collect();
         let this = Self {
             peer,
@@ -447,15 +506,97 @@ impl AcpSession {
                 pdf: false,
                 text: true,
             },
+            can_close: init.agent_capabilities.session_capabilities.close.is_some(),
             agent_info: init.agent_info,
         };
-        this.configure(&session, permission, model.as_deref(), effort.as_deref())
-            .await;
+        if let Some(image) = image {
+            tokio::time::timeout(INIT_TIMEOUT, async {
+                // The native driver configures bypass at launch and other modes below.
+                this.configure(
+                    &session,
+                    PermissionPolicy::Deny,
+                    model.as_deref(),
+                    effort.as_deref(),
+                )
+                .await;
+                this.configure_image_turn(&session, &image).await
+            })
+            .await
+            .map_err(|_| CoreError::Agent("Antigravity ACP configuration timed out".into()))??;
+        } else {
+            this.configure(&session, permission, model.as_deref(), effort.as_deref())
+                .await;
+        }
         Ok(this)
     }
 
     fn active_session_id(&self) -> String {
         self.active_session_id.lock().unwrap().clone()
+    }
+
+    async fn configure_image_turn(
+        &self,
+        session: &NewSessionResponse,
+        image: &ImageTurnOptions,
+    ) -> Result<(), CoreError> {
+        let configure = async {
+            if let Some(mode_id) = image.mode
+                && session
+                    .modes
+                    .as_ref()
+                    .is_none_or(|modes| modes.current_mode_id != mode_id)
+            {
+                self.peer
+                    .request::<_, Value>(
+                        method::SESSION_SET_MODE,
+                        SetSessionModeRequest {
+                            session_id: self.active_session_id(),
+                            mode_id: mode_id.into(),
+                        },
+                    )
+                    .await?;
+            }
+            if let Some(effort) = image.effort.as_deref()
+                && let Some(option) = find_select_option(
+                    session.config_options.as_deref().unwrap_or_default(),
+                    |id, category| {
+                        category == Some("thought_level")
+                            || matches!(id, "effort" | "thinkingLevel")
+                    },
+                )
+                && let Some(value) = option.resolve(effort)
+                && value.value != option.current
+            {
+                self.peer
+                    .request::<_, Value>(
+                        method::SESSION_SET_CONFIG_OPTION,
+                        SetSessionConfigOptionRequest {
+                            session_id: self.active_session_id(),
+                            config_id: option.id.clone(),
+                            value: value.value.clone(),
+                        },
+                    )
+                    .await?;
+            }
+            Ok::<_, RpcError>(())
+        };
+        configure
+            .await
+            .map_err(|err| CoreError::Agent(err.to_string()))
+    }
+
+    pub(crate) async fn close_image_turn(&self) {
+        if self.can_close {
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3),
+                self.peer.request::<_, Value>(
+                    method::SESSION_CLOSE,
+                    serde_json::json!({ "sessionId": self.active_session_id() }),
+                ),
+            )
+            .await;
+        }
+        self.shutdown().await;
     }
 
     async fn configure(
@@ -554,8 +695,19 @@ impl AcpSession {
             ));
             return;
         };
-        if value.value == option.current {
-            return;
+        if value.value != option.current {
+            let request = SetSessionConfigOptionRequest {
+                session_id: self.session_id.clone(),
+                config_id: option.id.clone(),
+                value: value.value.clone(),
+            };
+            if let Err(err) = self
+                .peer
+                .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
+                .await
+            {
+                warn(format!("cannot select model {}: {err}", value.value));
+            }
         }
         let request = SetSessionConfigOptionRequest {
             session_id: self.active_session_id(),
@@ -569,13 +721,47 @@ impl AcpSession {
         {
             warn(format!("cannot select {what} {}: {err}", value.value));
         }
+        // When a combined slug (`gemini-4-neon-medium`) resolved to a base ACP model
+        // (`gemini-4-neon`), also forward the stripped effort suffix if ACP exposes an effort
+        // / thought_level config option.
+        if let Some((_, effort)) = wire::split_effort_suffix(wanted)
+            && !value.value.eq_ignore_ascii_case(wanted)
+            && let Some(effort_opt) = find_select_option(options, |id, cat| {
+                matches!(
+                    cat,
+                    Some("thought_level" | "reasoning_effort" | "effort" | "thinking")
+                ) || matches!(
+                    id,
+                    "thought_level" | "reasoning_effort" | "effort" | "thinking" | "thinking_level"
+                )
+            })
+            && let Some(effort_val) = effort_opt.resolve(effort)
+            && effort_val.value != effort_opt.current
+        {
+            let request = SetSessionConfigOptionRequest {
+                session_id: self.active_session_id(),
+                config_id: effort_opt.id.clone(),
+                value: effort_val.value.clone(),
+            };
+            if let Err(err) = self
+                .peer
+                .request::<_, Value>(method::SESSION_SET_CONFIG_OPTION, request)
+                .await
+            {
+                warn(format!("cannot select effort {}: {err}", effort_val.value));
+            }
+        }
     }
 }
 
 impl AcpSession {
     /// The prompt blocks for one turn: instructions once, the message, then each file as
     /// what the agent takes (docs/TODO.md §7).
-    async fn prompt_blocks(&self, prompt: &Prompt) -> Vec<ContentBlock> {
+    async fn prompt_blocks(
+        &self,
+        prompt: &Prompt,
+        require_images: bool,
+    ) -> Result<Vec<ContentBlock>, CoreError> {
         let mut blocks = Vec::new();
         if let Some(instructions) = self.pending_instructions.lock().await.take() {
             blocks.push(ContentBlock::Text { text: instructions });
@@ -591,6 +777,12 @@ impl AcpSession {
                             data: STANDARD.encode(bytes),
                             mime_type: attachment.mime.clone(),
                         },
+                        Err(err) if require_images => {
+                            return Err(CoreError::Agent(format!(
+                                "cannot read image attachment {}: {err}",
+                                attachment.name
+                            )));
+                        }
                         // Unreadable now: named, so the agent still hears about it.
                         Err(_) => ContentBlock::Text {
                             text: attachment.reference(),
@@ -612,7 +804,15 @@ impl AcpSession {
                 },
             });
         }
-        blocks
+        Ok(blocks)
+    }
+
+    pub(crate) async fn prompt_with_images(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<TurnOutcome, CoreError> {
+        self.run_prompt(self.prompt_blocks(prompt, true).await?)
+            .await
     }
 
     /// Sends one turn's blocks and waits for it to end.
@@ -654,14 +854,15 @@ impl DriverSession for AcpSession {
     }
 
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
-        self.run_prompt(self.prompt_blocks(&Prompt::text(text)).await)
+        self.run_prompt(self.prompt_blocks(&Prompt::text(text), false).await?)
             .await
     }
 
     /// Images go as ACP image blocks when the agent declared them; text is inlined or
     /// named by path (docs/TODO.md §7).
     async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
-        self.run_prompt(self.prompt_blocks(prompt).await).await
+        self.run_prompt(self.prompt_blocks(prompt, false).await?)
+            .await
     }
 
     fn attachment_support(&self) -> Option<AttachmentSupport> {

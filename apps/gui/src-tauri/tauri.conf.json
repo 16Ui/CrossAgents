@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CrossAgents",
+  "version": "../package.json",
+  "identifier": "dev.crossagents.tauri-prototype",
+  "build": { "frontendDist": "../dist-tauri" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": { "capabilities": [] }
+  },
+  "plugins": { "updater": { "pubkey": "", "endpoints": [] } },
+  "bundle": { "active": false, "icon": ["../build/icon.ico", "../build/icon.png"] }
+}

@@ -664,6 +664,16 @@ async fn drivers_say_which_files_they_take() {
             .status(),
         201
     );
+    // Cursor's CLI takes no images as such: a file goes in as a path its own Read tool
+    // opens, so every kind is accepted rather than refused (docs/TODO.md §7).
+    assert_eq!(
+        create("cursorer", "cursor", "cursor-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
 
     let codex: Value = t
         .get("/v1/agents/codexer/transcript")
@@ -700,6 +710,19 @@ async fn drivers_say_which_files_they_take() {
         .unwrap();
     assert_eq!(
         buddy["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": true, "text": true })
+    );
+    let cursor: Value = t
+        .get("/v1/agents/cursorer/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cursor["driver"], "cursor-native");
+    assert_eq!(
+        cursor["capabilities"]["attachments"],
         json!({ "image": true, "pdf": true, "text": true })
     );
 
@@ -1398,6 +1421,59 @@ async fn installing(t: &TestHub) -> Option<String> {
         .find(|p| p.name == "claude")
         .and_then(|p| p.cli.as_ref())
         .and_then(|cli| cli.installing.clone())
+}
+
+#[tokio::test]
+async fn model_visibility_changes_are_persisted_and_announced_to_other_pickers() {
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "catalog-test".into(),
+            crossagents_plugins::PluginConfig {
+                command: vec!["node".into(), "--version".into()],
+                models: vec!["alpha".into(), "beta".into()],
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let mut events = t.hub.bus.subscribe();
+    for shown in [json!(["beta"]), Value::Null] {
+        let response = t
+            .post("/v1/plugins/catalog-test/models")
+            .json(&json!({"shown": shown}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let plugin: crossagents_api_types::PluginInfo = response.json().await.unwrap();
+        let expected = if shown.is_null() {
+            vec!["alpha", "beta"]
+        } else {
+            vec!["beta"]
+        };
+        assert_eq!(plugin.models, expected);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(events.recv().await.unwrap().kind, crossagents_core::EventKind::PluginChanged { name } if name == "catalog-test") { break; }
+            }
+        }).await.expect("a mounted picker must learn about the visibility change");
+        let list: ListPluginsResponse = t
+            .get("/v1/plugins")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            list.plugins
+                .iter()
+                .find(|p| p.name == "catalog-test")
+                .unwrap()
+                .models,
+            expected
+        );
+    }
 }
 
 /// docs/DESIGN.md §9.3 / crates/hub/src/install.rs: the list says which CLI has an install or

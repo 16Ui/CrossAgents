@@ -4,6 +4,7 @@
 # `driver = "antigravity-native"` is `agy`'s headless stream-json mode: one process per
 # session that takes one message per turn on stdin, so a conversation carries on inside the
 # process and, once it is gone, by `--conversation <id>`.
+# Image turns resume the same conversation through `agy acp`.
 #
 # It replaced Gemini CLI for personal accounts (free, Google AI Pro and Ultra) in June 2026;
 # the `gemini` plugin above stays for enterprise Code Assist and pay-as-you-go API keys.

@@ -246,7 +246,7 @@ mod imp {
     use std::io;
     use std::os::unix::io::AsRawFd;
 
-    use super::RawLock;
+    use super::{FileId, RawLock};
     use crate::exec::Access;
 
     pub(super) fn try_lock(file: &File, access: Access) -> io::Result<bool> {

@@ -26,4 +26,8 @@ cwd: string, config: JsonValue,
 /**
  * Display name, title, avatar and persona; all optional.
  */
-profile: AgentProfile, };
+profile: AgentProfile, 
+/**
+ * When true and `cwd` is a git repository, create an isolated git worktree for this session.
+ */
+worktree?: boolean, };

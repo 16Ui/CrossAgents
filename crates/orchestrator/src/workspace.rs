@@ -224,7 +224,7 @@ async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), Cor
 }
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
-    let output = Command::new("git")
+    let output = Command::new(crossagents_core::process::git_program())
         .no_window()
         .args(args)
         .current_dir(dir)
