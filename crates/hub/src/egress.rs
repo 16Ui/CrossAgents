@@ -12,6 +12,8 @@ use crossagents_drivers::process::{candidate_echo, normalize_proxy_url, system_p
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 
+/// Default JSON echo endpoint that answers with IP, countryCode and ASN (`as`).
+const DEFAULT_JSON_ECHO_URL: &str = "http://ip-api.com/json/?fields=query,countryCode,as";
 /// Default plain-HTTP trace endpoint that answers with `ip=` and `loc=` (two-letter country).
 const DEFAULT_TRACE_URL: &str = "http://www.cloudflare.com/cdn-cgi/trace";
 
@@ -56,10 +58,10 @@ pub fn save_proxy(home: &Path, req: SaveEgressProxyRequest) -> Result<Vec<SavedP
             req.url.trim()
         ))
     })?;
-    if url == "direct" {
-        return Err(CoreError::InvalidName(
-            "\"direct\" is built in and does not need to be added".into(),
-        ));
+    if url == "direct" || url == crossagents_drivers::process::AUTO_PROXY {
+        return Err(CoreError::InvalidName(format!(
+            "{url:?} is built in and does not need to be added"
+        )));
     }
     let mut proxies = load_saved(home);
     if req.remove == Some(true) {
@@ -196,6 +198,21 @@ pub async fn discover_candidates(
     }))
     .await;
 
+    let best = probed
+        .iter()
+        .filter(|c| c.ip.is_some() && c.latency_ms.is_some() && c.value != "direct")
+        .min_by_key(|c| c.latency_ms.unwrap_or(u64::MAX))
+        .or_else(|| {
+            probed
+                .iter()
+                .filter(|c| c.ip.is_some() && c.latency_ms.is_some())
+                .min_by_key(|c| c.latency_ms.unwrap_or(u64::MAX))
+        })
+        .map(|c| c.value.clone());
+    if let Some(best_url) = best {
+        crossagents_drivers::process::set_auto_best_proxy(Some(best_url));
+    }
+
     probed
         .into_iter()
         // Auto-scanned local ports that did not answer as a working proxy are not shown, so
@@ -216,12 +233,22 @@ pub async fn probe_exit(
     {
         return parsed;
     }
-    if let Some(body) = candidate_echo(DEFAULT_TRACE_URL, proxy_url).await
-        && let Some(parsed) = parse_echo_body(&body)
-    {
-        return parsed;
+    let json_parsed = match candidate_echo(DEFAULT_JSON_ECHO_URL, proxy_url).await {
+        Some(body) => parse_echo_body(&body),
+        None => None,
+    };
+    if let Some((Some(ip), Some(asn), country)) = json_parsed {
+        return (Some(ip), Some(asn), country);
     }
-    (None, None, None)
+    if let Some(body) = candidate_echo(DEFAULT_TRACE_URL, proxy_url).await
+        && let Some((ip, asn, country)) = parse_echo_body(&body)
+    {
+        return match json_parsed {
+            Some((j_ip, j_asn, j_country)) => (ip.or(j_ip), asn.or(j_asn), country.or(j_country)),
+            None => (ip, asn, country),
+        };
+    }
+    json_parsed.unwrap_or((None, None, None))
 }
 
 /// Parses an echo response in JSON (`{"ip","country","asn"}` or `{"query","countryCode","as"}`),
@@ -338,5 +365,17 @@ mod tests {
         )
         .unwrap();
         assert!(list.is_empty());
+
+        assert!(
+            save_proxy(
+                dir.path(),
+                SaveEgressProxyRequest {
+                    url: "auto".into(),
+                    label: None,
+                    remove: None,
+                },
+            )
+            .is_err()
+        );
     }
 }

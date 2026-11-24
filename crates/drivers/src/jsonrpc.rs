@@ -62,6 +62,9 @@ impl std::error::Error for RpcError {}
 #[async_trait]
 pub trait RpcHandler: Send + Sync + 'static {
     async fn request(&self, method: &str, params: Value) -> Result<Value, RpcError>;
+    async fn request_with_id(&self, _id: &Value, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.request(method, params).await
+    }
     /// Called in arrival order, before any later message is processed.
     async fn notification(&self, method: &str, params: Value);
 }
@@ -213,7 +216,7 @@ async fn dispatch(mut message: Value, handler: &Arc<dyn RpcHandler>, peer: &RpcP
             let handler = handler.clone();
             let peer = peer.clone();
             tokio::spawn(async move {
-                let result = handler.request(&method, params).await;
+                let result = handler.request_with_id(&id, &method, params).await;
                 peer.respond(id, result);
             });
         }

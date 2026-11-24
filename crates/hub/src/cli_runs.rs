@@ -144,10 +144,10 @@ impl CliRuns {
         let record = self.get(plugin, path, version).unwrap_or_default();
         let status = if record.failing() {
             "protocol_failed"
-        } else if verified {
-            "verified"
         } else if record.working() {
             "known_good"
+        } else if verified {
+            "verified"
         } else {
             "untried"
         };
@@ -349,6 +349,11 @@ mod tests {
         runs.record_ok("with", "/w", "1.0.0");
         assert_eq!(
             runs.standing("with", "/w", "1.0.0", false).status,
+            "known_good"
+        );
+        // A run on this machine proves this exact build works, even inside a verified series.
+        assert_eq!(
+            runs.standing("with", "/w", "1.0.0", true).status,
             "known_good"
         );
 

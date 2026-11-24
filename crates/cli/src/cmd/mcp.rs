@@ -1,9 +1,12 @@
 //! `crossagents mcp`: the stdio MCP server mounted into every agent session. It is a thin
 //! proxy; tool definitions and logic live in the hub (`/v1/me/tools`).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context as _, Result};
+use tokio::sync::{oneshot, watch};
+
+use anyhow::Result;
 use async_trait::async_trait;
 use crossagents_api_types::{ApiError, ListToolsResponse};
 use crossagents_drivers::jsonrpc::{RpcError, RpcHandler, RpcPeer};
@@ -15,16 +18,21 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 struct McpProxy {
     http: reqwest::Client,
-    url: String,
-    token: String,
+    url: Option<String>,
+    token: Option<String>,
+    command_requests: Mutex<HashMap<String, Option<oneshot::Sender<()>>>>,
+    disconnected: watch::Sender<bool>,
 }
 
 impl McpProxy {
     async fn list_tools(&self) -> Result<Value, RpcError> {
+        let (Some(url), Some(token)) = (&self.url, &self.token) else {
+            return Ok(json!({ "tools": [] }));
+        };
         let resp = self
             .http
-            .get(format!("{}/v1/me/tools", self.url))
-            .bearer_auth(&self.token)
+            .get(format!("{url}/v1/me/tools"))
+            .bearer_auth(token)
             .send()
             .await
             .map_err(internal)?;
@@ -44,14 +52,20 @@ impl McpProxy {
     }
 
     async fn call_tool(&self, params: Value) -> Result<Value, RpcError> {
+        let (Some(url), Some(token)) = (&self.url, &self.token) else {
+            return Ok(json!({
+                "content": [{ "type": "text", "text": "crossagents session credentials are not active in this process" }],
+                "isError": true
+            }));
+        };
         let name = params["name"]
             .as_str()
             .ok_or_else(|| RpcError::invalid_params("missing tool name"))?;
         let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
         let resp = self
             .http
-            .post(format!("{}/v1/me/tools/{name}", self.url))
-            .bearer_auth(&self.token)
+            .post(format!("{url}/v1/me/tools/{name}"))
+            .bearer_auth(token)
             .json(&arguments)
             .send()
             .await;
@@ -112,19 +126,56 @@ impl RpcHandler for McpProxy {
         }
     }
 
-    async fn notification(&self, _method: &str, _params: Value) {}
+    async fn request_with_id(&self, id: &Value, method: &str, params: Value) -> Result<Value, RpcError> {
+        if method != "tools/call" || params["name"] != "task_command" {
+            return self.request(method, params).await;
+        }
+        let key = id.to_string();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut calls = self.command_requests.lock().unwrap();
+            if calls.contains_key(&key) {
+                return Err(RpcError::invalid_params("duplicate live command request id"));
+            }
+            calls.insert(key.clone(), Some(tx));
+        }
+        let mut disconnected = self.disconnected.subscribe();
+        let result = tokio::select! {
+            biased;
+            _ = disconnected.wait_for(|closed| *closed) => Err(RpcError::new(-32000, "command connection closed")),
+            _ = rx => Err(RpcError::new(-32000, "command request cancelled")),
+            value = self.call_tool(params) => value,
+        };
+        self.command_requests.lock().unwrap().remove(&key);
+        result
+    }
+
+    async fn notification(&self, method: &str, params: Value) {
+        if method == "notifications/cancelled"
+            && let Some(id) = params.get("requestId")
+        {
+            // Keep the slot until the cancelled request has unwound.
+            let key = id.to_string();
+            if let Some(tx) = self.command_requests.lock().unwrap().get_mut(&key).and_then(Option::take) {
+                let _ = tx.send(());
+            }
+        }
+    }
 }
 
 pub async fn run() -> Result<()> {
-    let url = std::env::var(URL_ENV).with_context(|| format!("{URL_ENV} is not set"))?;
-    let token = std::env::var(TOKEN_ENV).with_context(|| format!("{TOKEN_ENV} is not set"))?;
+    let url = std::env::var(URL_ENV).ok().filter(|v| !v.is_empty());
+    let token = std::env::var(TOKEN_ENV).ok().filter(|v| !v.is_empty());
     let proxy = Arc::new(McpProxy {
         http: reqwest::Client::new(),
         url,
         token,
+        command_requests: Mutex::default(),
+        disconnected: watch::channel(false).0,
     });
-    let (_peer, reader) = RpcPeer::spawn(tokio::io::stdin(), tokio::io::stdout(), proxy);
+    let (_peer, reader) = RpcPeer::spawn(tokio::io::stdin(), tokio::io::stdout(), proxy.clone());
     let _ = reader.await;
+    proxy.disconnected.send_replace(true);
     Ok(())
 }
 

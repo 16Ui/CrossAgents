@@ -9,6 +9,7 @@ import type { HumanItem } from "@bindings/HumanItem";
 import type { Run } from "@bindings/Run";
 import type { Task } from "@bindings/Task";
 import { planWaitsForPerson } from "./policy.ts";
+import { wsKey } from "./projectView.ts";
 import { runState } from "./taskState.ts";
 
 export type TodoKind = "question" | "notice" | "approval" | "acceptance" | "failure";
@@ -22,6 +23,9 @@ export type TodoItem = {
   href: string | undefined;
   /** Explanation to display when the processing destination is unavailable. */
   reason?: string;
+  issueRun?: string;
+  issueKeys?: string[];
+  dismissKey?: string;
   since: string;
 };
 
@@ -32,16 +36,40 @@ export type TodoItem = {
  */
 type Waiting = { pending_since?: string | null };
 export type TodoRun = { run: Run & Waiting; tasks: readonly (Task & Waiting)[] };
-export type TodoInput = { items: readonly HumanItem[]; runs: readonly TodoRun[]; now: number };
+export type TodoInput = { items: readonly HumanItem[]; runs: readonly TodoRun[]; now: number; dismissedFailures?: ReadonlySet<string> };
 
 const path = (...parts: string[]) => "#/" + parts.map(encodeURIComponent).join("/");
+
+/** The withdrawn strict Codex stop: a later run in the same repo has continued past it. */
+const CODEX_QUOTA_STOP = "Codex额度数据不可用或已过期，按严格规则停止";
+/** A Gemini quota retry pauses only while the local poller recovers; it needs no person. */
+const GEMINI_QUOTA_WAIT = "Gemini 周额度查询失败，暂停并继续轮询 · ";
+const RETRYING = new Set(["planning", "awaiting_approval", "running"]);
+
+function geminiQuotaRetry(note: string | null): boolean {
+  if (!note?.startsWith(GEMINI_QUOTA_WAIT)) return false;
+  return RETRYING.has(note.slice(GEMINI_QUOTA_WAIT.length));
+}
+
+/**
+ * Only the exact withdrawn note, only while paused, and only when the repo has a
+ * later run by created_at. Paths follow the workspace-key comparison so Windows
+ * separators, case and trailing slashes do not split one repo in two.
+ */
+function codexStopSuperseded(run: TodoRun["run"], runs: readonly TodoRun[]): boolean {
+  if (run.status !== "paused" || run.note !== CODEX_QUOTA_STOP) return false;
+  const createdAt = Date.parse(run.created_at);
+  return runs.some(({ run: other }) => other.id !== run.id
+    && wsKey(other.repo) === wsKey(run.repo)
+    && Date.parse(other.created_at) > createdAt);
+}
 
 /**
  * A pure snapshot of server-confirmed human work. Viewing, unread marks, archived
  * agents and sidebar filters are deliberately not inputs. Pass the complete run list.
  * Question routes carry the HumanItem ID for the consumer to focus its question card.
  */
-export function todoItems({ items, runs, now }: TodoInput): TodoItem[] {
+export function todoItems({ items, runs, now, dismissedFailures }: TodoInput): TodoItem[] {
   const out = new Map<string, TodoItem>();
   const byRun = new Map(runs.map((detail) => [detail.run.id, detail]));
   const add = (source: string, item: TodoItem) => {
@@ -55,9 +83,7 @@ export function todoItems({ items, runs, now }: TodoInput): TodoItem[] {
     let reason: string | undefined;
     if (item.run_id && !detail) reason = "关联的工作不可用，可能已被删除。";
     else if (item.task_id && !detail?.tasks.some((task) => task.id === item.task_id)) reason = "关联的任务找不到，暂时无法打开处理位置。";
-    const href = reason ? undefined : approval && item.run_id
-      ? item.task_id ? path("runs", item.run_id, "tasks", item.task_id) : path("runs", item.run_id)
-      : path("s", item.from, "questions", item.id);
+    const href = reason ? undefined : path("s", item.from, "questions", item.id);
     add(`human:${item.id}`, {
       id: item.id, agent: item.from,
       kind: item.kind === "notice" ? "notice" : approval ? "approval" : "question",
@@ -75,12 +101,21 @@ export function todoItems({ items, runs, now }: TodoInput): TodoItem[] {
         action: "confirm", href: path("runs", run.id), since: run.pending_since ?? run.created_at });
     }
     // A failed task in a running run can still be recovered by its issuer. A
-    // paused/failed run is the durable signal that the person must intervene.
-    if (run.status === "failed" || run.status === "paused") {
-      add(`run:${run.id}`, { id: run.id, agent: run.planner, kind: "failure", summary: run.note ?? run.title,
-        action: "view", href: path("runs", run.id), since: run.pending_since ?? run.created_at });
+    // paused/failed run is the durable signal that the person must intervene —
+    // except a Codex stop a later round continued, and a Gemini retry already polling.
+    if (run.status === "failed" || (run.status === "paused"
+      && !codexStopSuperseded(run, runs) && !geminiQuotaRetry(run.note))) {
+      const since = run.pending_since ?? run.created_at;
+      const dismissKey = run.status === "failed" ? JSON.stringify([run.id, since, run.note]) : undefined;
+      if (!dismissKey || !dismissedFailures?.has(dismissKey)) {
+        const missed = run.note?.match(/^([0-9]+) of ([0-9]+) tasks did not merge$/);
+        const summary = missed ? run.title + "：有 " + missed[1] + " 项任务未合并" : run.note ?? run.title;
+        add("run:" + run.id, { id: run.id, agent: run.planner, kind: "failure", summary,
+          action: "view", href: path("runs", run.id), since, ...(dismissKey ? { dismissKey } : {}) });
+      }
     }
-    if (run.status === "completed" || run.status === "cancelled" || run.status === "failed") continue;
+    if (run.status === "completed" || run.status === "cancelled" || run.status === "failed"
+      || (run.status === "running" && run.config.policy?.continuation)) continue;
     for (const task of tasks) {
       if (task.status !== "passed") continue;
       add(`task:${task.id}`, { id: task.id, agent: task.assignee ?? task.issuer ?? run.planner, kind: "acceptance",

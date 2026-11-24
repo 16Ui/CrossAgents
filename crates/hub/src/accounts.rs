@@ -83,6 +83,10 @@ pub struct Accounts {
     /// Status reads, served at once: a provider read can take seconds (it may start the
     /// vendor's CLI), so only an account's first one is waited for.
     statuses: Statuses,
+    /// Account ids whose status came from disk cache and still needs a live background refresh.
+    stale_from_disk: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Cached model catalogs per account id (seeded from disk on startup).
+    models_cache: Arc<std::sync::Mutex<HashMap<String, Vec<crossagents_core::ModelInfo>>>>,
     /// Accounts whose status is being read in the background.
     refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
     refresh_attempts: std::sync::Mutex<HashMap<String, Instant>>,
@@ -147,7 +151,7 @@ impl Accounts {
                 Some(raw) => Some(
                     crossagents_drivers::process::normalize_proxy_url(raw).ok_or_else(|| {
                         CoreError::InvalidName(format!(
-                            "proxy address {raw:?} (expected \"direct\", http://host:port or socks5://host:port)"
+                            "proxy address {raw:?} (expected \"auto\", \"direct\", http://host:port or socks5://host:port)"
                         ))
                     })?,
                 ),
@@ -165,15 +169,20 @@ impl Accounts {
         let store = self.store().clone();
         let bus = self.bus.clone();
         let echo_url = self.fingerprint_settings.echo_url.clone();
+        let home = self.root.parent().unwrap_or(&self.root).to_path_buf();
         let proxy_choice = account.proxy.clone();
         let account_id = account.id.clone();
         let via_proxy_map = self.fingerprint_proxy.clone();
         tokio::spawn(async move {
-            let probe_target = match proxy_choice.as_deref() {
-                Some("direct") => Some("direct".to_owned()),
-                Some(url) => Some(url.to_owned()),
-                None => crossagents_drivers::process::effective_proxy_url(&[]),
-            };
+            if proxy_choice
+                .as_deref()
+                .is_some_and(|p| p.eq_ignore_ascii_case(crossagents_drivers::process::AUTO_PROXY))
+                && crossagents_drivers::process::auto_best_proxy().is_none()
+            {
+                let _ = crate::egress::discover_candidates(&home, echo_url.as_deref(), &[]).await;
+            }
+            let probe_target =
+                crossagents_drivers::process::resolve_proxy_target(proxy_choice.as_deref());
             let via_proxy = probe_target.as_deref() != Some("direct") && probe_target.is_some();
             {
                 let mut states = via_proxy_map.lock().unwrap();
@@ -198,7 +207,8 @@ impl Accounts {
         Ok(account)
     }
 
-    /// The latest observation, without assuming an unknown proxy state survived a restart.
+    /// The latest observation; falls back to the account's configured route when in-memory
+    /// proxy confirmation has not been recorded yet in this process.
     pub async fn fingerprint(&self, account: &str) -> Option<EgressFingerprint> {
         let rows = self.store().list_egress_records(account).await.ok()?;
         let latest = rows.last()?;
@@ -208,11 +218,29 @@ impl Accounts {
             .take_while(|r| r.egress_ip == latest.egress_ip)
             .last()
             .map(|r| r.at);
+        let in_mem = self.fingerprint_proxy.lock().unwrap().get(account).copied();
+        let via_proxy = match in_mem {
+            Some(v) => Some(v),
+            None => self.store().get_account(account).await.ok().map(|acc| {
+                match acc.proxy.as_deref() {
+                    Some("direct") => false,
+                    Some(raw)
+                        if raw.eq_ignore_ascii_case(crossagents_drivers::process::AUTO_PROXY) =>
+                    {
+                        crossagents_drivers::process::resolve_proxy_target(Some(raw))
+                            .as_deref()
+                            .is_some_and(|p| p != "direct")
+                    }
+                    Some(_) => true,
+                    None => crossagents_drivers::process::effective_proxy_url(&[]).is_some(),
+                }
+            }),
+        };
         Some(EgressFingerprint {
             ip: latest.egress_ip.clone(),
             asn: latest.asn.clone(),
             country: latest.country.clone(),
-            via_proxy: self.fingerprint_proxy.lock().unwrap().get(account).copied(),
+            via_proxy,
             changed_at,
         })
     }
@@ -366,6 +394,14 @@ impl Accounts {
         providers: Vec<Arc<dyn AccountProvider>>,
         root: PathBuf,
     ) -> Self {
+        let cache = load_accounts_cache(&accounts_cache_path(&root));
+        let stale_ids: HashSet<String> = cache.statuses.keys().cloned().collect();
+        let seeded_at = Instant::now();
+        let initial_statuses: HashMap<String, (Instant, AccountStatus)> = cache
+            .statuses
+            .into_iter()
+            .map(|(id, status)| (id, (seeded_at, status)))
+            .collect();
         Self {
             bus,
             providers: providers
@@ -375,7 +411,9 @@ impl Accounts {
             root,
             logins: Arc::default(),
             observed: std::sync::Mutex::default(),
-            statuses: Arc::default(),
+            statuses: Arc::new(std::sync::Mutex::new(initial_statuses)),
+            stale_from_disk: Arc::new(std::sync::Mutex::new(stale_ids)),
+            models_cache: Arc::new(std::sync::Mutex::new(cache.models)),
             refreshing: Arc::default(),
             refresh_attempts: std::sync::Mutex::default(),
             default_models: Arc::default(),
@@ -431,6 +469,66 @@ impl Accounts {
     pub async fn detect_defaults(&self) -> Result<(), CoreError> {
         let existing = self.store().list_accounts().await?;
         for (name, provider) in &self.providers {
+            if name == "gemini" {
+                continue;
+            }
+            if name == "deepseek" {
+                let mut candidates = Vec::new();
+                if let Some(home) = provider.default_home() {
+                    candidates.push((home, "tokenworks", "本机 词元工坊 登录"));
+                }
+                if let Some(home) = crossagents_plugins::deepseek_account::DeepseekAccounts::harness_home() {
+                    candidates.push((home, "deepseek-harness", "本机 DeepSeek Harness 登录"));
+                }
+                for (home, preferred_id, label) in candidates {
+                    if existing.iter().any(|a| same_path(&a.home, &home)) {
+                        continue;
+                    }
+                    let probe = Account {
+                        codebuddy_site: None,
+                        egress: None,
+                        proxy: None,
+                        id: preferred_id.to_owned(),
+                        provider: name.clone(),
+                        label: String::new(),
+                        home: home.clone(),
+                        created_at: Utc::now(),
+                    };
+                    if !provider.status(&probe).await.logged_in {
+                        continue;
+                    }
+                    let id = if existing.iter().any(|a| a.id == preferred_id) {
+                        format!("{preferred_id}-local")
+                    } else {
+                        preferred_id.to_owned()
+                    };
+                    let account = Account {
+                        id,
+                        label: label.to_owned(),
+                        ..probe
+                    };
+                    self.store().insert_account(&account).await?;
+                    self.bus
+                        .publish(EventKind::AccountCreated { account })
+                        .await?;
+                }
+                continue;
+            }
+            // When site-specific CodeBuddy accounts exist (国内站 / 国际站), do not re-seed the
+            // unpinned default `本机 CodeBuddy 登录`, and remove a leftover duplicate if present.
+            if name == "codebuddy"
+                && existing
+                    .iter()
+                    .any(|a| a.provider == "codebuddy" && a.codebuddy_site.is_some())
+            {
+                if existing
+                    .iter()
+                    .any(|a| a.id == "codebuddy" && a.codebuddy_site.is_none())
+                {
+                    let _ = self.store().delete_account("codebuddy").await;
+                }
+                continue;
+            }
             let Some(home) = provider.default_home() else {
                 continue;
             };
@@ -473,11 +571,16 @@ impl Accounts {
         if let Some(id) = account_of(agent) {
             return Some(id);
         }
-        let home = self.providers.get(&agent.plugin)?.default_home()?;
+        let provider_name = crossagents_plugins::provider_of(&agent.plugin);
+        let home = if agent.plugin == "deepseek-harness" {
+            crossagents_plugins::deepseek_account::DeepseekAccounts::harness_home()?
+        } else {
+            self.providers.get(provider_name)?.default_home()?
+        };
         let accounts = self.store().list_accounts().await.ok()?;
         accounts
             .into_iter()
-            .find(|a| a.provider == agent.plugin && same_path(&a.home, &home))
+            .find(|a| a.provider == provider_name && same_path(&a.home, &home))
             .map(|a| a.id)
     }
 
@@ -548,12 +651,17 @@ impl Accounts {
     }
 
     pub fn provider_names(&self) -> Vec<String> {
-        self.providers.keys().cloned().collect()
+        self.providers
+            .keys()
+            .filter(|name| name.as_str() != "gemini")
+            .cloned()
+            .collect()
     }
 
-    /// Whether `plugin` runs on accounts the hub manages (Claude, Codex); others need none.
+    /// Whether `plugin` runs on accounts the hub manages (Claude, Codex, DeepSeek); others need none.
     pub fn manages(&self, plugin: &str) -> bool {
-        self.providers.contains_key(plugin)
+        self.providers
+            .contains_key(crossagents_plugins::provider_of(plugin))
     }
 
     fn provider(&self, name: &str) -> Result<&Arc<dyn AccountProvider>, CoreError> {
@@ -635,6 +743,9 @@ impl Accounts {
     pub async fn remove(&self, id: &str) -> Result<(), CoreError> {
         self.store().delete_account(id).await?;
         self.statuses.lock().unwrap().remove(id);
+        self.stale_from_disk.lock().unwrap().remove(id);
+        self.models_cache.lock().unwrap().remove(id);
+        save_accounts_cache(&accounts_cache_path(&self.root), &self.statuses, &self.models_cache);
         self.egress_blocks.lock().unwrap().remove(id);
         if let Some(mut login) = self.logins.lock().await.remove(id) {
             login.kill();
@@ -663,21 +774,45 @@ impl Accounts {
         }
         let account = self.store().get_account(id).await?;
         let provider = self.provider(&account.provider)?.clone();
+        let stale_disk = self.stale_from_disk.lock().unwrap().remove(id);
         let cached = self.statuses.lock().unwrap().get(id).cloned();
         let mut status = match cached {
             Some((read_at, status)) => {
-                if read_at.elapsed() >= STATUS_TTL {
+                if stale_disk || read_at.elapsed() >= STATUS_TTL {
                     self.refresh_status(account, provider);
                 }
                 status
             }
             None => {
-                let fresh = provider.status(&account).await;
-                let (status, _, signal) = record_status(&self.statuses, id, fresh);
-                if let Some(signal) = signal {
-                    self.record_risk(id, signal).await;
+                if self.refreshing.lock().unwrap().contains(id) {
+                    AccountStatus {
+                        logged_in: false,
+                        auth_mode: None,
+                        email: None,
+                        plan: None,
+                        subscription_until: None,
+                        rate_limits: Vec::new(),
+                        limit_reached: false,
+                        credits: None,
+                        limits: Vec::new(),
+                        reset_credits: Vec::new(),
+                        source: None,
+                        as_of: None,
+                        note: Some("正在读取账号状态…".into()),
+                    }
+                } else {
+                    let fresh = provider.status(&account).await;
+                    let (status, _, signal) = record_status(&self.statuses, id, fresh);
+                    if let Some(signal) = signal {
+                        self.record_risk(id, signal).await;
+                    }
+                    save_accounts_cache(
+                        &accounts_cache_path(&self.root),
+                        &self.statuses,
+                        &self.models_cache,
+                    );
+                    status
                 }
-                status
             }
         };
         let observed = self.observed.lock().unwrap().get(id).cloned();
@@ -723,11 +858,13 @@ impl Accounts {
         let Ok(account) = self.store().get_account(id).await else {
             return Fit::unknown();
         };
+        let stale_disk = self.stale_from_disk.lock().unwrap().remove(id);
         let cached = self.statuses.lock().unwrap().get(id).cloned();
         let observed = self.observed.lock().unwrap().get(id).cloned();
-        if cached
-            .as_ref()
-            .is_none_or(|(read_at, _)| read_at.elapsed() >= STATUS_TTL)
+        if (stale_disk
+            || cached
+                .as_ref()
+                .is_none_or(|(read_at, _)| read_at.elapsed() >= STATUS_TTL))
             && let Ok(provider) = self.provider(&account.provider)
         {
             self.refresh_status_throttled(account.clone(), provider.clone());
@@ -916,29 +1053,33 @@ impl Accounts {
             return;
         }
         let statuses = self.statuses.clone();
+        let stale_from_disk = self.stale_from_disk.clone();
+        let models_cache = self.models_cache.clone();
         let refreshing = self.refreshing.clone();
         let bus = self.bus.clone();
         let defaults = self.default_models.clone();
         let risk = self.risk.clone();
+        let cache_path = accounts_cache_path(&self.root);
         tokio::spawn(async move {
             let fresh = provider.status(&account).await;
             let (_, changed, signal) = record_status(&statuses, &account.id, fresh);
+            stale_from_disk.lock().unwrap().remove(&account.id);
             if let Some(signal) = signal {
                 // A login that fell away is a risk signal: pause and stop, never retry.
                 record_risk_signal(&bus, &risk, &account.id, signal).await;
             }
-            refreshing.lock().unwrap().remove(&account.id);
-            if changed {
-                let _ = bus
-                    .publish(EventKind::AccountQuotaUpdated {
-                        id: account.id.clone(),
-                    })
-                    .await;
-            }
+            let models = provider.models(&account).await;
+            let models_changed = if !models.is_empty() {
+                let mut cache = models_cache.lock().unwrap();
+                let diff = cache.get(&account.id) != Some(&models);
+                cache.insert(account.id.clone(), models.clone());
+                diff
+            } else {
+                false
+            };
             // Claude's initialize list is explicitly default-first; aliases such as
             // `default` do not identify a model and must not exclude other groups.
             if account.provider == "claude" {
-                let models = provider.models(&account).await;
                 let resolved = models
                     .first()
                     .map(|m| m.id.as_str())
@@ -946,19 +1087,69 @@ impl Accounts {
                 let mut defaults = defaults.lock().unwrap();
                 match resolved {
                     Some(model) => {
-                        defaults.insert(account.id, model.to_owned());
+                        defaults.insert(account.id.clone(), model.to_owned());
                     }
                     None => {
                         defaults.remove(&account.id);
                     }
                 }
             }
+            refreshing.lock().unwrap().remove(&account.id);
+            save_accounts_cache(&cache_path, &statuses, &models_cache);
+            if changed || models_changed {
+                let _ = bus
+                    .publish(EventKind::AccountQuotaUpdated {
+                        id: account.id.clone(),
+                    })
+                    .await;
+            }
         });
+    }
+
+    async fn account_models_fast(
+        &self,
+        account: &Account,
+        provider: &dyn AccountProvider,
+    ) -> Vec<crossagents_core::ModelInfo> {
+        let is_refreshing = self.refreshing.lock().unwrap().contains(&account.id);
+        let status_fresh = self
+            .statuses
+            .lock()
+            .unwrap()
+            .get(&account.id)
+            .is_some_and(|(at, _)| at.elapsed() < STATUS_TTL)
+            && !self.stale_from_disk.lock().unwrap().contains(&account.id);
+        if let Some(cached) = self.models_cache.lock().unwrap().get(&account.id).cloned()
+            && !cached.is_empty()
+            && (is_refreshing || status_fresh)
+        {
+            return cached;
+        }
+        // While background `warm()` / `refresh_status` is probing an account with no cached
+        // models yet, avoid launching a duplicate blocking subprocess probe unless the provider
+        // reads instant local storage (CodeBuddy / Codex).
+        if is_refreshing && !matches!(account.provider.as_str(), "codebuddy" | "codex") {
+            return Vec::new();
+        }
+        let models = provider.models(account).await;
+        if !models.is_empty() {
+            self.models_cache
+                .lock()
+                .unwrap()
+                .insert(account.id.clone(), models.clone());
+            save_accounts_cache(
+                &accounts_cache_path(&self.root),
+                &self.statuses,
+                &self.models_cache,
+            );
+        }
+        models
     }
 
     pub async fn models(&self, id: &str) -> Result<Vec<crossagents_core::ModelInfo>, CoreError> {
         let account = self.store().get_account(id).await?;
-        let models = self.provider(&account.provider)?.models(&account).await;
+        let provider = self.provider(&account.provider)?.clone();
+        let models = self.account_models_fast(&account, provider.as_ref()).await;
         for model in &models {
             self.store()
                 .clear_unavailable_model(&account.provider, &account.id, &model.id)
@@ -970,16 +1161,64 @@ impl Accounts {
     /// The model ids `plugin`'s logins report, each once, in the order the first login to
     /// report it lists them. Empty when the plugin has no accounts or none reported yet.
     pub async fn offered_models(&self, plugin: &str) -> Vec<String> {
-        let Ok(provider) = self.provider(plugin) else {
+        let vendor = crossagents_plugins::provider_of(plugin);
+        let Ok(provider) = self.provider(vendor) else {
             return Vec::new();
         };
         let Ok(accounts) = self.store().list_accounts().await else {
             return Vec::new();
         };
+        let pinned_site =
+            crossagents_plugins::builtin::config(plugin).and_then(|c| c.pinned_site());
+        let candidates: Vec<&Account> = accounts
+            .iter()
+            .filter(|a| a.provider == vendor)
+            .collect();
+        let selected: Vec<&Account> = if let Some(site) = pinned_site {
+            let site_matched: Vec<&Account> = candidates
+                .iter()
+                .copied()
+                .filter(|a| a.codebuddy_site == Some(site))
+                .collect();
+            if site_matched.is_empty() {
+                candidates
+                    .into_iter()
+                    .filter(|a| a.codebuddy_site.is_none())
+                    .collect()
+            } else {
+                site_matched
+            }
+        } else if plugin == "tokenworks" {
+            let dsh = provider.default_home();
+            let preferred: Vec<&Account> = candidates
+                .iter()
+                .copied()
+                .filter(|a| dsh.as_ref().is_some_and(|h| same_path(&a.home, h)))
+                .collect();
+            if preferred.is_empty() {
+                candidates
+            } else {
+                preferred
+            }
+        } else if plugin == "deepseek-harness" {
+            let harness =
+                crossagents_plugins::deepseek_account::DeepseekAccounts::harness_home();
+            let preferred: Vec<&Account> = candidates
+                .iter()
+                .copied()
+                .filter(|a| harness.as_ref().is_some_and(|h| same_path(&a.home, h)))
+                .collect();
+            if preferred.is_empty() {
+                candidates
+            } else {
+                preferred
+            }
+        } else {
+            candidates
+        };
         let mut models: Vec<String> = Vec::new();
-        let vendor = crossagents_plugins::provider_of(plugin);
-        for account in accounts.iter().filter(|a| a.provider == vendor) {
-            for model in provider.models(account).await {
+        for account in selected {
+            for model in self.account_models_fast(account, provider.as_ref()).await {
                 if !models.contains(&model.id) {
                     models.push(model.id);
                 }
@@ -1551,6 +1790,44 @@ async fn pause_and_stop(bus: &EventBus, risk: &RiskRecords, id: &str, why: &str)
                 })
                 .await;
         }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct DiskAccountsCache {
+    #[serde(default)]
+    statuses: HashMap<String, AccountStatus>,
+    #[serde(default)]
+    models: HashMap<String, Vec<crossagents_core::ModelInfo>>,
+}
+
+fn accounts_cache_path(root: &Path) -> PathBuf {
+    root.parent().unwrap_or(root).join("accounts-cache.json")
+}
+
+fn load_accounts_cache(path: &Path) -> DiskAccountsCache {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_accounts_cache(
+    path: &Path,
+    statuses: &Statuses,
+    models_cache: &Arc<std::sync::Mutex<HashMap<String, Vec<crossagents_core::ModelInfo>>>>,
+) {
+    let payload = DiskAccountsCache {
+        statuses: statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, (_, v))| (k.clone(), v.clone()))
+            .collect(),
+        models: models_cache.lock().unwrap().clone(),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&payload) {
+        let _ = crate::paths::write_atomic(path, &bytes);
     }
 }
 
@@ -2657,6 +2934,190 @@ mod login_tests {
             )
         );
     }
+
+    #[tokio::test]
+    async fn workbuddy_sites_keep_separate_offered_models() {
+        struct SiteModels;
+        #[async_trait::async_trait]
+        impl AccountProvider for SiteModels {
+            fn name(&self) -> &str {
+                "codebuddy"
+            }
+            fn default_home(&self) -> Option<PathBuf> {
+                None
+            }
+            async fn status(&self, _account: &Account) -> AccountStatus {
+                AccountStatus {
+                    logged_in: true,
+                    auth_mode: None,
+                    email: None,
+                    plan: None,
+                    subscription_until: None,
+                    rate_limits: Vec::new(),
+                    limit_reached: false,
+                    credits: None,
+                    limits: Vec::new(),
+                    reset_credits: Vec::new(),
+                    source: Some(DataSource::Live),
+                    as_of: Some(Utc::now()),
+                    note: None,
+                }
+            }
+            async fn sessions(&self, _account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+                Ok(Vec::new())
+            }
+            async fn models(&self, account: &Account) -> Vec<ModelInfo> {
+                let id = match account.codebuddy_site {
+                    Some(CodebuddySite::International) => "gpt-6-astra",
+                    _ => "hy4std",
+                };
+                vec![ModelInfo {
+                    id: id.to_owned(),
+                    name: id.to_owned(),
+                    description: None,
+                    context_window: None,
+                    credit_multiplier: None,
+                }]
+            }
+            fn login_command(&self, _account: &Account) -> LoginCommand {
+                unreachable!()
+            }
+            fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
+                Vec::new()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let bus = Arc::new(EventBus::new(store.clone()));
+        let accounts = Arc::new(Accounts::new(
+            bus,
+            vec![Arc::new(SiteModels)],
+            dir.path().join("accounts"),
+        ));
+        let cn = Account {
+            id: "codebuddy-cn".into(),
+            provider: "codebuddy".into(),
+            label: "国内站".into(),
+            home: dir.path().join("cn"),
+            created_at: Utc::now(),
+            proxy: None,
+            egress: None,
+            codebuddy_site: Some(CodebuddySite::China),
+        };
+        let intl = Account {
+            id: "codebuddy-intl".into(),
+            provider: "codebuddy".into(),
+            label: "国际站".into(),
+            home: dir.path().join("intl"),
+            created_at: Utc::now(),
+            proxy: None,
+            egress: None,
+            codebuddy_site: Some(CodebuddySite::International),
+        };
+        store.insert_account(&cn).await.unwrap();
+        store.insert_account(&intl).await.unwrap();
+
+        assert_eq!(accounts.offered_models("workbuddy-cn").await, vec!["hy4std"]);
+        assert_eq!(
+            accounts.offered_models("workbuddy-intl").await,
+            vec!["gpt-6-astra"]
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_accounts_cache_seeds_initial_status_and_models() {
+        struct CachedProvider;
+        #[async_trait::async_trait]
+        impl AccountProvider for CachedProvider {
+            fn name(&self) -> &str {
+                "cursor"
+            }
+            fn default_home(&self) -> Option<PathBuf> {
+                None
+            }
+            async fn status(&self, _account: &Account) -> AccountStatus {
+                AccountStatus {
+                    logged_in: true,
+                    auth_mode: None,
+                    email: None,
+                    plan: None,
+                    subscription_until: None,
+                    rate_limits: Vec::new(),
+                    limit_reached: false,
+                    credits: None,
+                    limits: Vec::new(),
+                    reset_credits: Vec::new(),
+                    source: Some(DataSource::Live),
+                    as_of: Some(Utc::now()),
+                    note: None,
+                }
+            }
+            async fn sessions(&self, _account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+                Ok(Vec::new())
+            }
+            async fn models(&self, _account: &Account) -> Vec<ModelInfo> {
+                vec![ModelInfo {
+                    id: "cursor-fast".into(),
+                    name: "Cursor Fast".into(),
+                    description: None,
+                    context_window: None,
+                    credit_multiplier: None,
+                }]
+            }
+            fn login_command(&self, _account: &Account) -> LoginCommand {
+                unreachable!()
+            }
+            fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
+                Vec::new()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let bus = Arc::new(EventBus::new(store.clone()));
+        let provider: Arc<dyn AccountProvider> = Arc::new(CachedProvider);
+        let account = Account {
+            codebuddy_site: None,
+            egress: None,
+            proxy: None,
+            id: "cursor-work".into(),
+            provider: "cursor".into(),
+            label: "work".into(),
+            home: dir.path().join("accounts").join("cursor-work"),
+            created_at: Utc::now(),
+        };
+        store.insert_account(&account).await.unwrap();
+
+        let first = Accounts::new(
+            bus.clone(),
+            vec![provider.clone()],
+            dir.path().join("accounts"),
+        );
+        assert!(first.status(&account.id).await.unwrap().logged_in);
+        assert_eq!(first.models(&account.id).await.unwrap().len(), 1);
+
+        // Recreate Accounts over the same directory and verify disk cache immediately seeds
+        // both status and models before any live refresh completes.
+        let seeded = Accounts::new(bus, vec![provider], dir.path().join("accounts"));
+        assert!(
+            seeded
+                .statuses
+                .lock()
+                .unwrap()
+                .get(&account.id)
+                .is_some_and(|(_, s)| s.logged_in)
+        );
+        assert_eq!(
+            seeded
+                .models_cache
+                .lock()
+                .unwrap()
+                .get(&account.id)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
 }
 
 /// Whether an account has quota left.
@@ -2942,8 +3403,9 @@ fn judge_for_model_with_top(
         };
     }
     // Credits are account-wide, including when the last update belongs to another model.
-    // Antigravity's AI credits are optional overage, not the subscription's baseline.
-    let credits = if provider == "antigravity" {
+    // Antigravity and Codex credits are optional overage, not subscription quota.
+    // Their actual exhausted windows / explicit refusals are still checked below.
+    let credits = if matches!(provider, "antigravity" | "codex") {
         None
     } else {
         credits
@@ -2999,6 +3461,24 @@ mod health_tests {
             remaining: None,
             total: None,
         }
+    }
+
+    #[test]
+    fn codex_zero_overage_does_not_exhaust_subscription() {
+        let credits = Credits { has_credits: false, unlimited: false, balance: Some("0".into()) };
+        for (used, exhausted) in [(10.0, false), (100.0, true)] {
+            let result = judge_for_model_with_top(
+                &[window("weekly", used)], &[], Some("gpt-6.1-sol"),
+                None, Some(&credits), None, None, "codex"
+            );
+            assert_eq!(matches!(result, Health::Exhausted(_)), exhausted);
+        }
+        assert!(matches!(judge_for_model_with_top(
+            &[window("weekly", 10.0)], &[], Some("gpt-6.1-sol"),
+            None, Some(&credits), None, Some("usage_limit_reached"), "codex"
+        ), Health::Exhausted(_)));
+        // Credit-billed providers retain the original zero-balance protection.
+        assert!(matches!(judge(&[], None, Some(&credits)), Health::Exhausted(_)));
     }
 
     #[test]

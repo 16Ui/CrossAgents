@@ -351,7 +351,7 @@ impl RunConfig {
         self.auto_approve || self.policy.plan_approval == PlanApproval::Auto
     }
 
-    pub const DEFAULT_MAX_PARALLEL: u32 = 3;
+    pub const DEFAULT_MAX_PARALLEL: u32 = 5;
     pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 }
 
@@ -907,6 +907,14 @@ pub struct TaskReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub reviewed_sha: Option<String>,
+    /// The agent that submitted the stored verdict.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub verdict_by: Option<AgentId>,
+    /// A local automatic merge already found this verified revision unsafe to integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub automatic_merge_blocked_sha: Option<String>,
     /// Review rounds opened on this task so far (1 for the first review).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub review_attempt: u32,
@@ -1073,6 +1081,10 @@ pub struct ContinuationState {
     pub phase: String,
     pub next_step: String,
     pub attempts: u32,
+    /// Number of merged tasks already credited to the current wakeup budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub merged_tasks_at_credit: Option<usize>,
     pub next_at: Option<DateTime<Utc>>,
     pub last_attempt_at: Option<DateTime<Utc>>,
     pub delivery_error: Option<String>,
@@ -1092,6 +1104,22 @@ pub struct ContinuationState {
     /// set and the run is in such a phase; old records read it back as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_watch: Option<StuckWatch>,
+    /// Bounded retries for an identical set of stalled tasks, persisted across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recovery: Option<RecoveryWatch>,
+    /// The one recovery probe allowed until the lead completes a new turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub provider_recovery_at: Option<DateTime<Utc>>,
+    /// Last repeated lead failure reported by the hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub lead_failure_notice: Option<String>,
+    /// One alternate-model recovery for a particular transport failure streak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(skip))]
+    pub provider_fallback: Option<ProviderFallback>,
     /// What the wakeups have done lately. The automation breaker pauses the continuation when
     /// it ran at least 50 times in 7 days and failed 90% of them
     /// (docs/research/multica.md §2.14); a paused run is not woken again.
@@ -1099,6 +1127,23 @@ pub struct ContinuationState {
     pub health: Health,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderFallback {
+    pub failure: crate::MessageId,
+    pub primary: String,
+    pub alternate: String,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RecoveryWatch {
+    pub fingerprint: String,
+    pub attempts: u32,
+    pub notified: bool,
+    #[serde(default)]
+    pub legacy_checked: bool,
+}
 /// One run of an automation: when, and whether it did what it was for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -1386,6 +1431,7 @@ mod tests {
             phase: "waiting_tasks".into(),
             next_step: "wait".into(),
             attempts: 1,
+            merged_tasks_at_credit: None,
             next_at: None,
             last_attempt_at: None,
             delivery_error: None,
@@ -1395,6 +1441,10 @@ mod tests {
                 progress_at: now,
                 event_seq: 42,
             }),
+            recovery: None,
+            provider_recovery_at: None,
+            lead_failure_notice: None,
+            provider_fallback: None,
             health: Health::default(),
         };
         let json = serde_json::to_value(&state).unwrap();

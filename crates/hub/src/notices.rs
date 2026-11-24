@@ -82,11 +82,19 @@ impl Notices {
                     Ok(event) => {
                         matcher.budgets.apply(&event).await;
                         // A worker refused for quota hands its task on (docs/tasks/DOGFOOD.md §5).
-                        if let EventKind::AgentRateLimits { id, limits } = &event.kind
-                            && let Some(why) = &limits.reached
-                        {
+                        let quota_refusal = match &event.kind {
+                            EventKind::AgentRateLimits { id, limits } => {
+                                limits.reached.as_ref().map(|why| (*id, why.clone()))
+                            }
+                            EventKind::AgentError { id, message }
+                                if is_quota_or_rate_limit_error(message) =>
+                            {
+                                Some((*id, message.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((id, why)) = quota_refusal {
                             let orchestrator = matcher.orchestrator.clone();
-                            let (id, why) = (*id, why.clone());
                             tokio::spawn(async move {
                                 if let Err(err) = orchestrator.rate_limited(id, &why).await {
                                     tracing::warn!(%id, error = %err, "cannot hand on a rate-limited task");
@@ -290,4 +298,15 @@ fn describe(event: &Event, agent: &str) -> Option<(WatchTarget, WatchOn, String)
         }
         _ => None,
     }
+}
+
+fn is_quota_or_rate_limit_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("individual quota reached")
+        || lower.contains("quota reached")
+        || lower.contains("insufficient balance")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+        || message.contains("超出频率限制")
+        || lower.split(|c: char| !c.is_ascii_digit()).any(|n| n == "429")
 }

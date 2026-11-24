@@ -158,7 +158,7 @@ const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
   notify: (notice) => ipcRenderer.send("notify:show", notice),
   onNoticeOpen(listener) {
-    const wrapped = (_event: IpcRendererEvent, agentId: string) => listener(agentId);
+    const wrapped = (_event: IpcRendererEvent, href: string) => listener(href);
     ipcRenderer.on("notify:open", wrapped);
     return () => {
       ipcRenderer.removeListener("notify:open", wrapped);

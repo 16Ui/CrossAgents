@@ -491,7 +491,11 @@ async fn model_effort_and_diffs() {
         k,
         SessionEventKind::ToolCall { kind: Some(kind), title, .. } if kind == "edit" && title.contains("a.txt")
     )));
+    let started = std::time::Instant::now();
     session.compact().await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(90), "must await compact turn completion");
+    let (_, text, _) = turn(&*session, &mut rx, "after compact").await;
+    assert!(text.contains("after compact"));
     session.shutdown().await;
 }
 
@@ -531,5 +535,29 @@ async fn failed_turns_and_crashes_are_reported() {
     let session = driver.resume(&thread_id, again).await.unwrap();
     let (_, text, _) = turn(&*session, &mut rx, "[history]").await;
     assert!(text.contains("history=[fail]"), "{text}");
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn compaction_serializes_followup_prompt_and_another_compaction() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let driver = driver();
+    let (spec, _rx) = spec(Opts::new(home.path(), work.path()));
+    let session = driver.open(spec).await.unwrap();
+    let start = std::time::Instant::now();
+    let (compact, prompt) = tokio::join!(session.compact(), async {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let outcome = session.prompt("queued after compact").await;
+        assert!(start.elapsed() >= Duration::from_millis(90));
+        outcome
+    });
+    compact.unwrap();
+    assert_eq!(prompt.unwrap().stop_reason, StopReason::EndTurn);
+    let start = std::time::Instant::now();
+    let (first, second) = tokio::join!(session.compact(), session.compact());
+    first.unwrap();
+    second.unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(180));
     session.shutdown().await;
 }

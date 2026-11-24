@@ -208,11 +208,28 @@ impl Orchestrator {
         run: RunId,
         agent: AgentId,
     ) -> Result<Option<LetGo>, CoreError> {
+        self.let_go_when(run, agent, false).await
+    }
+
+    pub(crate) async fn let_go_after_review(
+        &self,
+        run: RunId,
+        agent: AgentId,
+    ) -> Result<Option<LetGo>, CoreError> {
+        self.let_go_when(run, agent, true).await
+    }
+
+    async fn let_go_when(
+        &self,
+        run: RunId,
+        agent: AgentId,
+        after_turn: bool,
+    ) -> Result<Option<LetGo>, CoreError> {
         let claim = match self.store.claim_of(agent).await? {
             Some(claim) => claim,
             None => return Ok(None),
         };
-        if claim.run_id != run {
+        if claim.run_id != run || (after_turn && claim.role != ClaimRole::Reviewer) {
             return Ok(None);
         }
         if !self.store.release_agent(agent, run).await? {
@@ -226,7 +243,19 @@ impl Orchestrator {
             // A lead copied for the run keeps its directory: its driver resumes only there,
             // and restoring it brings the checkout back (`lead_returned`).
             let keep_dir = claim.role == ClaimRole::Lead;
-            self.put_away(agent, keep_dir).await.map_err(|err| {
+            let put_away = if after_turn {
+                // The review tool is being called from this turn. The hub can
+                // move and archive it once the response has gone back to it.
+                async {
+                    self.host.send_home(agent).await?;
+                    self.host.archive_agent_after_turn(agent).await?;
+                    Ok::<_, CoreError>(())
+                }
+                .await
+            } else {
+                self.put_away(agent, keep_dir).await
+            };
+            put_away.map_err(|err| {
                 CoreError::Storage(format!(
                     "{name} was let go of the run, but cannot be archived, so it may still hold its directory: {err}"
                 ))

@@ -487,3 +487,43 @@ async fn a_failure_carries_related_records_and_rest_shows_them() {
         .await;
     assert_eq!(resp.status(), 404);
 }
+
+#[tokio::test]
+async fn human_can_close_issue_notifications_without_deleting_or_resolving_issues() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let lead = t.add_agent_in("notice-lead", Some("opus"), "planner", repo.path()).await;
+    // This is an HTTP lifecycle test, not a model/MCP kickoff test: seed the
+    // source records directly so unrelated model scheduling cannot stall it.
+    let response = t.post("/v1/runs", json!({"request":"notification fixture","planner":"notice-lead"})).await;
+    assert_eq!(response.status(), 201);
+    let data: Value = response.json().await.unwrap();
+    let run = data["id"].as_str().unwrap().to_owned();
+    for key in ["issue/test/one", "issue/test/two"] {
+        t.hub.bus.store().put_note(&crossagents_core::Note {
+            scope: crossagents_core::NoteScope::Run, run_id: Some(run.parse().unwrap()),
+            key:key.into(), text:"An unresolved diagnostic problem".into(),
+            author:lead.id, updated_at:chrono::Utc::now()
+        }).await.unwrap();
+    }
+    let path = format!("/v1/runs/{run}/issues/dismiss");
+    assert_eq!(t.post(&path, json!({"issues":[]})).await.status(), 400);
+    // All keys are validated before changes; wrong-run/approval ids cannot be dismissed.
+    assert_eq!(t.post(&path, json!({"issues":["issue/test/one", "approval/not-an-issue"]})).await.status(), 400);
+    let before: Value = t.get(&format!("/v1/runs/{run}/issues")).await.json().await.unwrap();
+    assert_eq!(before["unsorted"], 2);
+    for _ in 0..2 {
+        let response = t.post(&path, json!({"issues":["issue/test/one"]})).await;
+        assert_eq!(response.status(), 200);
+        let data: Value = response.json().await.unwrap();
+        assert_eq!(data["unsorted"], 1);
+        assert_eq!(data["issues"].as_array().unwrap().len(), 2);
+        let first = data["issues"].as_array().unwrap().iter().find(|i| i["key"] == "issue/test/one").unwrap();
+        assert_eq!(first["text"], "An unresolved diagnostic problem");
+        assert_eq!(first["triage"]["result"], "kept");
+        assert!(first["triage"]["why"].as_str().unwrap().contains("不代表问题已解决"));
+    }
+    // Persistent GET agrees, and an unselected issue is still pending.
+    let after: Value = t.get(&format!("/v1/runs/{run}/issues")).await.json().await.unwrap();
+    assert_eq!(after["unsorted"], 1);
+}

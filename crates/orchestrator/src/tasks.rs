@@ -22,11 +22,11 @@ use crate::tools::args;
 use crate::verify::{all_passed, run_command};
 
 /// Largest diff or file text a tool returns.
-const READ_LIMIT: usize = 60 * 1024;
+const READ_LIMIT: usize = 24 * 1024;
 /// `workspace_run`: default and longest time limit, and output kept.
 const RUN_DEFAULT: Duration = Duration::from_secs(300);
 const RUN_MAX: Duration = Duration::from_secs(1800);
-const RUN_OUTPUT: usize = 64 * 1024;
+const RUN_OUTPUT: usize = 16 * 1024;
 
 fn clip(mut text: String, limit: usize) -> String {
     if text.len() > limit {
@@ -48,6 +48,38 @@ fn checks_ok(report: &TaskReport) -> Option<bool> {
     } else {
         Some(report.checks.iter().all(|c| c.passed))
     }
+}
+
+fn automatic_integration(run: &Run) -> bool {
+    run.status == RunStatus::Running
+        && run.config.policy.continuation.is_some()
+        && run.config.policy.land == crossagents_core::LandPolicy::Auto
+        && run.versioned()
+        && !run.leads_in_place()
+        && !run.continuation.as_ref().is_some_and(|state| state.health.is_paused())
+}
+
+fn automatic_candidate(run: &Run, task: &Task) -> bool {
+    let report = &task.report;
+    task.status == TaskStatus::Passed
+        && task.parent.is_none()
+        && task.issuer_or(run.planner) == run.planner
+        && task.reviewer.is_none()
+        && report.review_attempt > 0
+        && report.verdict_by.is_some_and(|reviewer| {
+            reviewer != run.planner && Some(reviewer) != task.assignee
+        })
+        && report.verdict == Some(crossagents_core::model::ReviewVerdict::Merge)
+        && report.verified_sha.as_ref().is_some_and(|sha| !sha.is_empty())
+        && report.reviewed_sha == report.verified_sha
+        && report.automatic_merge_blocked_sha != report.verified_sha
+        && !report.interrupted
+        && !report.unchecked
+        && report.failure.is_none()
+        && report.forced.is_none()
+        && all_passed(&report.checks)
+        && task.spec.acceptance.iter().map(String::as_str)
+            .eq(report.checks.iter().map(|check| check.command.as_str()))
 }
 
 /// A verification that reruns only some of the checks (`task_verify` with `only_failed`): the
@@ -97,7 +129,7 @@ fn task_json(task: &Task) -> Value {
 #[derive(Deserialize)]
 struct TaskArg {
     /// A task key (`auth` or `#auth`) in the caller's run, or a task id.
-    #[serde(alias = "task_id")]
+    #[serde(alias = "task_id", alias = "task_key", alias = "key")]
     task: String,
 }
 
@@ -249,10 +281,27 @@ impl Orchestrator {
         struct A {
             tasks: Vec<PlannedTask>,
         }
+        // The same validation applies whether the model sends one planned
+        // object or the canonical batch envelope.
+        let input = if input.get("tasks").is_none() && input.get("key").is_some() {
+            json!({ "tasks": [input] })
+        } else {
+            input
+        };
         let a: A = args(input)?;
-        let Some((run, existing)) = self.run_of(caller.id).await? else {
+        if a.tasks.iter().any(|task| !task.spec.acceptance.is_empty())
+            && self.guards_native_commands(caller).await
+        {
+            return Err(CoreError::Conflict(
+                "In a protected native session, request executable checks through task_command instead of spec.acceptance.".into(),
+            ));
+        }
+        let Some((run, _)) = self.run_of(caller.id).await? else {
             return Err(CoreError::Conflict("you are in no run".into()));
         };
+        let _guard = self.lock(run.id).await;
+        let mut run = self.store.get_run(run.id).await?;
+        let existing = self.store.list_tasks(run.id).await?;
         // The lead adds tasks to the run; with the delegate policy an assignee splits off
         // parts of its own task, which branch from it and merge back into it.
         let parent = if run.planner == caller.id {
@@ -277,8 +326,6 @@ impl Orchestrator {
                 run.status
             )));
         }
-        let _guard = self.lock(run.id).await;
-        let mut run = self.store.get_run(run.id).await?;
         let (repeated, new): (Vec<PlannedTask>, Vec<PlannedTask>) = a
             .tasks
             .into_iter()
@@ -388,6 +435,13 @@ impl Orchestrator {
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
+        if a.spec.as_ref().is_some_and(|spec| !spec.acceptance.is_empty())
+            && self.guards_native_commands(caller).await
+        {
+            return Err(CoreError::Conflict(
+                "In a protected native session, request executable checks through task_command instead of spec.acceptance.".into(),
+            ));
+        }
         let _guard = self.lock(run.id).await;
         let mut run = self.store.get_run(run.id).await?;
         let mut task = self.store.get_task(task.id).await?;
@@ -450,6 +504,7 @@ impl Orchestrator {
     ) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
+            #[serde(alias = "assignee")]
             to: String,
             /// Why it changes hands, for the handoff card.
             #[serde(default)]
@@ -1285,6 +1340,137 @@ impl Orchestrator {
         )
     }
 
+    pub(crate) async fn task_command(
+        &self,
+        caller: &Agent,
+        input: Value,
+    ) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Request {
+            task: String,
+            command: String,
+            purpose: String,
+            timeout_secs: Option<u64>,
+        }
+        let request: Request = args(input)?;
+        let secs = request.timeout_secs.unwrap_or(RUN_DEFAULT.as_secs());
+        if !(1..=RUN_MAX.as_secs()).contains(&secs)
+            || request.command.trim().is_empty()
+            || request.command.len() > 4_096
+            || request.command.chars().any(char::is_control)
+            || request.purpose.trim().is_empty()
+            || request.purpose.len() > 1_024
+            || request.purpose.chars().any(char::is_control)
+        {
+            return Err(CoreError::Conflict("Invalid command, purpose or timeout".into()));
+        }
+        let input = json!({"task": request.task});
+        let (run, task) = self.task_arg(caller, &input).await?;
+        let (dir, canonical) = self.task_command_directory(caller, &run, &task)?;
+        self.host.continuation_dispatch_allowed(caller.id).await?;
+        let granted = self.task_command_preapproved(
+            caller, &task, &canonical, &request.command, secs,
+        ).await;
+        if !granted {
+            let title = format!(
+                "任务：#{}\n命令：{}\n执行目录：{}\n最长运行：{} 秒\n用途与资源：{}",
+                task.key, request.command, dir.display(), secs, request.purpose
+            );
+            if !self.ask_approval_with_summary(caller, &title, "task command", Some(&request.purpose)).await {
+                return Err(CoreError::Conflict("命令未获授权，未执行。".into()));
+            }
+        }
+        // An approval is for this one worktree and request, even if the task was moved
+        // or the quota changed while the person had the card open.
+        let current_run = self.store.get_run(run.id).await?;
+        let current_task = self.store.get_task(task.id).await?;
+        let (current_dir, current_canonical) =
+            self.task_command_directory(caller, &current_run, &current_task)?;
+        if current_dir != dir || current_canonical != canonical || current_task.assignee != task.assignee {
+            return Err(CoreError::Conflict("任务工作区或负责人已变化，命令未执行。".into()));
+        }
+        if granted && !self.task_command_preapproved(
+            caller, &task, &canonical, &request.command, secs,
+        ).await {
+            return Err(CoreError::Conflict("已有授权已过期或撤销，命令未执行。".into()));
+        }
+        self.host.continuation_dispatch_allowed(caller.id).await?;
+        let started = Instant::now();
+        let result = run_command(
+            &dir,
+            &request.command,
+            Duration::from_secs(secs),
+            RUN_OUTPUT,
+            &self.config.worktrees,
+            &self.config.locks,
+            self.config.shims.as_deref(),
+        ).await;
+        self.publish(EventKind::TaskCommand {
+            run_id: run.id,
+            id: task.id,
+            key: task.key,
+            by: caller.id,
+            command: request.command,
+            exit_code: result.exit_code,
+            duration_ms: started.elapsed().as_millis() as u64,
+        }).await;
+        Ok(json!({
+            "exit_code": result.exit_code, "passed": result.passed, "output": result.output,
+            "authorization": if granted { "existing_grant" } else { "one_time_approval" },
+        }))
+    }
+
+    fn task_command_directory(
+        &self, caller: &Agent, run: &Run, task: &Task,
+    ) -> Result<(PathBuf, PathBuf), CoreError> {
+        if task.run_id != run.id || run.status != RunStatus::Running
+            || !matches!(task.status, TaskStatus::Running | TaskStatus::Passed)
+            || (task.assignee != Some(caller.id) && task.issuer_or(run.planner) != caller.id)
+        {
+            return Err(CoreError::Conflict("只能在你负责的活动任务中执行命令。".into()));
+        }
+        let dir = Self::worktree(task)?;
+        let canonical = std::fs::canonicalize(&dir)
+            .map_err(|e| CoreError::Agent(format!("cannot resolve task worktree: {e}")))?;
+        let root = std::fs::canonicalize(&self.config.worktrees)
+            .map_err(|e| CoreError::Agent(format!("cannot resolve managed worktree root: {e}")))?;
+        if !canonical.starts_with(&root) || canonical == root {
+            return Err(CoreError::Conflict("此任务没有独立工作区，命令未执行。".into()));
+        }
+        Ok((dir, canonical))
+    }
+
+    async fn task_command_preapproved(
+        &self, caller: &Agent, task: &Task, directory: &Path, command: &str, secs: u64,
+    ) -> bool {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Grant {
+            agent: AgentId,
+            task: TaskId,
+            directory: PathBuf,
+            command: String,
+            timeout_secs: u64,
+            expires_at: chrono::DateTime<Utc>,
+        }
+        let Some(home) = self.config.locks.parent() else {
+            return false;
+        };
+        // Operator-owned hub configuration, outside the project checkout.
+        let Ok(bytes) = tokio::fs::read(home.join("task-command-grants.json")).await else {
+            return false;
+        };
+        let Ok(grants) = serde_json::from_slice::<Vec<Grant>>(&bytes) else {
+            return false;
+        };
+        grants.iter().any(|grant| {
+            grant.agent == caller.id && grant.task == task.id && grant.command == command
+                && grant.timeout_secs >= secs && grant.expires_at > Utc::now()
+                && std::fs::canonicalize(&grant.directory).ok().as_deref() == Some(directory)
+        })
+    }
+
     pub(crate) async fn workspace_run(
         &self,
         caller: &Agent,
@@ -1547,6 +1733,37 @@ impl Orchestrator {
         caller: &Agent,
         input: Value,
     ) -> Result<Value, CoreError> {
+        self.accept_task(caller, input, false).await
+    }
+
+    /// Uses the same acceptance gate as the lead, and only a fully checked,
+    /// independently reviewed commit. Never writes to the user workspace.
+    pub(crate) async fn accept_verified_from_clock(&self, run: &Run) -> Result<(), CoreError> {
+        if !automatic_integration(run)
+            || self.host.is_busy(run.planner).await
+            || self.host.continuation_dispatch_allowed(run.planner).await.is_err()
+        {
+            return Ok(());
+        }
+        let Some(task) = self.store.list_tasks(run.id).await?.into_iter()
+            .find(|task| automatic_candidate(run, task))
+        else {
+            return Ok(());
+        };
+        let lead = self.store.get_agent(&crossagents_core::AgentKey::Id(run.planner)).await?;
+        if lead.archived_at.is_some() {
+            return Ok(());
+        }
+        self.accept_task(&lead, json!({"task": task.id}), true).await?;
+        Ok(())
+    }
+
+    async fn accept_task(
+        &self,
+        caller: &Agent,
+        input: Value,
+        automatic: bool,
+    ) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
             #[serde(default)]
@@ -1564,6 +1781,45 @@ impl Orchestrator {
         let _guard = self.lock(run.id).await;
         let mut run = self.store.get_run(run.id).await?;
         let mut task = self.store.get_task(task.id).await?;
+        if automatic {
+            if !automatic_integration(&run)
+                || !automatic_candidate(&run, &task)
+                || self.host.is_busy(run.planner).await
+                || self.host.continuation_dispatch_allowed(run.planner).await.is_err()
+                || self.store.list_human_items(true).await?.iter().any(|item|
+                    item.run_id == Some(run.id) && item.kind == crossagents_core::HumanItemKind::Question)
+            {
+                return Ok(json!({"merged": false}));
+            }
+            if let Some(worker) = task.assignee
+                && self.host.is_busy(worker).await
+            {
+                return Ok(json!({"merged": false}));
+            }
+            let dir = Self::worktree(&task)?;
+            let into = self.integration_path(&run);
+            let workspace = self.ws_for(&run);
+            let managed = dunce::canonicalize(&self.config.worktrees).ok();
+            let checkout = dunce::canonicalize(&into).ok();
+            let source = dunce::canonicalize(&dir).ok();
+            let project = dunce::canonicalize(&run.repo).ok();
+            let separate = match (&managed, &checkout, &source, &project) {
+                (Some(root), Some(checkout), Some(source), Some(project)) =>
+                    checkout.starts_with(root) && source.starts_with(root)
+                    && checkout != source && checkout != project && source != project,
+                _ => false,
+            };
+            if !separate
+                || workspace.current_branch(&into).await.ok().as_deref() != Some(&run.branch)
+                || !matches!(workspace.uncommitted(&into).await, Ok(changes) if changes.is_empty())
+                || !matches!(workspace.uncommitted(&dir).await, Ok(changes) if changes.is_empty())
+                || workspace.head(&dir).await.ok() != task.report.verified_sha
+            {
+                task.report.automatic_merge_blocked_sha = task.report.verified_sha.clone();
+                self.store.update_task(&task).await?;
+                return Ok(json!({"merged": false, "next": "Local checkout changed; inspect it before accepting."}));
+            }
+        }
         if task.status == TaskStatus::Merged {
             return Ok(json!({ "task": task_json(&task), "repeated": true }));
         }
@@ -1680,12 +1936,17 @@ impl Orchestrator {
                     task.branch.clone().unwrap_or_default()
                 }
             };
-            if base == run.branch {
+            if base == run.branch && !automatic {
                 // The lead's own edits in the run's checkout would block the merge.
                 self.commit_lead(&run, &format!("crossagents: {}", run.title))
                     .await?;
             }
             if let Err(err) = self.ws_for(&run).merge(&into, &target, &message).await {
+                if automatic {
+                    task.report.automatic_merge_blocked_sha = task.report.verified_sha.clone();
+                    self.store.update_task(&task).await?;
+                    tracing::warn!(task = %task.id, error = %err, "automatic local integration needs attention");
+                }
                 return Ok(json!({
                     "merged": false,
                     "conflict": err.to_string(),
@@ -1729,7 +1990,7 @@ impl Orchestrator {
         // Where the workflow goes next (multica §2.12): the step `spec.next` names is
         // released, or opened for the teammate it names, before the schedule pass starts it.
         let next = self.after_accept(&run, &task).await?;
-        self.schedule(&mut run).await?;
+        self.schedule_pending(&mut run, !automatic).await?;
         let verified_word = if unchecked.is_empty() {
             json!("verified")
         } else {
@@ -1804,6 +2065,7 @@ impl Orchestrator {
     ) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
+            #[serde(alias = "reason")]
             notes: String,
         }
         let (run, task) = self.task_arg(caller, &input).await?;
@@ -1829,6 +2091,14 @@ impl Orchestrator {
                 task.key
             )));
         };
+        if task.spec.on_reject.is_none() {
+            let worker = self.store.get_agent(&AgentKey::Id(worker)).await?;
+            if let Some(reason) = crate::approval::unusable_on_platform(
+                &worker, Some(&run.config.policy), cfg!(windows),
+            ) {
+                return Err(CoreError::Conflict(reason));
+            }
+        }
         // Work that keeps going back and forth stops here, before anything changes: the tool
         // says so and the lead has been told (multica §2.12).
         if self.reject_stopped(&run, &task).await? {

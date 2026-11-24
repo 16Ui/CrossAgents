@@ -315,3 +315,18 @@ async fn smoke_rollback_and_fork() {
     fork.shutdown().await;
     session.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "needs a logged-in Codex"]
+async fn smoke_compaction_then_followup() {
+    let dir = tempfile::tempdir().unwrap();
+    let driver = driver();
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Deny, json!({"sandbox":"read-only"}));
+    let session = driver.open(spec).await.unwrap();
+    let (_, text, _) = turn(&*session, &mut rx, "Reply with exactly: BEFORE_COMPACT").await;
+    assert!(text.contains("BEFORE_COMPACT"));
+    tokio::time::timeout(Duration::from_secs(180), session.compact()).await.unwrap().unwrap();
+    let (_, text, _) = turn(&*session, &mut rx, "Reply with exactly: AFTER_COMPACT").await;
+    assert!(text.contains("AFTER_COMPACT"));
+    session.shutdown().await;
+}

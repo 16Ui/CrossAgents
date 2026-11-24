@@ -14,9 +14,11 @@
 //!   that would ask is refused, the turn carries on and exits 0. A bypassing session runs
 //!   `--dangerously-skip-permissions`, a guarding one `--mode accept-edits`, a denying one
 //!   leaves the default mode (everything that asks is refused).
-//! - Collaboration MCP servers cannot be mounted: the CLI reads `mcp_config.json` from
-//!   `~/.gemini/config/` only (`agy mcp add` writes there, for every session), and
-//!   `--settings` rejects `mcpServers`. The session says so rather than pretending.
+//! - Antigravity reads `~/.gemini/config/mcp_config.json` for MCP servers (`--settings`
+//!   rejects `mcpServers`), and forwards parent environment variables (such as per-session
+//!   `CROSSAGENTS_URL` and `CROSSAGENTS_AGENT_TOKEN`) when the entry defines a non-empty
+//!   `env` map. Each session keeps credentials strictly in its own process env rather than
+//!   writing tokens to disk.
 
 pub mod login;
 pub mod wire;
@@ -24,17 +26,17 @@ pub mod wire;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, OutputStream,
-    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage,
-    ToolDetail, ToolStatus, TurnOutcome,
+    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, McpServerSpec,
+    OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
 };
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -45,9 +47,38 @@ use crate::process::{StderrTail, hide_console, resolve_program, system_proxy_env
 use wire::{Event, Step};
 
 /// How long `agy models` gets.
+pub const COORDINATION_ENV: &str = "CROSSAGENTS_INTERNAL_COORDINATION_ROLE";
+pub const LEAD_TOOLS: &[&str] = &[
+    "plan_submit",
+    "task_list",
+    "task_get",
+    "task_command",
+    "task_create",
+    "task_assign",
+    "task_rework",
+    "task_answer",
+    "workspace_diff",
+    "review_request",
+    "task_accept",
+    "human_ask",
+    "run_finish",
+    "run_next",
+];
+pub const WORKER_TOOLS: &[&str] = &[
+    "task_get",
+    "task_command",
+    "task_progress",
+    "task_complete",
+    "task_fail",
+    "task_ask",
+];
+pub const REVIEW_TOOLS: &[&str] = &["task_get", "workspace_diff", "review_submit"];
 const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the process gets to exit once its output has ended.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A coordinated session with no running tools must release the queue if its stream goes silent.
+const LEAD_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const TASK_IDLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct AntigravityDriver {
     name: String,
@@ -135,6 +166,7 @@ impl Driver for AntigravityDriver {
             interrupt: true,
             resume: true,
             set_model: true,
+            mcp: true,
             usage: true,
             // Conversations are stored per project directory.
             move_cwd: false,
@@ -198,16 +230,19 @@ struct Live {
 
 pub struct AntigravitySession {
     id: String,
+    agent_id: crossagents_core::AgentId,
     /// The CLI's conversation id, once it has said it.
     conversation: Mutex<Option<String>>,
-    started: AtomicBool,
+
     command: Vec<String>,
     cwd: PathBuf,
     env: Vec<(String, String)>,
+    mcp_servers: Vec<McpServerSpec>,
     model: Mutex<Option<String>>,
     effort: Mutex<Option<String>>,
     permission: PermissionPolicy,
-    instructions: Mutex<Option<String>>,
+    instructions: Option<String>,
+    instructions_pending: AtomicBool,
     tokens: Mutex<TokenUsage>,
     /// Tool calls already announced, so a `DONE` step updates instead of adding another.
     tools: Mutex<HashSet<String>>,
@@ -217,27 +252,28 @@ pub struct AntigravitySession {
     running: Mutex<Option<Arc<ProcessHandle>>>,
     cancelled: AtomicBool,
     closed: AtomicBool,
+    consecutive_stream_timeouts: AtomicUsize,
+    context_rotated: AtomicBool,
+    role: crossagents_core::Role,
+    coordination_tools: &'static [&'static str],
 }
 
 impl AntigravitySession {
+    fn coordinates_run(&self) -> bool {
+        self.role == crossagents_core::Role::Planner || self.coordination_tools == LEAD_TOOLS
+    }
+
+    fn coordination_idle_timeout(&self) -> Option<Duration> {
+        if self.coordinates_run() {
+            Some(LEAD_IDLE_TIMEOUT)
+        } else if !self.coordination_tools.is_empty() {
+            Some(TASK_IDLE_TIMEOUT)
+        } else {
+            None
+        }
+    }
+
     fn new(id: String, command: Vec<String>, spec: SessionSpec, resume: Option<String>) -> Self {
-        if spec.permissions.is_some() {
-            let _ = spec.events.send(
-                SessionEventKind::Warning {
-                    message: "Antigravity CLI headless has no per-action approval channel: the session's permission policy decides for the whole run (bypass runs --dangerously-skip-permissions, guard accepts edits, deny keeps the default mode where everything that asks is refused).".into(),
-                }
-                .into(),
-            );
-        }
-        if !spec.mcp_servers.is_empty() {
-            let _ = spec.events.send(
-                SessionEventKind::Warning {
-                    message: "Antigravity CLI has no per-session MCP configuration: it reads ~/.gemini/config/mcp_config.json for every session, and --settings rejects mcpServers. The collaboration tools were not mounted for this session (`agy mcp add` adds them everywhere instead).".into(),
-                }
-                .into(),
-            );
-        }
-        let started = resume.is_some();
         if let Some(id) = &resume {
             let _ = spec.events.send(
                 SessionEventKind::Started {
@@ -246,17 +282,36 @@ impl AntigravitySession {
                 .into(),
             );
         }
+        let mut env = spec.env;
+        let mut coordination_tools = &[][..];
+        env.retain(|(key, value)| {
+            if !key.eq_ignore_ascii_case(COORDINATION_ENV) {
+                return true;
+            }
+            if spec.permission == PermissionPolicy::Guard {
+                coordination_tools = match value.as_str() {
+                    "lead" => LEAD_TOOLS,
+                    "worker" => WORKER_TOOLS,
+                    "reviewer" => REVIEW_TOOLS,
+                    _ => &[],
+                };
+            }
+            false
+        });
         Self {
             id,
+            agent_id: spec.agent.id,
             conversation: Mutex::new(resume),
-            started: AtomicBool::new(started),
+
             command,
             cwd: spec.agent.cwd,
-            env: spec.env,
+            env,
+            mcp_servers: spec.mcp_servers,
             model: Mutex::new(spec.agent.model.filter(|m| !m.is_empty())),
             effort: Mutex::new(None),
             permission: spec.permission,
-            instructions: Mutex::new(spec.instructions),
+            instructions: spec.instructions,
+            instructions_pending: AtomicBool::new(true),
             tokens: Mutex::new(TokenUsage::default()),
             tools: Mutex::new(HashSet::new()),
             events: spec.events,
@@ -265,6 +320,10 @@ impl AntigravitySession {
             running: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            consecutive_stream_timeouts: AtomicUsize::new(0),
+            context_rotated: AtomicBool::new(false),
+            role: spec.agent.role,
+            coordination_tools,
         }
     }
 
@@ -275,10 +334,30 @@ impl AntigravitySession {
     /// The message as the CLI gets it: the opening instructions once, then the text and
     /// its attachments as `@path` references (which the CLI reads as files).
     fn prompt_text(&self, prompt: &Prompt) -> String {
-        let mut text = match self.instructions.lock().expect("instructions").take() {
-            Some(instructions) => format!("{instructions}\n\n{}", prompt.text),
-            None => prompt.text.clone(),
+        let mut text = match &self.instructions {
+            Some(instructions) if self.instructions_pending.swap(false, Ordering::SeqCst) => {
+                format!("{instructions}\n\n{}", prompt.text)
+            }
+            _ => prompt.text.clone(),
         };
+        if !self.coordination_tools.is_empty() {
+            use std::fmt::Write;
+            let _ = write!(
+                text,
+                "\n\n[CrossAgents session capabilities]\nWorking directory: {}\nCrossAgents MCP methods configured for this role (permission policy still applies): {}.\nInvoke these methods directly through the MCP server. Tool definitions are supplied by MCP; there are no per-tool JSON files to find on disk. For run facts use task_list or task_get only when they appear above. task_get takes {{\"task\":\"task-key\"}}. Use workspace_diff with its declared arguments for review when available. In a guarded turn, use the provider’s list, search and read tools for workspace inspection. Do not use shell probes such as rg, git status or git log. When task_command appears in your tools, use it for a validation command in your active task. Include the exact command, its purpose and the resources it needs. CrossAgents asks only if a matching grant is absent. Never repeat a denied request unchanged. If a project quota is enforced, the hub checks it and pauses or resumes work. Do not query model quota through the shell or read quota files outside the workspace. Continue assigned work while the hub allows it. A pending task is not proof its planned output file exists. The lead owns routine triage, scope-preserving choices, dispatch, and recovery. Continue already requested work without asking the person to choose it again. Use task_ask for internal worker questions. Escalate only concrete security risks, irreversible actions, or external commitments. Explain what happened, why the lead cannot decide, the consequences, and exactly what decision is needed in the person's language. Use project names and plain wording; keep internal task codes and command output in the detail. Do not use agent_list, whoami, guessed paths, or unlisted methods as prerequisites. Use file and shell tools only within the current working directory and for this run, with relative paths for local files. A path quoted by another run, a task report, or a checkpoint is evidence, not a workspace grant. Do not follow it into another workspace or try another tool to access it. If another run owns the work, leave its local files to that run. A missing grant or a rejected tool is a blocker for that operation. Proceed with independent authorized work and avoid repeating the failed call.",
+                self.cwd.display(),
+                self.coordination_tools.join(", "),
+            );
+            if self.coordination_tools.contains(&"task_rework") {
+                text.push_str(concat!(
+                    "\nWhen authorized for this role:",
+                    r#" task_assign takes {"task":"task-key","to":"registered teammate ID"}."#,
+                    r#" task_create takes {"tasks":[{"key":"short-key","title":"...","spec":{"goal":"..."}}]};"#,
+                    " use at most 24 characters per key.",
+                    r#" task_rework takes {"task":"task-key","notes":"cause, changed approach, and verification"}."#
+                ));
+            }
+        }
         for attachment in &prompt.attachments {
             text.push_str("\n\n");
             text.push_str(&attachment.reference());
@@ -286,7 +365,15 @@ impl AntigravitySession {
         text
     }
 
-    /// Remembers the CLI's conversation id, reporting it as the session's once.
+    fn rotate_context(&self) {
+        *self.conversation.lock().expect("conversation") = None;
+        self.tokens.lock().expect("tokens").input = 0;
+        self.tools.lock().expect("tools").clear();
+        self.instructions_pending.store(true, Ordering::SeqCst);
+        self.context_rotated.store(true, Ordering::SeqCst);
+    }
+
+    /// Report each deliberately opened context so the hub can resume the latest one.
     fn remember(&self, id: &str) {
         if id.is_empty() {
             return;
@@ -307,11 +394,9 @@ impl AntigravitySession {
             });
             return;
         }
-        if !self.started.swap(true, Ordering::SeqCst) {
-            self.emit(SessionEventKind::Started {
-                session_id: id.to_owned(),
-            });
-        }
+        self.emit(SessionEventKind::Started {
+            session_id: id.to_owned(),
+        });
     }
 
     /// The arguments a process is started with; the conversation id makes a restarted
@@ -360,11 +445,63 @@ impl AntigravitySession {
         if child.is_some() {
             return Ok(());
         }
-        let args = self.args();
+        if !self.mcp_servers.is_empty()
+            && let Some(path) = mcp_config_path(&self.env)
+            && let Err(err) = ensure_mcp_config_at(&path, &self.mcp_servers)
+        {
+            self.emit(SessionEventKind::Warning {
+                message: format!(
+                    "cannot update Antigravity MCP config at {}: {err}",
+                    path.display()
+                ),
+            });
+        }
+        let mut args = self.args();
+        let scoped_tool = match (self.role, self.permission) {
+            (crossagents_core::Role::Planner, PermissionPolicy::Guard) => {
+                Some(("crossagents-plan-submit", "mcp(crossagents/plan_submit)"))
+            }
+            _ => None,
+        };
+        if let Some(path) = mcp_config_path(&self.env)
+            && let Some(root) = path.parent().and_then(|config| config.parent())
+        {
+            let settings_dir = root.join("antigravity-cli");
+            let grant = scoped_tool.and_then(|(dir, grant)| {
+                settings_dir
+                    .join(dir)
+                    .join(self.agent_id.to_string())
+                    .is_file()
+                    .then_some((dir, grant))
+            });
+            let mut grants: Vec<_> = self
+                .coordination_tools
+                .iter()
+                .map(|tool| format!("mcp(crossagents/{tool})"))
+                .collect();
+            if let Some((_, rule)) = grant {
+                grants.push(rule.to_owned());
+            }
+            if !grants.is_empty() {
+                match tool_settings(&settings_dir, &grants) {
+                    Ok(settings) => args.extend(["--settings".into(), settings.to_string()]),
+                    Err(err) => self.emit(SessionEventKind::Warning {
+                        message: format!(
+                            "Cannot apply the agent's collaboration permissions: {err}"
+                        ),
+                    }),
+                }
+            }
+        }
         let (program, all_args) = crate::argv::launch_command(&self.command, args)
             .ok_or_else(|| CoreError::Agent("empty Antigravity launch command".into()))?;
         let mut env = system_proxy_env();
         env.extend(self.env.iter().cloned());
+        for server in &self.mcp_servers {
+            for (k, v) in &server.env {
+                env.push((k.clone(), v.clone()));
+            }
+        }
         let launched = crate::launch::launch(LaunchSpec {
             program,
             args: all_args,
@@ -498,115 +635,247 @@ impl AntigravitySession {
     }
 
     async fn run(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        const MAX_STREAM_ATTEMPTS: usize = 3;
         let _guard = self.turn.lock().await;
         if self.closed.load(Ordering::SeqCst) {
             return Err(CoreError::Agent("the session has ended".into()));
         }
         self.cancelled.store(false, Ordering::SeqCst);
-        let text = self.prompt_text(prompt);
-        if let Err(err) = self.ensure().await {
-            self.emit(SessionEventKind::Error {
-                message: err.to_string(),
-            });
-            self.emit(SessionEventKind::TurnCompleted {
-                turn_id: None,
-                stop_reason: StopReason::Error,
-            });
-            return Err(err);
+        let mut original_text = self.prompt_text(prompt);
+        if self.context_rotated.swap(false, Ordering::SeqCst) {
+            original_text = format!(
+                "[System: The model session was restarted. Use the supplied work summary and durable checkpoints to continue. Do not replay commands or tool calls from a previous turn.]\n\n{original_text}"
+            );
         }
+        let mut current_text = original_text.clone();
         self.emit(SessionEventKind::TurnStarted { turn_id: None });
-        let message = format!(
-            "{}\n",
-            json!({ "event": "user", "message": { "content": text } })
-        );
-        let mut child = self.child.lock().await;
-        let Some(live) = child.as_mut() else {
-            return Err(CoreError::Agent("Antigravity CLI is not running".into()));
-        };
-        if let Err(err) = live.stdin.write_all(message.as_bytes()).await {
-            self.emit(SessionEventKind::Error {
-                message: format!("cannot send the turn to Antigravity CLI: {err}"),
-            });
-            *child = None;
-            self.emit(SessionEventKind::TurnCompleted {
-                turn_id: None,
-                stop_reason: StopReason::Error,
-            });
-            return Ok(TurnOutcome {
-                stop_reason: StopReason::Error,
-                turn_id: None,
-            });
-        }
-        let _ = live.stdin.flush().await;
-        let mut saw_result = false;
-        let mut ended = false;
-        let mut stop: Option<StopReason> = None;
-        let mut streamed = false;
-        loop {
-            let Some(line) = live.lines.recv().await else {
-                ended = true;
-                break;
+
+        for attempt in 0..MAX_STREAM_ATTEMPTS {
+            if let Err(err) = self.ensure().await {
+                self.emit(SessionEventKind::Error {
+                    message: err.to_string(),
+                });
+                self.emit(SessionEventKind::TurnCompleted {
+                    turn_id: None,
+                    stop_reason: StopReason::Error,
+                });
+                return Err(err);
+            }
+            let message = format!(
+                "{}\n",
+                json!({ "event": "user", "message": { "content": current_text } })
+            );
+            let mut child = self.child.lock().await;
+            let Some(live) = child.as_mut() else {
+                return Err(CoreError::Agent("Antigravity CLI is not running".into()));
             };
-            match wire::parse(&line) {
-                Some(Event::Init(init)) => {
-                    if let Some(id) = &init.conversation_id {
-                        self.remember(id);
+            if let Err(err) = live.stdin.write_all(message.as_bytes()).await {
+                self.emit(SessionEventKind::Error {
+                    message: format!("cannot send the turn to Antigravity CLI: {err}"),
+                });
+                *child = None;
+                self.emit(SessionEventKind::TurnCompleted {
+                    turn_id: None,
+                    stop_reason: StopReason::Error,
+                });
+                return Ok(TurnOutcome {
+                    stop_reason: StopReason::Error,
+                    turn_id: None,
+                });
+            }
+            let _ = live.stdin.flush().await;
+            let mut saw_result = false;
+            let mut ended = false;
+            let mut stop: Option<StopReason> = None;
+            let mut streamed = false;
+            let mut saw_step = false;
+            let mut saw_tool = false;
+            let mut stream_timed_out = false;
+            let mut retry_stream = false;
+            let mut malformed_retry = false;
+            let mut active_tools = HashSet::new();
+            let mut context_input = None;
+            loop {
+                let next = if active_tools.is_empty()
+                    && let Some(timeout) = self.coordination_idle_timeout()
+                {
+                    match tokio::time::timeout(timeout, live.lines.recv()).await {
+                        Ok(next) => next,
+                        Err(_) => {
+                            // A previous tool might already have committed changes or dispatched
+                            // tasks. End this turn without replaying it and release pending notices.
+                            live.process.start_kill();
+                            ended = true;
+                            stop = Some(StopReason::Error);
+                            stream_timed_out = true;
+                            self.emit(SessionEventKind::Error {
+                                message: "Antigravity coordination stream timed out with no tool running; pending notices can continue.".into(),
+                            });
+                            break;
+                        }
                     }
-                }
-                Some(Event::Step(step)) => {
-                    if step.is_answer() && step.text_delta.as_deref().is_some_and(|d| !d.is_empty())
-                    {
-                        streamed = true;
+                } else {
+                    live.lines.recv().await
+                };
+                let Some(line) = next else {
+                    ended = true;
+                    break;
+                };
+                match wire::parse(&line) {
+                    Some(Event::Init(init)) => {
+                        if let Some(id) = &init.conversation_id {
+                            self.remember(id);
+                        }
                     }
-                    self.on_step(&step);
+                    Some(Event::Step(step)) => {
+                        saw_step = true;
+                        if step.is_tool() {
+                            saw_tool = true;
+                            if step.running() {
+                                active_tools.insert(step.step_index);
+                            } else {
+                                active_tools.remove(&step.step_index);
+                            }
+                        }
+                        if step.is_answer()
+                            && step.text_delta.as_deref().is_some_and(|d| !d.is_empty())
+                        {
+                            streamed = true;
+                        }
+                        if let Some(input) = step.context_input() {
+                            context_input = Some(input);
+                        }
+                        self.on_step(&step);
+                    }
+                    Some(Event::Result(result)) => {
+                        saw_result = true;
+                        self.on_result(&result);
+                        let err_msg = result.error.as_deref().unwrap_or("");
+                        let can_retry_malformed = attempt + 1 < MAX_STREAM_ATTEMPTS
+                            && !saw_tool
+                            && !self.cancelled.load(Ordering::SeqCst)
+                            && result.status != "SUCCESS"
+                            && result.status != "CANCELED"
+                            && result.status != "INTERRUPTED"
+                            && is_malformed_function_call(err_msg);
+                        if can_retry_malformed {
+                            malformed_retry = true;
+                            break;
+                        }
+                        // Once any tool was observed, its effects are uncertain. Let the hub
+                        // continue from persisted work in a separate turn after this failure.
+                        let transient = is_transient_stream_error(err_msg);
+                        stream_timed_out = transient
+                            && err_msg.to_ascii_lowercase().contains("stream idle timeout");
+                        let can_retry = attempt + 1 < MAX_STREAM_ATTEMPTS
+                            && !saw_tool
+                            && !self.cancelled.load(Ordering::SeqCst)
+                            && result.status != "SUCCESS"
+                            && result.status != "CANCELED"
+                            && result.status != "INTERRUPTED"
+                            && transient;
+                        if can_retry {
+                            retry_stream = true;
+                            break;
+                        }
+                        if !streamed && !result.response.is_empty() {
+                            self.emit(SessionEventKind::Output {
+                                stream: OutputStream::Text,
+                                text: result.response.clone(),
+                            });
+                        }
+                        stop = Some(self.stop_reason(&result));
+                        break;
+                    }
+                    _ => {}
                 }
-                Some(Event::Result(result)) => {
-                    saw_result = true;
-                    self.on_result(&result);
-                    if !streamed && !result.response.is_empty() {
-                        self.emit(SessionEventKind::Output {
-                            stream: OutputStream::Text,
-                            text: result.response.clone(),
+            }
+            if malformed_retry {
+                drop(child);
+                *self.running.lock().expect("running") = None;
+                current_text = "Your previous tool call was empty or malformed. Re-issue the tool call with valid JSON arguments, or answer directly without a tool call.".to_owned();
+                continue;
+            }
+            if retry_stream {
+                live.process.start_kill();
+                *child = None;
+                drop(child);
+                *self.running.lock().expect("running") = None;
+                if streamed || saw_step {
+                    current_text = "Your previous response stream dropped with a transient network EOF. If your intended tool calls and reply were already complete, reply concisely to close the turn without repeating completed tool calls; otherwise continue where you left off.".to_owned();
+                } else {
+                    current_text = original_text.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(2000 * (attempt as u64 + 1))).await;
+                continue;
+            }
+            if !saw_result && stop.is_none() && !self.cancelled.load(Ordering::SeqCst) {
+                let exit = live.process.exit_within(EXIT_TIMEOUT).await;
+                let what = exit
+                    .map(|exit| exit.describe("Antigravity CLI"))
+                    .unwrap_or_else(|| "Antigravity CLI stopped answering".into());
+                let message = live
+                    .stderr
+                    .describe(&format!("{what} before the turn ended"))
+                    .await;
+                self.emit(SessionEventKind::Error { message });
+                ended = true;
+                stop = Some(StopReason::Error);
+            }
+            let stop_reason = stop.unwrap_or(StopReason::Cancelled);
+            if !stream_timed_out || stop_reason != StopReason::Error {
+                self.consecutive_stream_timeouts.store(0, Ordering::SeqCst);
+            }
+            if stop_reason == StopReason::Error {
+                // Never keep a child alive after an error result: a timed-out or broken upstream
+                // stream inside `agy` can leave the persistent process unable to run new turns.
+                live.process.start_kill();
+                ended = true;
+
+                if stream_timed_out {
+                    let previous = self.consecutive_stream_timeouts.fetch_add(1, Ordering::SeqCst);
+                    let rotate_after = if self.coordinates_run() { 1 } else { 2 };
+                    if previous + 1 == rotate_after {
+                        // The hub supplies the lead's durable state to the new conversation.
+                        self.rotate_context();
+                        self.emit(SessionEventKind::Warning {
+                            message: "Antigravity response timed out. The next turn will start a fresh model conversation and continue from saved work.".into(),
                         });
                     }
-                    stop = Some(self.stop_reason(&result));
-                    break;
                 }
-                _ => {}
+            } else if stop_reason == StopReason::EndTurn {
+                let max_context_tokens: u64 = if self.coordinates_run() {
+                    100_000
+                } else {
+                    120_000
+                };
+                if let Some(input) = context_input.filter(|&input| input >= max_context_tokens) {
+                    live.process.start_kill();
+                    ended = true;
+                    self.rotate_context();
+                    tracing::debug!(input, max_context_tokens, "rotated Antigravity context");
+                }
             }
+            // A CLI that ended the run itself (a failed sign-in, say) leaves a dead process
+            // behind: the next turn starts a new one, resuming the conversation by id.
+            if ended
+                || self.cancelled.load(Ordering::SeqCst)
+                || live.lines.is_closed()
+                || live.process.exit_info().is_some()
+            {
+                *child = None;
+            }
+            *self.running.lock().expect("running") = None;
+            self.emit(SessionEventKind::TurnCompleted {
+                turn_id: None,
+                stop_reason,
+            });
+            return Ok(TurnOutcome {
+                stop_reason,
+                turn_id: None,
+            });
         }
-        if !saw_result && !self.cancelled.load(Ordering::SeqCst) {
-            let exit = live.process.exit_within(EXIT_TIMEOUT).await;
-            let what = exit
-                .map(|exit| exit.describe("Antigravity CLI"))
-                .unwrap_or_else(|| "Antigravity CLI stopped answering".into());
-            let message = live
-                .stderr
-                .describe(&format!("{what} before the turn ended"))
-                .await;
-            self.emit(SessionEventKind::Error { message });
-            ended = true;
-            stop = Some(StopReason::Error);
-        }
-        let stop_reason = stop.unwrap_or(StopReason::Cancelled);
-        // A CLI that ended the run itself (a failed sign-in, say) leaves a dead process
-        // behind: the next turn starts a new one, resuming the conversation by id.
-        if ended
-            || self.cancelled.load(Ordering::SeqCst)
-            || live.lines.is_closed()
-            || live.process.exit_info().is_some()
-        {
-            *child = None;
-        }
-        *self.running.lock().expect("running") = None;
-        self.emit(SessionEventKind::TurnCompleted {
-            turn_id: None,
-            stop_reason,
-        });
-        Ok(TurnOutcome {
-            stop_reason,
-            turn_id: None,
-        })
+        unreachable!("retry loop always returns on the final attempt")
     }
 
     fn stop_reason(&self, result: &wire::Result) -> StopReason {
@@ -631,6 +900,20 @@ impl AntigravitySession {
                             }
                         )
                     });
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("quota") || lower.contains("rate limit") || lower.contains("429")
+                {
+                    self.emit(SessionEventKind::RateLimits {
+                        limits: crossagents_core::RateLimits {
+                            windows: Vec::new(),
+                            credits: None,
+                            plan: None,
+                            reached: Some(message.clone()),
+                            by_limit: Vec::new(),
+                            reset_credits: None,
+                        },
+                    });
+                }
                 self.emit(SessionEventKind::Error { message });
                 StopReason::Error
             }
@@ -643,6 +926,47 @@ impl AntigravitySession {
             process.start_kill();
         }
     }
+}
+
+fn is_malformed_function_call(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("malformed function call")
+        || lower.contains("function call is empty")
+        || lower.contains("improperly formatted function call")
+}
+
+/// Whether an Antigravity CLI result error reflects a transient SSE/proxy drop
+/// that a fresh CLI process (`--conversation` resume) can recover from.
+fn is_transient_stream_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    if [
+        "quota",
+        "rate limit",
+        "unauthor",
+        "authenticat",
+        "forbidden",
+        "invalid model",
+        "unknown model",
+    ]
+    .iter()
+    .any(|fatal| lower.contains(fatal))
+    {
+        return false;
+    }
+    [
+        ": eof",
+        "unexpected eof",
+        "connection reset",
+        "broken pipe",
+        "client connection lost",
+        "tls handshake timeout",
+        "server closed idle connection",
+        "stream disconnected",
+        "stream idle timeout",
+        "context deadline exceeded",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// The name the GUI uses for a tool's icon.
@@ -661,6 +985,10 @@ fn tool_kind(name: &str) -> &'static str {
 impl DriverSession for AntigravitySession {
     fn session_id(&self) -> &str {
         &self.id
+    }
+
+    fn take_context_rotated(&self) -> bool {
+        self.context_rotated.swap(false, Ordering::SeqCst)
     }
 
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
@@ -709,11 +1037,182 @@ impl DriverSession for AntigravitySession {
     }
 }
 
+fn mcp_config_path(env: &[(String, String)]) -> Option<PathBuf> {
+    let home = env
+        .iter()
+        .rev()
+        .find(|(k, _)| k == "USERPROFILE" || k == "HOME")
+        .map(|(_, v)| PathBuf::from(v))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(PathBuf::from)
+        })?;
+    Some(home.join(".gemini").join("config").join("mcp_config.json"))
+}
+
+/// Read the operator-owned grant for this exact agent. Keep the global permission
+/// object, including ask and deny rules, so the session preserves their precedence.
+fn tool_settings(settings_dir: &std::path::Path, grants: &[String]) -> std::io::Result<Value> {
+    let global = match std::fs::read(settings_dir.join("settings.json")) {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(err) => return Err(err),
+    };
+    let mut permissions = match global.get("permissions") {
+        None => Map::new(),
+        Some(Value::Object(rules)) => rules.clone(),
+        Some(_) => {
+            return Err(std::io::Error::other(
+                "global permissions are not an object",
+            ));
+        }
+    };
+    let allow = permissions
+        .entry("allow")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| std::io::Error::other("global permission allow list is not an array"))?;
+    for grant in grants {
+        let grant = json!(grant);
+        if !allow.contains(&grant) {
+            allow.push(grant);
+        }
+    }
+    Ok(json!({ "permissions": permissions }))
+}
+/// Ensures `~/.gemini/config/mcp_config.json` registers each hub MCP server with a minimal
+/// non-secret `env` marker so Antigravity forwards the session's own per-process credentials
+/// without persisting tokens to disk.
+fn ensure_mcp_config_at(path: &PathBuf, servers: &[McpServerSpec]) -> std::io::Result<()> {
+    let existing = std::fs::read_to_string(path).ok();
+    let mut root = existing
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let mut entries = root
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for server in servers {
+        let mut entry = Map::new();
+        entry.insert(
+            "command".into(),
+            Value::String(server.command.display().to_string()),
+        );
+        entry.insert(
+            "args".into(),
+            Value::Array(server.args.iter().cloned().map(Value::String).collect()),
+        );
+        entry.insert("env".into(), json!({ "CA_MCP_SESSION": "1" }));
+        entries.insert(server.name.clone(), Value::Object(entry));
+    }
+    root["mcpServers"] = Value::Object(entries);
+    let serialized = serde_json::to_string_pretty(&root).unwrap_or_default();
+    if existing.as_deref().map(str::trim) == Some(serialized.trim()) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serialized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossagents_core::{Agent, AgentId, AgentStatus, Role};
     use std::path::Path;
+
+    #[test]
+    fn coordination_grants_keep_global_approval_and_exclude_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"),
+            r#"{"permissions":{"allow":["command(git status)"],"deny":["write_file(.git/)"],"ask":["mcp(crossagents/task_get)"]}}"#,
+        ).unwrap();
+        let grants = ["mcp(crossagents/task_get)".to_owned()];
+        assert_eq!(
+            tool_settings(dir.path(), &grants).unwrap(),
+            json!({"permissions":{
+                "allow":["command(git status)", "mcp(crossagents/task_get)"],
+                "deny":["write_file(.git/)"],
+                "ask":["mcp(crossagents/task_get)"]
+            }})
+        );
+        assert!(LEAD_TOOLS.contains(&"human_ask"));
+        assert!(!WORKER_TOOLS.contains(&"human_ask"));
+        assert!(!REVIEW_TOOLS.contains(&"human_ask"));
+        for tool in LEAD_TOOLS.iter().chain(WORKER_TOOLS).chain(REVIEW_TOOLS) {
+            assert!(!matches!(
+                *tool,
+                "workspace_run" | "agent_send" | "run_land"
+            ));
+        }
+    }
+    #[test]
+    fn existing_worker_leading_a_run_uses_coordination_watchdogs() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut lead, _) = spec(dir.path());
+        lead.permission = PermissionPolicy::Guard;
+        lead.env.push((COORDINATION_ENV.into(), "lead".into()));
+        let lead = AntigravitySession::new("lead".into(), vec![], lead, None);
+        assert!(lead.coordinates_run());
+        assert_eq!(lead.coordination_idle_timeout(), Some(LEAD_IDLE_TIMEOUT));
+        let prompt = lead.prompt_text(&Prompt::text("continue"));
+        let scope = prompt.lines().find(|line| line.starts_with("CrossAgents MCP methods")).unwrap();
+        assert!(scope.contains("task_list"));
+        assert!(!scope.contains("agent_list"));
+        assert!(prompt.contains("there are no per-tool JSON files"));
+        assert!(prompt.contains("Do not follow it into another workspace"));
+        assert!(prompt.contains("Do not query model quota through the shell"));
+        assert!(prompt.contains(r#"task_rework takes {"task":"task-key","notes":"#));
+
+        for role in ["worker", "reviewer"] {
+            let (mut task, _) = spec(dir.path());
+            task.permission = PermissionPolicy::Guard;
+            task.env.push((COORDINATION_ENV.into(), role.into()));
+            let task = AntigravitySession::new(role.into(), vec![], task, None);
+            assert!(!task.coordinates_run());
+            assert_eq!(task.coordination_idle_timeout(), Some(TASK_IDLE_TIMEOUT));
+            let prompt = task.prompt_text(&Prompt::text("continue"));
+            assert!(prompt.contains("use the provider’s list, search and read tools"));
+            assert!(!prompt.contains("task_rework takes"));
+        }
+
+        let (uncoordinated, _) = spec(dir.path());
+        let uncoordinated =
+            AntigravitySession::new("uncoordinated".into(), vec![], uncoordinated, None);
+        assert_eq!(uncoordinated.coordination_idle_timeout(), None);
+    }
+
+    #[test]
+    fn a_rotated_context_reinstates_instructions_and_reports_its_new_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut spec, mut events) = spec(dir.path());
+        spec.instructions = Some("original project instructions".into());
+        let session = AntigravitySession::new("agent".into(), vec![], spec, Some("old".into()));
+        let prompt = Prompt::text("continue");
+        assert!(session.prompt_text(&prompt).starts_with("original project instructions"));
+        assert_eq!(session.prompt_text(&prompt), "continue");
+
+        session.rotate_context();
+        assert!(session.take_context_rotated());
+        assert!(!session.args().contains(&"--conversation".into()));
+        assert!(session.prompt_text(&prompt).starts_with("original project instructions"));
+        assert_eq!(session.prompt_text(&prompt), "continue");
+        session.remember("new");
+        session.remember("new");
+        for expected in ["old", "new"] {
+            match events.try_recv().unwrap().kind {
+                SessionEventKind::Started { session_id } => assert_eq!(session_id, expected),
+                event => panic!("expected a session id, got {event:?}"),
+            }
+        }
+        assert!(events.try_recv().is_err());
+    }
 
     fn spec(cwd: &Path) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) {
         let (events, rx) = mpsc::unbounded_channel();
@@ -882,6 +1381,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_current_context_rotates_the_session_and_rotation_is_quiet() {
+        for (cached, expected_sessions) in [(200, 1), (99_990, 2)] {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("log.txt");
+            let (mut spec, mut events) = spec(dir.path());
+            spec.agent.role = Role::Planner;
+            spec.env = vec![("CROSSAGENTS_AGY_TEST_LOG".into(), log.display().to_string())];
+            let script = |windows| stream_for(windows)
+                .replace(
+                    r#""input_tokens":10,"output_tokens":5,"total_tokens":15"#,
+                    &format!(r#""input_tokens":10,"output_tokens":5,"cache_read_tokens":{cached},"total_tokens":15"#),
+                )
+                .replace(r#""input_tokens":10,"output_tokens":5,"thinking_tokens""#,
+                         r#""input_tokens":84000,"output_tokens":5,"thinking_tokens""#);
+            let command = mock_cli(dir.path(), &script(true), &script(false));
+            let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
+            let session = driver.open(spec).await.unwrap();
+            for _ in 0..2 {
+                assert_eq!(session.prompt("test").await.unwrap().stop_reason, StopReason::EndTurn);
+            }
+            assert_eq!(read_log(&log).matches("ARG\t--input-format").count(), expected_sessions);
+            let mut usage = None;
+            while let Ok(event) = events.try_recv() {
+                match event.kind {
+                    SessionEventKind::Usage { tokens, .. } => usage = tokens,
+                    SessionEventKind::Warning { message } => panic!("{message}"),
+                    _ => {}
+                }
+            }
+            assert_eq!(usage.unwrap().input, 84_000);
+            session.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
     async fn a_denying_session_keeps_the_default_mode() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log.txt");
@@ -984,5 +1518,118 @@ cat >/dev/null
         session.interrupt().await.unwrap();
         let outcome = prompt.await.unwrap().unwrap();
         assert_eq!(outcome.stop_reason, StopReason::Cancelled);
+    }
+
+    #[test]
+    fn mcp_capability_and_config_writer_preserve_user_entries_without_writing_secrets() {
+        let driver = AntigravityDriver::new("antigravity", Cli::at(vec!["agy".into()]), vec![]);
+        assert!(driver.capabilities().mcp);
+
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir
+            .path()
+            .join(".gemini")
+            .join("config")
+            .join("mcp_config.json");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"custom":{"command":"foo","args":[]}}}"#,
+        )
+        .unwrap();
+
+        let server = McpServerSpec {
+            name: "crossagents".into(),
+            command: PathBuf::from("C:\\bin\\crossagents.exe"),
+            args: vec!["mcp".into()],
+            env: [("CROSSAGENTS_AGENT_TOKEN".into(), "secret-token".into())]
+                .into_iter()
+                .collect(),
+        };
+        ensure_mcp_config_at(&cfg, &[server]).unwrap();
+        let written = std::fs::read_to_string(&cfg).unwrap();
+        assert!(!written.contains("secret-token"));
+        let parsed: Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(parsed["mcpServers"]["custom"]["command"], "foo");
+        assert_eq!(parsed["mcpServers"]["crossagents"]["args"], json!(["mcp"]));
+    }
+
+    #[tokio::test]
+    async fn a_transient_eof_restarts_and_recovers_without_error() {
+        verify_eof_recovery(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_transient_eof_after_a_tool_does_not_retry_the_turn() {
+        verify_eof_recovery(true).await;
+    }
+
+    async fn verify_eof_recovery(after_tool: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let step = r#"{"event":"step_update","step_update":{"conversation_id":"conv-eof","step_index":1,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"echo marker"}}}}"#;
+        let windows_step = if after_tool { format!("Write-Output '{step}'") } else { String::new() };
+        let unix_step = if after_tool { format!("printf '%s\\n' '{step}'") } else { String::new() };
+        let marker = dir.path().join("attempt.txt");
+        let windows = format!(
+            r#"
+$marker = '{marker}'
+$null = [Console]::In.ReadLine()
+if (-not (Test-Path $marker)) {{
+    Set-Content -Path $marker -Value '1'
+    Write-Output '{{"event":"init","conversation_id":"conv-eof"}}'
+    {windows_step}
+    Write-Output '{{"event":"result","result":{{"conversation_id":"conv-eof","status":"ERROR","response":"","error":"API error (attempt 1): request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": EOF","num_turns":0}}}}'
+}} else {{
+    Write-Output '{{"event":"init","conversation_id":"conv-eof"}}'
+    Write-Output '{{"event":"result","result":{{"conversation_id":"conv-eof","status":"SUCCESS","response":"recovered ok","num_turns":1}}}}'
+}}
+[Console]::In.ReadToEnd() | Out-Null
+"#,
+            marker = marker.display()
+        );
+        let unix = format!(
+            r#"read -r _
+if [ ! -f '{marker}' ]; then
+    echo 1 > '{marker}'
+    printf '%s\n' '{{"event":"init","conversation_id":"conv-eof"}}'
+    {unix_step}
+    printf '%s\n' '{{"event":"result","result":{{"conversation_id":"conv-eof","status":"ERROR","response":"","error":"API error (attempt 1): request failed: Post \"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse\": EOF","num_turns":0}}}}'
+else
+    printf '%s\n' '{{"event":"init","conversation_id":"conv-eof"}}'
+    printf '%s\n' '{{"event":"result","result":{{"conversation_id":"conv-eof","status":"SUCCESS","response":"recovered ok","num_turns":1}}}}'
+fi
+cat >/dev/null
+"#,
+            marker = marker.display()
+        );
+        let (spec, mut events) = spec(dir.path());
+        let command = mock_cli(dir.path(), &windows, &unix);
+        let driver = AntigravityDriver::new("antigravity", Cli::at(command), vec![]);
+        let session = driver.open(spec).await.unwrap();
+        let outcome = session.prompt("hi").await.unwrap();
+        let expected = if after_tool { StopReason::Error } else { StopReason::EndTurn };
+        assert_eq!(outcome.stop_reason, expected);
+        let mut saw_text = false;
+        let mut saw_tool_call = false;
+        let mut saw_error = false;
+        while let Ok(event) = events.try_recv() {
+            match event.kind {
+                SessionEventKind::Error { message } => {
+                    assert!(message.contains("EOF"), "{message}");
+                    saw_error = true;
+                }
+                SessionEventKind::ToolCall { .. } => {
+                    saw_tool_call = true;
+                }
+                SessionEventKind::Output { text, .. } if text == "recovered ok" => {
+                    saw_text = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(saw_text, !after_tool);
+        assert_eq!(saw_error, after_tool);
+        assert_eq!(saw_tool_call, after_tool);
+        session.shutdown().await;
     }
 }

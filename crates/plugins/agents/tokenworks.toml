@@ -13,6 +13,7 @@
 
 name = "tokenworks"
 label = "词元工坊"
+provider = "deepseek"
 protocol = "acp"
 command = ["dsh", "--profile", "acp"]
 # The npm CLI has been at 0.2.2 (rc series); `dsh --version` prints it.
@@ -21,7 +22,7 @@ verified = ["0.2.2"]
 [models]
 # What `session/new` offered on 0.2.2-rc.2, by the names the agent gives them. Any id the
 # runtime lists can be used; the driver resolves it against the option the agent offers.
-fallback = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "deepseek-v4-flash"]
+fallback = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro"]
 # The `reasoning_effort` option the runtime reports.
 efforts = ["off", "low", "high", "max"]
 

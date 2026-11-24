@@ -567,7 +567,21 @@ impl RpcHandler for Handler {
                 let ids: Vec<String> = server.threads.lock().await.keys().cloned().collect();
                 Ok(json!({ "data": ids }))
             }
-            "thread/compact/start" => Ok(json!({})),
+            "thread/compact/start" => {
+                let server = server.clone();
+                let tid = params["threadId"].as_str().unwrap().to_owned();
+                tokio::spawn(async move {
+                    let uid = format!("compact-{}", server.counter.fetch_add(1, Ordering::SeqCst));
+                    server.peer.lock().await.as_ref().unwrap().notify("turn/started", json!({
+                        "threadId": tid, "turn": {"id": uid, "status": "inProgress"}
+                    })).unwrap();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    server.peer.lock().await.as_ref().unwrap().notify("turn/completed", json!({
+                        "threadId": tid, "turn": {"id": uid, "status": "completed"}
+                    })).unwrap();
+                });
+                Ok(json!({}))
+            },
             "turn/start" => server.turn_start(params).await,
             "turn/steer" => server.turn_steer(params).await,
             "turn/interrupt" => {

@@ -8,6 +8,7 @@ import { ErrorBox, agentName, ago, time, useAgents } from "../components";
 import { useHubData, type HubEvent } from "../hub";
 import { RailCard } from "../rail";
 import { issueHeadline, shortId, triageLesson, triagePrompt, triageText } from "./lessons";
+import { IssueNoticeActions } from "./IssueNoticeActions";
 import "../expertise.css";
 import "./lessons.css";
 
@@ -20,6 +21,7 @@ export function RunIssues({ runId, lead }: { runId: string; lead: string }) {
   const agents = useAgents();
   const [sent, setSent] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string>();
+  const [closed, setClosed] = useState<Set<string>>(() => new Set());
   const list = issues.data?.issues ?? [];
   const unsorted = issues.data?.unsorted ?? 0;
   if (!list.length && !issues.error) return null;
@@ -49,6 +51,8 @@ export function RunIssues({ runId, lead }: { runId: string; lead: string }) {
                   {agentName(agents.data, i.author)} · {ago(i.updated_at)}
                 </span>
               </div>
+              {!i.triage && !closed.has(i.key) && <IssueNoticeActions run={runId} issues={[i.key]}
+                onClosed={() => setClosed((old) => new Set([...old, i.key]))} />}
               <div className="muted">
                 {i.triage ? (
                   lesson ? (
@@ -59,7 +63,7 @@ export function RunIssues({ runId, lead }: { runId: string; lead: string }) {
                     triageText(i.triage)
                   )
                 ) : (
-                  <span className="exp-tag yellow">未整理</span>
+                  <span className="exp-tag yellow">{closed.has(i.key) ? "通知已关闭，问题记录保留" : "未整理"}</span>
                 )}
               </div>
             </div>
@@ -70,7 +74,7 @@ export function RunIssues({ runId, lead }: { runId: string; lead: string }) {
             <button onClick={handOver} disabled={sent !== "idle"}>
               {sent === "done" ? `已交给 ${leadName}` : `交给 ${leadName} 整理`}
             </button>
-            <span className="muted">发一条消息给 lead，让它逐条整理成排障记录</span>
+            <span className="muted">交主管整理为排障记录；也可直接关闭通知，原始问题始终保留</span>
           </div>
         )}
       </div>

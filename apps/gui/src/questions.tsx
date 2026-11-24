@@ -16,7 +16,7 @@ const RECENT_MS = 24 * 3600 * 1000;
 const FIT = 3;
 
 export function useQuestions() {
-  return useHubData(() => api.questions(true), [], (e) => e.type.startsWith("human."));
+  return useHubData(() => api.questions(true), [], (e) => e.type.startsWith("human."), "questions");
 }
 
 /** Open questions and notices, newest first, then recent defaults. */
@@ -112,13 +112,15 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
       <div className="ask defaulted">
         <div className="ask-head">
           {who}
-          <span className="chip warn tiny">没等到回答，已按默认「{item.answer}」</span>
+          <span className="chip warn tiny">{item.action === "approval" ? "审批已过期，操作没有获准" : <>没等到回答，已按默认「{item.answer}」</>}</span>
           <div className="spacer" />
-          <button className="ghost small" onClick={() => setChanging(true)}>
-            改答
-          </button>
+          {item.action !== "approval" && (
+            <button className="ghost small" onClick={() => setChanging(true)}>
+              改答
+            </button>
+          )}
         </div>
-        <div className="ask-text muted">{item.text}</div>
+        {item.action === "approval" ? <ApprovalText text={item.text} detail={item.detail} /> : <div className="ask-text muted">{item.text}</div>}
       </div>
     );
   }
@@ -135,10 +137,10 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
           </span>
         )}
       </div>
-      {item.action === "approval" ? <ApprovalText text={item.text} /> : <div className="ask-text">{item.text}</div>}
-      {item.detail && (
+      {item.action === "approval" ? <ApprovalText text={item.text} detail={item.detail} /> : <div className="ask-text">{item.text}</div>}
+      {item.detail && item.action !== "approval" && (
         <details className="ask-detail">
-          <summary className="small muted">交给 Work 的说明</summary>
+          <summary className="small muted">{item.action === "work" ? "交给 Work 的说明" : "技术细节"}</summary>
           <div className="pre small">{item.detail}</div>
         </details>
       )}
@@ -196,7 +198,16 @@ function NoticeText({ text }: { text: string }) {
 }
 
 /** An approval (docs/tasks/DOGFOOD.md §7): who wants to do what and why, then the exact command. */
-export function ApprovalText({ text }: { text: string }) {
+export function ApprovalText({ text, detail }: { text: string; detail?: string | null }) {
+  if (detail) {
+    return (
+      <div className="ask-text">
+        <div>{text}</div>
+        <div className="small muted">本次操作</div>
+        <pre className="approval-command">{detail}</pre>
+      </div>
+    );
+  }
   const [what, ...rest] = text.split("\n");
   return (
     <div className="ask-text">

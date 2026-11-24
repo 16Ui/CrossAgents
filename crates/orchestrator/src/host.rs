@@ -79,6 +79,12 @@ impl ExpiringQuota {
 
 #[async_trait]
 pub trait AgentHost: Send + Sync {
+    /// Whether a background dispatch may touch this project now. The runtime also
+    /// checks every individual agent before starting it or delivering to it.
+    async fn continuation_dispatch_allowed(&self, _lead: AgentId) -> Result<(), CoreError> {
+        Ok(())
+    }
+
     /// Keeps a contextual notice for the next message without starting an agent or a turn.
     /// Replaces an earlier notice on the same topic.
     async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {

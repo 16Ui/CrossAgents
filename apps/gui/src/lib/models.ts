@@ -21,7 +21,18 @@ export function prettyModel(model: string): string {
 }
 
 /** Vendors whose name is not just their plugin capitalised. */
-const VENDOR_LABELS: Record<string, string> = { codebuddy: "CodeBuddy" };
+const VENDOR_LABELS: Record<string, string> = {
+  antigravity: "Antigravity",
+  claude: "Claude",
+  codebuddy: "CodeBuddy",
+  codex: "Codex",
+  cursor: "Cursor",
+  deepseek: "DeepSeek",
+  "deepseek-harness": "DeepSeek Harness",
+  tokenworks: "词元工坊",
+  "workbuddy-cn": "WorkBuddy 国内版",
+  "workbuddy-intl": "WorkBuddy 国际版",
+};
 
 /** "claude" → "Claude", "codebuddy" → "CodeBuddy"; unknown plugins are capitalised. */
 export function vendorLabel(plugin: string): string {

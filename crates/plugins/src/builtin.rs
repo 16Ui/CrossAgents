@@ -120,6 +120,8 @@ mod tests {
         let cn = config("workbuddy-cn").expect("derived");
         let intl = config("workbuddy-intl").expect("derived");
         // Everything but the site, the label and the name comes from the base.
+        assert_eq!(cn.driver, base.driver);
+        assert_eq!(intl.driver, base.driver);
         assert_eq!(cn.command, base.command);
         assert_eq!(cn.models, base.models);
         assert_eq!(cn.efforts, base.efforts);

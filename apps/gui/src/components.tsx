@@ -185,6 +185,7 @@ export function useAgents() {
     () => api.listAgents().then((r) => r.agents),
     [],
     (e) => e.type === "agent.created" || e.type === "agent.updated" || e.type === "agent.removed" || e.type === "agent.status_changed",
+    "agents",
   );
 }
 
@@ -740,7 +741,7 @@ export function pluginAccent(plugin: string): string | undefined {
 /** "Claude", "Codex", "CodeBuddy", or the plugin's own name. */
 export function vendorName(plugin: string): string {
   const v = vendorOf(plugin);
-  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : v === "antigravity" ? "Antigravity" : v === "cursor" ? "Cursor" : v === "gemini" ? "Gemini" : plugin;
+  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : v === "deepseek" ? "DeepSeek" : v === "antigravity" ? "Antigravity" : v === "cursor" ? "Cursor" : v === "gemini" ? "Gemini" : plugin;
 }
 
 /** An official mark: as an image, or as a mask over the text colour when it is one-colour. */

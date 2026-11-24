@@ -162,16 +162,53 @@ export function useVersionMismatch(): VersionMismatch | undefined {
 
 export type Loaded<T> = { data?: T; error?: string; loading: boolean; reload: () => void };
 
+const SNAP_PREFIX = "ca.snap.v1:";
+const snapshotCache = new Map<string, unknown>();
+
+function readSnapshot<T>(key?: string): T | undefined {
+  if (!key) return undefined;
+  if (snapshotCache.has(key)) return snapshotCache.get(key) as T;
+  try {
+    if (typeof window === "undefined" || typeof window.localStorage === "undefined") return undefined;
+    const raw = window.localStorage.getItem(SNAP_PREFIX + key);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as T;
+    snapshotCache.set(key, parsed);
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeSnapshot<T>(key: string | undefined, value: T): void {
+  if (!key) return;
+  snapshotCache.set(key, value);
+  try {
+    if (typeof window === "undefined" || typeof window.localStorage === "undefined") return;
+    window.localStorage.setItem(SNAP_PREFIX + key, JSON.stringify(value));
+  } catch {
+    // Quota or private browsing: keep in-memory snapshot only.
+  }
+}
+
 /**
- * Loads a resource, then re-loads it (debounced) whenever `relevant` accepts an event and
- * whenever the event stream (re)connects.
+ * Loads a resource (seeding immediately from a local snapshot when `cacheKey` is supplied),
+ * then re-loads it (debounced) whenever `relevant` accepts an event and immediately when
+ * the event stream (re)connects.
  */
 export function useHubData<T>(
   load: () => Promise<T>,
   deps: unknown[],
   relevant: (event: HubEvent) => boolean,
+  cacheKey?: string,
 ): Loaded<T> {
-  const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>({ loading: true });
+  const fullKey = cacheKey ? (deps.length ? `${cacheKey}:${JSON.stringify(deps)}` : cacheKey) : undefined;
+  const fullKeyRef = useRef(fullKey);
+  fullKeyRef.current = fullKey;
+  const [state, setState] = useState<{ data?: T; error?: string; loading: boolean }>(() => {
+    const snap = readSnapshot<T>(fullKey);
+    return snap !== undefined ? { data: snap, loading: false } : { loading: true };
+  });
   const relevantRef = useRef(relevant);
   relevantRef.current = relevant;
   // Requests are numbered; a response is applied unless a newer one already was. (Dropping
@@ -181,9 +218,14 @@ export function useHubData<T>(
 
   const reload = useCallback(() => {
     const mine = ++generation.current;
+    const keyAtStart = fullKeyRef.current;
     const fresh = () => mine > applied.current && ((applied.current = mine), true);
     load().then(
-      (data) => fresh() && setState({ data, loading: false }),
+      (data) => {
+        if (!fresh()) return;
+        writeSnapshot(keyAtStart, data);
+        setState({ data, loading: false });
+      },
       (err) => fresh() && setState((s) => ({ data: s.data, error: errorText(err), loading: false })),
     );
   }, deps);
@@ -191,7 +233,12 @@ export function useHubData<T>(
   useEffect(() => {
     // Responses to requests made for the previous `deps` no longer apply.
     applied.current = generation.current;
-    setState({ loading: true });
+    const snap = readSnapshot<T>(fullKey);
+    if (snap !== undefined) {
+      setState({ data: snap, loading: false });
+    } else {
+      setState({ loading: true });
+    }
     reload();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const schedule = () => {
@@ -201,7 +248,10 @@ export function useHubData<T>(
     const offEvent = onHubEvent((e) => relevantRef.current(e) && schedule());
     let prev = status;
     const onStatus = () => {
-      if (status === "connected" && prev !== "connected") schedule();
+      if (status === "connected" && prev !== "connected") {
+        clearTimeout(timer);
+        reload();
+      }
       prev = status;
     };
     statusListeners.add(onStatus);
@@ -210,7 +260,7 @@ export function useHubData<T>(
       offEvent();
       statusListeners.delete(onStatus);
     };
-  }, [reload]);
+  }, [reload, fullKey]);
 
   return { ...state, reload };
 }

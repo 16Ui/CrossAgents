@@ -196,14 +196,16 @@ pub fn kickoff_with(
         } else {
             let _ = write!(
                 out,
-                "{} (run_id: {}) · {} is not under version control: tasks run one at a \
-                 time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
+                "{} (run_id: {}) · {} is not under version control. Use this working directory \
+                 directly as the lead, since the hub cannot create isolated worker checkouts here. \
+                 Preserve existing files, record actual changes and validation, and call run_finish \
+                 only when the local work is verified.",
                 run.title,
                 run.id,
                 run.repo.display()
             );
         }
-        if !run.config.auto_approves() {
+        if run.versioned() && !run.config.auto_approves() {
             out.push_str(PLAN_WAITS);
         }
         if run.versioned() {
@@ -239,7 +241,9 @@ pub fn kickoff_with(
     if let Some(line) = machine.line() {
         let _ = write!(out, "\n{line}");
     }
-    out.push_str(DISPATCH);
+    if run.versioned() {
+        out.push_str(DISPATCH);
+    }
     out.push_str(&roster(team, default_worker, strengths));
     if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
@@ -839,12 +843,15 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains("\nsessions: test"));
-            // The plan waits for the person: the lead is told to write the tasks and stop,
-            // not to do the work itself.
-            assert!(
-                text.contains("plan_submit") && text.contains("picks who runs each task"),
-                "{text}"
-            );
+            if in_place {
+                assert!(text.contains("directly as the lead"), "{text}");
+                assert!(!text.contains("plan_submit"), "{text}");
+            } else {
+                assert!(
+                    text.contains("plan_submit") && text.contains("picks who runs each task"),
+                    "{text}"
+                );
+            }
             // Under automatic approval nothing is added: the guide already covers it.
             run.config.policy.plan_approval = PlanApproval::Auto;
             let auto = kickoff(
@@ -859,8 +866,8 @@ mod tests {
             assert!(!auto.contains("plan_submit"), "{auto}");
             run.config.policy.plan_approval = PlanApproval::Required;
         }
-        // The dispatch protocol and the roster are fixed sections, in that order, whatever the
-        // team is (multica §2.3).
+        // Versioned runs keep the dispatch protocol before the roster.
+        run.in_place = false;
         let team = vec![agent("Rex")];
         let text = kickoff(
             &run,

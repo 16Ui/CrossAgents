@@ -11,12 +11,13 @@
 
 name = "deepseek-harness"
 label = "DeepSeek Harness"
+provider = "deepseek"
 protocol = "acp"
 command = ["dsh", "--profile", "acp"]
 verified = ["0.2.2"]
 
 [models]
-fallback = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro", "deepseek-v4-flash"]
+fallback = ["DeepSeek-V4.1-Flash", "DeepSeek-V4-Pro"]
 efforts = ["off", "low", "high", "max"]
 
 [locate]

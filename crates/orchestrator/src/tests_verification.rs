@@ -159,6 +159,7 @@ impl AgentHost for FakeHost {
 #[derive(Default)]
 struct FakeWorkspaces {
     cannot_commit: AtomicBool,
+    integration_branch: Mutex<Option<String>>,
     head: Mutex<Option<String>>,
     /// What `uncommitted` reports: work left in the checkout, not committed.
     dirty: Mutex<Vec<String>>,
@@ -183,7 +184,12 @@ impl WorkspaceProvider for FakeWorkspaces {
     async fn versioned(&self, _: &Path) -> bool {
         true
     }
-    async fn current_branch(&self, _: &Path) -> Result<String, CoreError> {
+    async fn current_branch(&self, path: &Path) -> Result<String, CoreError> {
+        if path.file_name().is_some_and(|name| name == "integration")
+            && let Some(branch) = self.integration_branch.lock().await.clone()
+        {
+            return Ok(branch);
+        }
         Ok("main".into())
     }
     async fn create(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<(), CoreError> {
@@ -1788,7 +1794,10 @@ async fn a_change_request_over_the_threshold_opens_a_new_session_with_the_work_s
     // This round's notes are why it came back, not an earlier decision.
     assert_eq!(opening.matches("changes please").count(), 1, "{opening}");
     // Recorded with the context it had; the lead hears nothing more than before.
-    assert_eq!(rework_sessions(&mut events), vec![(280_000, 150_000)]);
+    assert_eq!(
+        rework_sessions(&mut events),
+        vec![(280_000, crossagents_core::DEFAULT_REWORK_NEW_SESSION_TOKENS)]
+    );
     let told = f.host.notices.lock().await.clone();
     assert!(
         !told.iter().any(|n| n.contains("session")),
@@ -1802,7 +1811,7 @@ async fn a_change_request_under_the_threshold_stays_in_the_session() {
     let reviewer = agent("critic", Role::Reviewer, f._home.path());
     delivered_with_history(&f).await;
     in_review(&f, &reviewer, 1, "c0ffee1").await;
-    f.orchestrator.record_context(f.worker.id, 120_000);
+    f.orchestrator.record_context(f.worker.id, 40_000);
     let mut events = f.orchestrator.bus.subscribe();
 
     ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
@@ -1890,7 +1899,10 @@ async fn failed_checks_over_the_threshold_open_a_new_session_with_the_check() {
             "{part:?} is missing from:\n{opening}"
         );
     }
-    assert_eq!(rework_sessions(&mut events), vec![(310_000, 150_000)]);
+    assert_eq!(
+        rework_sessions(&mut events),
+        vec![(310_000, crossagents_core::DEFAULT_REWORK_NEW_SESSION_TOKENS)]
+    );
 }
 
 #[tokio::test]
@@ -1902,8 +1914,12 @@ async fn the_leads_and_the_persons_send_backs_open_a_new_session_too() {
     task.status = TaskStatus::Passed;
     f.store.update_task(&task).await.unwrap();
     f.orchestrator.record_context(f.worker.id, 200_000);
+    assert!(f.orchestrator
+        .task_rework(&f.worker, json!({ "task": "a", "reason": "unauthorized" }))
+        .await
+        .is_err());
     f.orchestrator
-        .task_rework(&f.lead, json!({ "task": "a", "notes": "rename it to b" }))
+        .task_rework(&f.lead, json!({ "task": "a", "reason": "rename it to b" }))
         .await
         .unwrap();
     f.orchestrator.drain_relays().await;
@@ -1941,4 +1957,53 @@ async fn the_leads_and_the_persons_send_backs_open_a_new_session_too() {
     assert!(opening.contains("new session:"), "{opening}");
     assert!(opening.contains("src/a.rs:3 — return 2"), "{opening}");
     assert_eq!(opening.matches("return 2").count(), 1, "{opening}");
+}
+
+
+#[tokio::test]
+async fn the_clock_accepts_only_an_independently_verified_local_commit() {
+    let f = Fixture::with_checks(&["cargo test"], vec![true]).await;
+    let mut run = f.run.clone();
+    run.config.policy.continuation = Some(crossagents_core::ContinuationPolicy::default());
+    run.config.policy.land = crossagents_core::LandPolicy::Manual;
+    f.store.update_run(&run).await.unwrap();
+    std::fs::create_dir_all(f.orchestrator.integration_path(&run)).unwrap();
+    *f.ws.integration_branch.lock().await = Some(run.branch.clone());
+    *f.ws.head.lock().await = Some("aaaaaaa".into());
+
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.checks = vec![crossagents_core::CheckResult {
+        command: "cargo test".into(), exit_code: Some(0), passed: true, output: String::new(),
+    }];
+    task.report.verified_sha = Some("aaaaaaa".into());
+    task.report.reviewed_sha = Some("aaaaaaa".into());
+    task.report.verdict = Some(crossagents_core::model::ReviewVerdict::Merge);
+    task.report.review_attempt = 1;
+    let reviewer = AgentId::new();
+    task.report.verdict_by = Some(reviewer);
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.continue_runs().await;
+    assert!(f.ws.merged().await.is_empty(), "manual policy");
+
+    run.config.policy.land = crossagents_core::LandPolicy::Auto;
+    f.store.update_run(&run).await.unwrap();
+    task.report.verdict_by = Some(f.worker.id);
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.continue_runs().await;
+    assert!(f.ws.merged().await.is_empty(), "worker cannot stand in for reviewer");
+
+    task.report.verdict_by = Some(reviewer);
+    task.report.reviewed_sha = Some("bbbbbbb".into());
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.continue_runs().await;
+    assert!(f.ws.merged().await.is_empty(), "stale review");
+
+    task.report.reviewed_sha = Some("aaaaaaa".into());
+    f.store.update_task(&task).await.unwrap();
+    f.store.update_agent_status(f.lead.id, AgentStatus::Error).await.unwrap();
+    f.orchestrator.continue_runs().await;
+    f.orchestrator.continue_runs().await;
+    assert_eq!(f.task().await.status, TaskStatus::Merged);
+    assert_eq!(f.ws.merged().await, vec!["aaaaaaa"]);
 }

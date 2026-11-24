@@ -139,6 +139,7 @@ struct SendArgs {
     /// Left out with `reply_to`: the reply goes to whoever sent that message.
     #[serde(default)]
     to: Option<To>,
+    #[serde(alias = "message")]
     text: String,
     #[serde(default)]
     reply_to: Option<String>,
@@ -439,7 +440,15 @@ impl Orchestrator {
             self.reply_closes_question(caller, parent).await;
         }
         let task = match &a.task {
-            Some(key) => Some(self.find_task(caller, key).await?),
+            Some(key) => match self.find_task(caller, key).await {
+                Ok(task) => Some(task),
+                Err(CoreError::NotFound { .. })
+                    if matches!(self.run_of(caller.id).await?, Some((_, tasks)) if tasks.is_empty()) =>
+                {
+                    None
+                }
+                Err(err) => return Err(err),
+            },
             None => None,
         };
         // A message about a task still comes from the agent; the task is context.
@@ -462,6 +471,16 @@ impl Orchestrator {
                 return Err(CoreError::Conflict("you cannot message yourself".into()));
             }
             self.not_a_namesake(caller, &name, &target).await?;
+            if caller.role == Role::Worker
+                && reply_to.is_none()
+                && let Ok(Some((run, tasks))) = self.run_of(caller.id).await
+                && !tasks.is_empty()
+                && target.id == run.planner
+            {
+                return Err(CoreError::Conflict(
+                    "Do not message the Lead directly via agent_send while working on structured tasks. Report completion with `task_complete` (1-sentence summary + file/patch paths) or ask blockers with `task_ask`; the hub wakes the Lead by milestone.".into(),
+                ));
+            }
             let mut state = self.messaging.lock().await;
             let dedup = (caller.id, target.id, a.text.clone());
             if let Some((_, id)) = state.recent.get(&dedup) {
@@ -470,10 +489,19 @@ impl Orchestrator {
             }
             repeated = false;
             let id = MessageId::new();
+            const MAX_AGENT_SEND_CHARS: usize = 4000;
+            let body = if a.text.chars().count() > MAX_AGENT_SEND_CHARS {
+                let head: String = a.text.chars().take(MAX_AGENT_SEND_CHARS).collect();
+                format!(
+                    "{head}\n\n[Truncated by hub: message exceeded {MAX_AGENT_SEND_CHARS} chars. Write full details to a file or note_write and send only the path + a concise summary.]"
+                )
+            } else {
+                a.text.clone()
+            };
             let envelope = Envelope {
                 id,
                 from,
-                text: format!("{}\n{}", header(id), a.text),
+                text: format!("{}\n{}", header(id), body),
                 reply_to,
                 attachments: Vec::new(),
             };

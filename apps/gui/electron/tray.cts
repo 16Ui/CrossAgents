@@ -38,6 +38,8 @@ export function createTray(
   if (process.platform === "darwin") image.setTemplateImage(true);
   const tray = new Tray(image);
   const notify = ({ title, content }: { title: string; content: string }) => {
+    // Windows desktop notifications are reserved for completed work and mandatory input.
+    if (process.platform === "win32") return;
     if (process.platform !== "darwin") { tray.displayBalloon({ title, content }); return; }
     const notification = new Notification({ title, body: content });
     notifications.add(notification);
@@ -143,7 +145,7 @@ export function createTray(
           win.once("leave-full-screen", () => { if (!win.isDestroyed()) win.hide(); });
           win.setFullScreen(false);
         } else win.hide();
-        void hintOnce(notify, remote() !== undefined);
+        if (process.platform !== "win32") void hintOnce(notify, remote() !== undefined);
       });
     },
   };

@@ -97,10 +97,10 @@ function InlineAsk({ item, agent }: { item: HumanItem; agent?: Agent }) {
           </span>
         )}
       </div>
-      <div className="ia-text">{item.action === "approval" ? <ApprovalText text={item.text} /> : item.text}</div>
-      {item.detail && (
+      <div className="ia-text">{item.action === "approval" ? <ApprovalText text={item.text} detail={item.detail} /> : item.text}</div>
+      {item.detail && item.action !== "approval" && (
         <details className="ia-detail">
-          <summary>交给 Work 的说明</summary>
+          <summary>{item.action === "work" ? "交给 Work 的说明" : "技术细节"}</summary>
           <div className="pre small">{item.detail}</div>
         </details>
       )}

@@ -13,6 +13,7 @@ export function proxyOf(agent: Pick<Agent, "config">): string | null {
 /** Compact label for chips (`"http://127.0.0.1:7890"` -> `"127.0.0.1:7890"`). */
 export function shortProxyLabel(proxy: string | null | undefined): string {
   if (!proxy) return "默认";
+  if (proxy.toLowerCase() === "auto") return "自动最低延迟";
   if (proxy.toLowerCase() === "direct") return "直连";
   return proxy.replace(/^https?:\/\//i, "");
 }
@@ -28,10 +29,12 @@ export function formatCandidateOption(c: EgressCandidate): string {
 
 let cachedCandidates: EgressCandidate[] | undefined;
 let inflight: Promise<EgressCandidate[]> | undefined;
+let lastProbedAt = 0;
 const listeners = new Set<(list: EgressCandidate[]) => void>();
 
 function notifyAll(list: EgressCandidate[]) {
   cachedCandidates = list;
+  lastProbedAt = Date.now();
   for (const fn of listeners) fn(list);
 }
 
@@ -100,12 +103,33 @@ export function EgressPicker({
   const [saveError, setSaveError] = useState<string>();
 
   const current = value?.trim() || "";
+  const isAuto = current.toLowerCase() === "auto";
   const hasCurrent =
     !current ||
+    isAuto ||
     candidates.some((c) => c.value.toLowerCase() === current.toLowerCase());
   const selectedCustom = candidates.find(
     (c) => c.value.toLowerCase() === current.toLowerCase() && c.source === "custom",
   );
+  const bestProxy =
+    [...candidates]
+      .filter((c) => c.ip && c.latency_ms != null && c.value !== "direct")
+      .sort((a, b) => (a.latency_ms ?? 999999) - (b.latency_ms ?? 999999))[0] ??
+    [...candidates]
+      .filter((c) => c.ip && c.latency_ms != null)
+      .sort((a, b) => (a.latency_ms ?? 999999) - (b.latency_ms ?? 999999))[0];
+
+  useEffect(() => {
+    if (!isAuto) return;
+    const highLatency = !bestProxy || bestProxy.latency_ms == null || bestProxy.latency_ms > 280;
+    const intervalMs = highLatency ? 15_000 : 60_000;
+    const timer = setInterval(() => {
+      if (Date.now() - lastProbedAt >= intervalMs - 1_000) {
+        void reload();
+      }
+    }, Math.min(intervalMs, 15_000));
+    return () => clearInterval(timer);
+  }, [isAuto, bestProxy?.latency_ms, reload]);
 
   async function addProxy() {
     const url = customUrl.trim();
@@ -153,13 +177,18 @@ export function EgressPicker({
     <div className={`egress-picker ${compact ? "compact" : ""}`} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
         <select
-          value={current}
+          value={isAuto ? "auto" : current}
           disabled={disabled || saving}
           title={title}
           style={compact ? { fontSize: 12, padding: "2px 8px", height: 26, maxWidth: 360 } : { flex: 1, minWidth: 220 }}
-          onChange={(e) => onChange(e.target.value ? e.target.value : null)}
+          onChange={(e) => {
+            onChange(e.target.value ? e.target.value : null);
+          }}
         >
           <option value="">{defaultLabel}</option>
+          <option value="auto">
+            ⚡ 自动选择最低延迟{bestProxy ? `（${bestProxy.label} · ${bestProxy.latency_ms}ms）` : ""}
+          </option>
           {!hasCurrent && <option value={current}>{current}（当前已配）</option>}
           {candidates.map((c) => (
             <option key={c.value} value={c.value}>

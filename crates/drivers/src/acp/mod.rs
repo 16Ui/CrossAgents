@@ -4,6 +4,7 @@
 
 pub mod wire;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use crossagents_core::{
     AttachmentKind, AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
-    FileChange, McpServerSpec, OutputStream, PermissionPolicy, Prompt, SessionEvent,
+    FileChange, McpServerSpec, OutputStream, PermissionDecision, PermissionHandler,
+    PermissionPolicy, PermissionRequest, Prompt, SessionEvent,
     SessionEventKind, SessionSpec, StopReason, ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::Value;
@@ -130,23 +132,42 @@ impl Driver for AcpDriver {
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
-        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        if self.name == "antigravity" && spec.permission != PermissionPolicy::Bypass {
+            return Err(CoreError::Unsupported(
+                "Antigravity ACP cannot be used in a protected session because it may run an unanswered command. The session was not started.".into(),
+            ));
+        }
+        let mut command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        if let Some(cli) = &self.cli
+            && let Some(program) = command.first()
+            && cli.default_name().as_ref() == Some(program)
+        {
+            if let Some(mut located) = cli.command() {
+                located.extend(command.into_iter().skip(1));
+                command = located;
+            } else {
+                command = cli.launch(&command);
+            }
+        }
         let mut launch = AcpLaunch::from_command(&command, spec.agent.cwd.clone())?;
         if let (Some(var), Some(model)) = (&self.model_env, &spec.agent.model) {
             launch.env.push((var.clone(), model.clone()));
         }
         launch.env.extend(spec.env);
+        apply_dsh_permission_env(&mut launch, spec.permission);
         let effort = spec
             .agent
             .config
             .get("effort")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let (model, effort) = acp_model_selection(&self.name, spec.agent.model, effort);
         let session = AcpSession::start(AcpOptions {
             launch,
             mcp_servers: spec.mcp_servers,
             permission: spec.permission,
-            model: spec.agent.model,
+            permissions: spec.permissions,
+            model,
             effort,
             instructions: spec.instructions,
             events: spec.events,
@@ -154,6 +175,21 @@ impl Driver for AcpDriver {
         .await?;
         Ok(Box::new(session))
     }
+}
+
+/// Antigravity's headless menu can combine a model and an effort; ACP exposes them separately.
+fn acp_model_selection(
+    plugin: &str,
+    model: Option<String>,
+    effort: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if plugin == "antigravity"
+        && let Some(("gemini-4-hydrogen", wanted @ ("low" | "medium" | "high"))) =
+            model.as_deref().and_then(|model| model.rsplit_once('-'))
+    {
+        return (Some("gemini-4-hydrogen".into()), effort.or_else(|| Some(wanted.into())));
+    }
+    (model, effort)
 }
 
 /// How to launch the agent process.
@@ -180,10 +216,46 @@ impl AcpLaunch {
     }
 }
 
+/// Pass `DSH_PERMISSION_MODE=danger-full-access` when `dsh` (`tokenworks` /
+/// `deepseek-harness`) runs with `PermissionPolicy::Bypass`; otherwise its
+/// default `@deepseek-ai/dsh-sandbox-policy` picks `workspace-write` and fails
+/// Windows ACL grants on directories outside a full-write root.
+fn apply_dsh_permission_env(launch: &mut AcpLaunch, permission: PermissionPolicy) {
+    if permission != PermissionPolicy::Bypass {
+        return;
+    }
+    let is_dsh = std::path::Path::new(&launch.program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("dsh"))
+        || launch
+            .args
+            .iter()
+            .any(|arg| arg.contains("dsh-desktop-host") || arg.ends_with("dsh"))
+        || launch
+            .env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("DSH_HOME"));
+    if !is_dsh {
+        return;
+    }
+    if launch
+        .env
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("DSH_PERMISSION_MODE"))
+    {
+        return;
+    }
+    launch
+        .env
+        .push(("DSH_PERMISSION_MODE".into(), "danger-full-access".into()));
+}
+
 pub struct AcpOptions {
     pub launch: AcpLaunch,
     pub mcp_servers: Vec<McpServerSpec>,
     pub permission: PermissionPolicy,
+    pub permissions: Option<Arc<dyn PermissionHandler>>,
     /// Model to select through the session's `model` config option.
     pub model: Option<String>,
     /// Reasoning effort to select through the session's `thought_level` config option
@@ -197,8 +269,16 @@ pub struct AcpOptions {
 pub struct AcpSession {
     peer: RpcPeer,
     session_id: String,
+    active_session_id: std::sync::Mutex<String>,
     process: crate::launch::ProcessHandle,
+    base_instructions: Option<String>,
     pending_instructions: Mutex<Option<String>>,
+    cwd: String,
+    mcp_servers: Vec<McpServerStdio>,
+    permission: PermissionPolicy,
+    model: Option<String>,
+    effort: Option<String>,
+    context_rotated: AtomicBool,
     events: mpsc::UnboundedSender<SessionEvent>,
     /// Set before we kill the process, so its exit is not reported as a failure.
     shutting_down: Arc<AtomicBool>,
@@ -218,6 +298,7 @@ impl AcpSession {
             launch,
             mcp_servers,
             permission,
+            permissions,
             model,
             effort,
             instructions,
@@ -244,6 +325,8 @@ impl AcpSession {
         let handler = Arc::new(ClientHandler {
             events: events.clone(),
             permission,
+            permissions,
+            pending_tools: Default::default(),
         });
         let (peer, reader) = RpcPeer::spawn(stdout, stdin, handler);
 
@@ -288,15 +371,32 @@ impl AcpSession {
                     },
                 )
                 .await?;
-            let session: NewSessionResponse = peer
-                .request(
-                    method::SESSION_NEW,
-                    NewSessionRequest {
+            let session: NewSessionResponse = {
+                // Campus/OIDC `dsh` plugins (e.g. `@ustc/tokenworks-bootstrap`) finish registering
+                // their provider route shortly after `initialize`. Retry `session/new` briefly while
+                // the provider adapter is still coming up instead of failing the cold boot.
+                let mut attempt = 0u32;
+                loop {
+                    let req = NewSessionRequest {
                         cwd: launch.cwd.display().to_string(),
                         mcp_servers: mcp_servers.iter().map(to_wire_mcp).collect(),
-                    },
-                )
-                .await?;
+                    };
+                    match peer.request(method::SESSION_NEW, req).await {
+                        Ok(session) => break session,
+                        Err(err)
+                            if attempt < 8 && {
+                                let msg = err.to_string().to_lowercase();
+                                msg.contains("no adapter registered for provider")
+                                    || msg.contains("does not own provider")
+                            } =>
+                        {
+                            attempt += 1;
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            };
             Ok::<_, RpcError>((init, session))
         };
         let (init, session) = match tokio::time::timeout(INIT_TIMEOUT, handshake).await {
@@ -315,17 +415,29 @@ impl AcpSession {
             );
         }
 
-        emit(
-            &events,
+        let _ = events.send(SessionEvent::with_raw(
             SessionEventKind::Started {
                 session_id: session.session_id.clone(),
             },
-        );
+            serde_json::json!({
+                "protocolVersion": init.protocol_version,
+                "sessionId": session.session_id,
+            }),
+        ));
+        let wire_mcp: Vec<McpServerStdio> = mcp_servers.iter().map(to_wire_mcp).collect();
         let this = Self {
             peer,
             session_id: session.session_id.clone(),
+            active_session_id: std::sync::Mutex::new(session.session_id.clone()),
             process,
+            base_instructions: instructions.clone(),
             pending_instructions: Mutex::new(instructions),
+            cwd: launch.cwd.display().to_string(),
+            mcp_servers: wire_mcp,
+            permission,
+            model: model.clone(),
+            effort: effort.clone(),
+            context_rotated: AtomicBool::new(false),
             events: events.clone(),
             shutting_down,
             // PDFs would need `embeddedContext` and a resource block, which is not wired;
@@ -340,6 +452,10 @@ impl AcpSession {
         this.configure(&session, permission, model.as_deref(), effort.as_deref())
             .await;
         Ok(this)
+    }
+
+    fn active_session_id(&self) -> String {
+        self.active_session_id.lock().unwrap().clone()
     }
 
     async fn configure(
@@ -358,7 +474,7 @@ impl AcpSession {
                 Some(mode) if mode.id == modes.current_mode_id => {}
                 Some(mode) => {
                     let request = SetSessionModeRequest {
-                        session_id: self.session_id.clone(),
+                        session_id: self.active_session_id(),
                         mode_id: mode.id.clone(),
                     };
                     if let Err(err) = self
@@ -442,7 +558,7 @@ impl AcpSession {
             return;
         }
         let request = SetSessionConfigOptionRequest {
-            session_id: self.session_id.clone(),
+            session_id: self.active_session_id(),
             config_id: option.id.clone(),
             value: value.value.clone(),
         };
@@ -510,7 +626,7 @@ impl AcpSession {
             .request(
                 method::SESSION_PROMPT,
                 PromptRequest {
-                    session_id: self.session_id.clone(),
+                    session_id: self.active_session_id(),
                     prompt,
                 },
             )
@@ -552,12 +668,40 @@ impl DriverSession for AcpSession {
         Some(self.attachments)
     }
 
+    fn take_context_rotated(&self) -> bool {
+        self.context_rotated.swap(false, Ordering::SeqCst)
+    }
+
+    async fn compact(&self) -> Result<(), CoreError> {
+        let req = NewSessionRequest {
+            cwd: self.cwd.clone(),
+            mcp_servers: self.mcp_servers.clone(),
+        };
+        let session: NewSessionResponse = self
+            .peer
+            .request(method::SESSION_NEW, req)
+            .await
+            .map_err(|e| CoreError::Agent(format!("ACP compact session/new failed: {e}")))?;
+        *self.active_session_id.lock().unwrap() = session.session_id.clone();
+        *self.pending_instructions.lock().await = self.base_instructions.clone();
+        self.configure(
+            &session,
+            self.permission,
+            self.model.as_deref(),
+            self.effort.as_deref(),
+        )
+        .await;
+        self.context_rotated.store(true, Ordering::SeqCst);
+        emit(&self.events, SessionEventKind::Compacted);
+        Ok(())
+    }
+
     async fn interrupt(&self) -> Result<(), CoreError> {
         self.peer
             .notify(
                 method::SESSION_CANCEL,
                 CancelNotification {
-                    session_id: self.session_id.clone(),
+                    session_id: self.active_session_id(),
                 },
             )
             .map_err(|e| CoreError::Agent(e.to_string()))
@@ -610,6 +754,15 @@ fn to_wire_mcp(spec: &McpServerSpec) -> McpServerStdio {
 struct ClientHandler {
     events: mpsc::UnboundedSender<SessionEvent>,
     permission: PermissionPolicy,
+    permissions: Option<Arc<dyn PermissionHandler>>,
+    pending_tools: std::sync::Mutex<HashMap<(String, String), String>>,
+}
+
+fn acp_tool_title(call: &Value) -> Option<&str> {
+    call.pointer("/rawInput/command").and_then(Value::as_str)
+        .or_else(|| call.pointer("/rawInput/CommandLine").and_then(Value::as_str))
+        .or_else(|| call.get("title").and_then(Value::as_str))
+        .filter(|title| !title.trim().is_empty())
 }
 
 #[async_trait]
@@ -619,7 +772,42 @@ impl RpcHandler for ClientHandler {
             method::SESSION_REQUEST_PERMISSION => {
                 let req: RequestPermissionRequest =
                     serde_json::from_value(params).map_err(RpcError::invalid_params)?;
-                let outcome = choose_permission(self.permission, &req.options);
+                let outcome = if self.permission == PermissionPolicy::Guard {
+                    let call = &req.tool_call;
+                    let id = call.get("toolCallId").and_then(Value::as_str).unwrap_or_default();
+                    let title = acp_tool_title(call).map(str::to_owned).or_else(|| {
+                        // An approval may refer to a previously announced tool by ID alone.
+                        self.pending_tools.lock().unwrap().get(&(req.session_id.clone(), id.into())).cloned()
+                    });
+                    let has_title = title.is_some();
+                    let request = PermissionRequest {
+                        id: id.into(),
+                        turn_id: None,
+                        kind: "acp_tool".into(),
+                        title: title.unwrap_or_else(|| "未提供操作内容".into()),
+                    };
+                    let decision = match (&self.permissions, has_title) {
+                        (Some(handler), true) if !id.is_empty() => handler.decide(&request).await,
+                        _ => PermissionDecision::Deny,
+                    };
+                    let outcome = match decision {
+                        PermissionDecision::Allow | PermissionDecision::AllowForSession =>
+                            select_permission(&req.options, &["allow_once"]),
+                        PermissionDecision::Deny => select_permission(&req.options, &["reject_once"]),
+                        PermissionDecision::Cancel => PermissionOutcome::Cancelled,
+                    };
+                    let decision = if matches!(outcome, PermissionOutcome::Cancelled) {
+                        PermissionDecision::Cancel
+                    } else if decision == PermissionDecision::AllowForSession {
+                        PermissionDecision::Allow
+                    } else {
+                        decision
+                    };
+                    emit(&self.events, SessionEventKind::PermissionRequested { request, decision });
+                    outcome
+                } else {
+                    choose_permission(self.permission, &req.options)
+                };
                 serde_json::to_value(RequestPermissionResponse { outcome })
                     .map_err(|e| RpcError::new(crate::jsonrpc::INTERNAL_ERROR, e.to_string()))
             }
@@ -634,6 +822,21 @@ impl RpcHandler for ClientHandler {
         let Ok(note) = serde_json::from_value::<SessionNotification>(params) else {
             return;
         };
+        if self.permission == PermissionPolicy::Guard
+            && matches!(note.update.get("sessionUpdate").and_then(Value::as_str), Some("tool_call" | "tool_call_update"))
+            && let Some(id) = note.update.get("toolCallId").and_then(Value::as_str)
+        {
+            let key = (note.session_id, id.into());
+            let mut pending = self.pending_tools.lock().unwrap();
+            if matches!(note.update.get("status").and_then(Value::as_str), Some("completed" | "failed")) {
+                pending.remove(&key);
+            } else if let Some(title) = acp_tool_title(&note.update) {
+                if pending.len() >= 256 {
+                    pending.clear();
+                }
+                pending.insert(key, title.into());
+            }
+        }
         let detail = parse_detail(&note.update);
         if let Some(kind) = parse_update(&note.update) {
             let _ = self
@@ -646,21 +849,20 @@ impl RpcHandler for ClientHandler {
     }
 }
 
+fn select_permission(options: &[PermissionOption], kinds: &[&str]) -> PermissionOutcome {
+    kinds.iter()
+        .find_map(|kind| options.iter().find(|option| option.kind == *kind))
+        .map_or(PermissionOutcome::Cancelled, |option| PermissionOutcome::Selected {
+            option_id: option.option_id.clone(),
+        })
+}
+
 fn choose_permission(policy: PermissionPolicy, options: &[PermissionOption]) -> PermissionOutcome {
-    let pick = |kinds: &[&str]| {
-        kinds
-            .iter()
-            .find_map(|kind| options.iter().find(|o| o.kind == *kind))
-            .map(|o| PermissionOutcome::Selected {
-                option_id: o.option_id.clone(),
-            })
-    };
-    let choice = match policy {
-        // ACP agents do not reach the hub's guard yet: guarded ones are let through.
-        PermissionPolicy::Bypass | PermissionPolicy::Guard => pick(&["allow_always", "allow_once"]),
-        PermissionPolicy::Deny => pick(&["reject_once", "reject_always"]),
-    };
-    choice.unwrap_or(PermissionOutcome::Cancelled)
+    match policy {
+        PermissionPolicy::Bypass => select_permission(options, &["allow_always", "allow_once"]),
+        PermissionPolicy::Deny | PermissionPolicy::Guard =>
+            select_permission(options, &["reject_once", "reject_always"]),
+    }
 }
 
 fn tool_status(value: Option<&Value>) -> Option<ToolStatus> {
@@ -868,6 +1070,65 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_hydrogen_uses_separate_acp_model_and_effort() {
+        let model = Some("gemini-4-hydrogen-medium".to_owned());
+        assert_eq!(
+            acp_model_selection("antigravity", model.clone(), None),
+            (Some("gemini-4-hydrogen".into()), Some("medium".into()))
+        );
+        assert_eq!(
+            acp_model_selection("antigravity", model.clone(), Some("high".into())),
+            (Some("gemini-4-hydrogen".into()), Some("high".into()))
+        );
+        assert_eq!(acp_model_selection("other", model.clone(), None), (model, None));
+    }
+
+    #[tokio::test]
+    async fn guarded_acp_uses_the_hosts_decision_and_never_selects_always_allow() {
+        struct Decision(PermissionDecision);
+
+        #[async_trait]
+        impl PermissionHandler for Decision {
+            async fn decide(&self, request: &PermissionRequest) -> PermissionDecision {
+                assert_eq!(request.id, "command-1");
+                assert_eq!(request.kind, "acp_tool");
+                assert_eq!(request.title, "echo example");
+                self.0
+            }
+        }
+
+        let request = json!({
+            "sessionId": "test-session",
+            "toolCall": {
+                "toolCallId": "command-1",
+                "title": "Run a command",
+                "rawInput": {"command": "echo example"}
+            },
+            "options": [
+                {"optionId": "always", "kind": "allow_always"},
+                {"optionId": "once", "kind": "allow_once"},
+                {"optionId": "deny", "kind": "reject_once"}
+            ]
+        });
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let ask = |permissions| ClientHandler {
+            events: events.clone(),
+            permission: PermissionPolicy::Guard,
+            permissions,
+            pending_tools: Default::default(),
+        };
+        let once = ask(Some(Arc::new(Decision(PermissionDecision::Allow))))
+            .request(method::SESSION_REQUEST_PERMISSION, request.clone()).await.unwrap();
+        assert_eq!(once["outcome"]["optionId"], "once");
+        let denied = ask(Some(Arc::new(Decision(PermissionDecision::Deny))))
+            .request(method::SESSION_REQUEST_PERMISSION, request.clone()).await.unwrap();
+        assert_eq!(denied["outcome"]["optionId"], "deny");
+        let no_guard = ask(None)
+            .request(method::SESSION_REQUEST_PERMISSION, request).await.unwrap();
+        assert_eq!(no_guard["outcome"]["optionId"], "deny");
+    }
+
+    #[test]
     fn finds_the_unrestricted_mode() {
         let modes = |ids: &[&str]| -> Vec<SessionMode> {
             ids.iter()
@@ -942,5 +1203,25 @@ mod tests {
         assert!(
             parse_detail(&json!({ "sessionUpdate": "tool_call", "toolCallId": "x" })).is_none()
         );
+    }
+
+    #[test]
+    fn bypass_sets_dsh_permission_mode_env() {
+        let mut launch =
+            AcpLaunch::from_command(&["dsh".into(), "--profile".into(), "acp".into()], ".".into())
+                .unwrap();
+        apply_dsh_permission_env(&mut launch, PermissionPolicy::Guard);
+        assert!(launch.env.is_empty());
+
+        apply_dsh_permission_env(&mut launch, PermissionPolicy::Bypass);
+        assert_eq!(
+            launch.env,
+            vec![("DSH_PERMISSION_MODE".into(), "danger-full-access".into())]
+        );
+
+        let mut custom = AcpLaunch::from_command(&["C:\\tools\\dsh.cmd".into()], ".".into()).unwrap();
+        custom.env.push(("DSH_PERMISSION_MODE".into(), "workspace-write".into()));
+        apply_dsh_permission_env(&mut custom, PermissionPolicy::Bypass);
+        assert_eq!(custom.env.len(), 1);
     }
 }

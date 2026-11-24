@@ -28,7 +28,9 @@ async fn start(
         launch: launch(),
         mcp_servers: vec![],
         permission,
+        permissions: None,
         model: model.map(Into::into),
+        effort: None,
         instructions: instructions.map(Into::into),
         events: tx,
     })
@@ -134,6 +136,60 @@ async fn permissions_follow_policy() {
 }
 
 #[tokio::test]
+async fn a_guarded_acp_command_waits_for_the_host_approval() {
+    use crossagents_core::{PermissionDecision, PermissionHandler, PermissionRequest};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    #[derive(Default)]
+    struct HostApproval {
+        requested: Notify,
+        approved: Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl PermissionHandler for HostApproval {
+        async fn decide(&self, request: &PermissionRequest) -> PermissionDecision {
+            assert_eq!(request.kind, "acp_tool");
+            self.requested.notify_one();
+            self.approved.notified().await;
+            PermissionDecision::Allow
+        }
+    }
+
+    let approvals = Arc::new(HostApproval::default());
+    let (events, mut rx) = mpsc::unbounded_channel();
+    let session = Arc::new(AcpSession::start(AcpOptions {
+        launch: launch(),
+        mcp_servers: Vec::new(),
+        permission: PermissionPolicy::Guard,
+        permissions: Some(approvals.clone()),
+        model: None,
+        effort: None,
+        instructions: None,
+        events,
+    }).await.unwrap());
+    let turn = tokio::spawn({
+        let session = session.clone();
+        async move { session.prompt("[tool] go").await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), approvals.requested.notified()).await.unwrap();
+    assert!(!turn.is_finished());
+    assert!(!drain_text(&mut rx).0.contains("permission=yes"));
+
+    approvals.approved.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), turn).await.unwrap().unwrap().unwrap();
+    assert_eq!(result.stop_reason, StopReason::EndTurn);
+    let (text, events) = drain_text(&mut rx);
+    assert!(text.starts_with("permission=yes"), "{text}");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        SessionEventKind::PermissionRequested { decision: PermissionDecision::Allow, .. }
+    )));
+    session.shutdown().await;
+}
+
+#[tokio::test]
 async fn interrupt_stops_a_running_turn() {
     let (session, _rx) = start(PermissionPolicy::Bypass, None, None).await;
     let session = std::sync::Arc::new(session);
@@ -192,12 +248,13 @@ async fn optional_operations_are_unsupported() {
         session.suspend().await,
         session.rollback("t", false).await,
         session.set_model(Some("m"), None).await,
-        session.compact().await,
     ] {
         assert!(
             matches!(result, Err(crossagents_core::CoreError::Unsupported(_))),
             "{result:?}"
         );
     }
+    session.compact().await.unwrap();
+    assert!(session.take_context_rotated());
     session.shutdown().await;
 }

@@ -209,3 +209,58 @@ async fn budget_pauses_the_run_until_the_person_decides() {
     assert!((cap - 0.0075).abs() < 1e-9, "{cap}");
     t.post(&format!("/v1/runs/{run}/cancel"), json!({})).await;
 }
+
+
+#[tokio::test]
+async fn managed_routine_questions_stay_with_the_lead_and_only_clear_escalations_reach_the_user() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    std::fs::write(t.home.path().join("coordination-workspaces.json"),
+        json!([repo.path()]).to_string()).unwrap();
+    let boss = t.agent("boss").await;
+    let mut watch = t.watch().await;
+    let run = start_run(&t, "Record the test scope", json!({ "human_ask": "timeout", "ask_timeout_minutes": 0.01 })).await;
+    watch.until("the initial planner reply finished", |event|
+        matches!(event.kind, EventKind::AgentTurnCompleted { id, .. } if id == boss.id)
+    ).await;
+    let token = t.hub.agent_tokens.issue(boss.id).await;
+    let call = |name, body| t.client
+        .post(format!("{}/v1/me/tools/{name}", t.base))
+        .bearer_auth(&token)
+        .json(&body)
+        .send();
+    for (tool, body) in [
+        ("human_ask", json!({"text":"Do we want to continue the already requested validation?"})),
+        ("human_ask", json!({"text":"Continue M5?", "escalation":{
+            "kind":"security", "why_lead_cannot_decide":"??", "impact":"??", "decision":"??"
+        }})),
+        ("human_notify", json!({"text":"One small task passed."})),
+    ] {
+        let result: Value = call(tool, body).await.unwrap().json().await.unwrap();
+        assert_eq!(result["sent_to_user"], false, "{result}");
+    }
+    let open: Value = t.get("/v1/questions").await.json().await.unwrap();
+    assert!(open["items"].as_array().unwrap().is_empty());
+    let result: Value = call("human_ask", json!({
+        "text":"A test would send an internal capture to an external service.",
+        "escalation": {
+            "kind":"security",
+            "why_lead_cannot_decide":"The team has permission to process the capture locally only.",
+            "impact":"The service would receive an internal screenshot.",
+            "decision":"May the team send this screenshot, or should it keep the capture local?"
+        },
+        "detail":"Example diagnostics", "options":["Send", "Keep local"], "default":"Send"
+    })).await.unwrap().json().await.unwrap();
+    assert!(result["question_id"].is_string(), "{result}");
+    let open: Value = t.get("/v1/questions").await.json().await.unwrap();
+    let cards = open["items"].as_array().unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["run_id"], run);
+    assert!(cards[0]["timeout_at"].is_null());
+    assert!(cards[0]["default"].is_null());
+    let text = cards[0]["text"].as_str().unwrap();
+    assert!(text.starts_with("A test would send an internal capture"));
+    assert!(text.contains("为什么需要你"));
+    assert!(text.contains("会有什么影响"));
+    assert!(text.contains("请你决定"));
+}

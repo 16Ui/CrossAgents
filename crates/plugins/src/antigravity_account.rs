@@ -321,9 +321,11 @@ impl AccountProvider for AntigravityAccounts {
     }
 }
 
-/// The CLI's printmode quotaJSON -> groupJSON -> bucketJSON. Missing numeric values
-/// remain unknown; an amount without a total cannot be turned into a percentage.
+/// The CLI's printmode quotaJSON -> groupJSON -> bucketJSON (wrapped in `command.data` on
+/// newer CLI releases). Missing numeric values remain unknown; an amount without a total
+/// cannot be turned into a percentage.
 fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> {
+    let value = value.pointer("/command/data").unwrap_or(value);
     let groups = value
         .get("groups")
         .and_then(Value::as_array)
@@ -372,6 +374,16 @@ fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> 
         if windows.is_empty() {
             continue;
         }
+        // Put the short (5-hour) window before the weekly one so summary meters show the
+        // immediate rate limit first.
+        windows.sort_by_key(|w| {
+            let lower = w.name.to_ascii_lowercase();
+            if lower.contains("five hour") || lower.contains("5h") || lower.contains("5 hours") {
+                0
+            } else {
+                1
+            }
+        });
         let reached = windows.iter().any(|window| window.used_percent >= 100.0);
         status.limits.push(LimitGroup {
             id: format!("antigravity-{index}"),
@@ -382,19 +394,25 @@ fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> 
             reached,
         });
     }
-    // The summary shows the most constrained group, while details retain every group.
-    if let Some(group) = status.limits.iter().max_by(|a, b| {
-        let fullest = |group: &LimitGroup| {
-            group
-                .windows
-                .iter()
-                .map(|w| w.used_percent)
-                .fold(0.0, f64::max)
-        };
-        fullest(a).total_cmp(&fullest(b))
-    }) {
-        status.rate_limits = group.windows.clone();
-    }
+    // Collect every group's buckets into summary `rate_limits` so all 5 Antigravity windows
+    // (Gemini 5h/weekly, Claude/GPT 5h/weekly, Argon weekly) appear on the account's main row.
+    // Disambiguate names across groups so shared bucket labels ("Five Hour Limit Remaining") do
+    // not collide on UI keys or hide which model family they belong to.
+    let multi_group = status.limits.len() > 1;
+    status.rate_limits = status
+        .limits
+        .iter()
+        .flat_map(|group| {
+            let group_name = group.name.as_deref().unwrap_or("Antigravity");
+            group.windows.iter().map(move |w| {
+                let mut renamed = w.clone();
+                if multi_group {
+                    renamed.name = summary_window_name(group_name, &w.name);
+                }
+                renamed
+            })
+        })
+        .collect();
     // A depleted model group does not exhaust the account's other groups.
     status.limit_reached = !status.limits.is_empty() && status.limits.iter().all(|g| g.reached);
     if status.limits.is_empty() {
@@ -405,7 +423,34 @@ fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> 
     Ok(())
 }
 
+fn summary_window_name(group: &str, bucket: &str) -> String {
+    let g = group.to_ascii_lowercase();
+    let b = bucket.to_ascii_lowercase();
+    let period = if b.contains("five hour") || b.contains("5h") || b.contains("5 hours") {
+        Some("5h")
+    } else if b.contains("weekly") || b.contains("week") {
+        Some("每周")
+    } else {
+        None
+    };
+    let family = if g.contains("argon") || b.contains("argon") {
+        "Argon"
+    } else if g.contains("claude") || g.contains("gpt") {
+        "Claude/GPT"
+    } else if g.contains("gemini") {
+        "Gemini"
+    } else {
+        group
+    };
+    match period {
+        Some(p) => format!("{family} {p}"),
+        None if b.contains(&family.to_ascii_lowercase()) => bucket.to_owned(),
+        None => format!("{family} · {bucket}"),
+    }
+}
+
 fn apply_credits(status: &mut AccountStatus, value: &Value) -> Result<(), String> {
+    let value = value.pointer("/command/data").unwrap_or(value);
     status.plan = value
         .get("plan_name")
         .and_then(Value::as_str)
@@ -605,6 +650,93 @@ else { console.log(JSON.stringify({status:'ERROR',error:'Eligibility check faile
         assert_eq!(status.rate_limits[0].window_seconds, None);
         assert!(apply_credits(&mut status, &serde_json::json!({})).is_err());
         assert!(status.credits.is_none());
+
+        // All Antigravity quota groups (Gemini Models, Claude and GPT models, Gemini 4 Argon)
+        // appear in `rate_limits` with disambiguated labels, 5-hour buckets before weekly ones.
+        let mut all_groups_status = accounts.status(&account(home.path())).await;
+        apply_quota(
+            &mut all_groups_status,
+            &serde_json::json!({"groups":[
+                {"name":"Gemini Models", "buckets":[
+                    {"name":"Weekly Limit Remaining", "remaining_fraction":0.95},
+                    {"name":"Five Hour Limit Remaining", "remaining_fraction":0.84}
+                ]},
+                {"name":"Claude and GPT models", "buckets":[
+                    {"name":"Weekly Limit Remaining", "remaining_fraction":0.96},
+                    {"name":"Five Hour Limit Remaining", "remaining_fraction":0.92}
+                ]},
+                {"name":"Gemini 4 Argon", "buckets":[
+                    {"name":"Gemini 4 Argon Weekly Limit", "remaining_fraction":0.77}
+                ]}
+            ]}),
+        )
+        .unwrap();
+        let names: Vec<&str> = all_groups_status
+            .rate_limits
+            .iter()
+            .map(|w| w.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "Gemini 5h",
+                "Gemini 每周",
+                "Claude/GPT 5h",
+                "Claude/GPT 每周",
+                "Argon 每周",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn command_data_envelope_from_agy_print_mode_is_unwrapped() {
+        let accounts = AntigravityAccounts::new(None, None, Vec::new());
+        let home = tempfile::tempdir().unwrap();
+        let mut status = accounts.status(&account(home.path())).await;
+        apply_quota(
+            &mut status,
+            &serde_json::json!({
+                "status": "SUCCESS",
+                "command": {
+                    "name": "usage",
+                    "data": {
+                        "groups": [{
+                            "name": "Gemini Models",
+                            "buckets": [{
+                                "id": "gemini-5h",
+                                "name": "Five Hour Limit Remaining",
+                                "window": "5h",
+                                "remaining_fraction": 0.96,
+                                "reset_time": "2026-11-16T18:28:04Z"
+                            }]
+                        }]
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(status.limits.len(), 1);
+        assert_eq!(status.limits[0].name.as_deref(), Some("Gemini Models"));
+        assert!((status.rate_limits[0].used_percent - 4.0).abs() < 1e-6);
+        apply_credits(
+            &mut status,
+            &serde_json::json!({
+                "status": "SUCCESS",
+                "command": {
+                    "name": "credits",
+                    "data": {
+                        "remaining_credits": 250,
+                        "plan_name": "Google AI Pro"
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(status.plan.as_deref(), Some("Google AI Pro"));
+        assert_eq!(
+            status.credits.as_ref().and_then(|c| c.balance.as_deref()),
+            Some("250")
+        );
     }
 
     #[tokio::test]

@@ -51,6 +51,9 @@ test("model ids read like names", () => {
   assert.equal(prettyModel("gpt-5-mini"), "GPT-5 Mini");
   assert.equal(prettyModel("opus"), "Opus");
   assert.equal(vendorLabel("codex"), "Codex");
+  assert.equal(vendorLabel("tokenworks"), "词元工坊");
+  assert.equal(vendorLabel("deepseek-harness"), "DeepSeek Harness");
+  assert.equal(vendorLabel("workbuddy-cn"), "WorkBuddy 国内版");
 });
 
 test("workers get the cheap sibling when there is one", () => {

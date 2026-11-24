@@ -756,6 +756,23 @@ export class MockBridge implements CrossAgentsBridge {
     if (method === "DELETE" && /^\/v1\/devices\/[^/]+$/.test(p) && s.revokeForbidden)
       return json(403, { error: { code: "forbidden", message: s.revokeForbidden } });
 
+    const dismissIssues = /^\/v1\/runs\/([^/]+)\/issues\/dismiss$/.exec(p);
+    if (dismissIssues && method === "POST") {
+      const runId = decodeURIComponent(dismissIssues[1]);
+      const run = s.runs.find((d) => d.run.id === runId)?.run;
+      const issues = s.lessons?.issues[runId] ?? [];
+      const keys = (body as { issues?: string[] })?.issues ?? [];
+      if (!run || !keys.length || keys.some((key) => !issues.some((i) => i.key === key)))
+        return json(400, { error: { code: "bad_request", message: "请选择当前问题" } });
+      const records = issues.filter((i) => keys.includes(i.key) && !i.triage).map((i) => {
+        i.triage = { issue: {run_id:runId,key:i.key}, result:"kept" as const,
+          why:"人工关闭通知（不代表问题已解决）", by:run.planner, at:new Date().toISOString() };
+        return i.triage;
+      });
+      this.emit({type:"issue.triaged",data:{run_id:runId,records}});
+      return json(200, {run_id:runId,issues,unsorted:issues.filter((i) => !i.triage).length});
+    }
+
     const integration = /^\/v1\/runs\/([^/]+)\/integration$/.exec(p);
     if (integration && method === "GET") return json(200, { outcome: "ok", snapshot: "base", integration: "worker", applied: this.appliedRuns.has(integration[1]) ? "worker" : null });
     const apply = /^\/v1\/runs\/([^/]+)\/apply$/.exec(p);

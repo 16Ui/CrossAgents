@@ -89,31 +89,68 @@ export function AvatarGallery() {
   );
 }
 
-/** The editor's choice of picture: one from the gallery, another at random, or back to text. */
+/** The editor's choice of picture: upload a new one, pick from the gallery, or back to text. */
 export function AvatarChoice({ current, onChoose, onText }: { current: string | null; onChoose: (id: string) => void; onText: () => void }) {
   const gallery = useAvatarGallery();
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
   const ids = gallery.data ?? [];
-  if (!ids.length) return null;
   const others = ids.filter((id) => id !== current);
+
+  async function uploadOne(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const image = await avatarFromFile(file);
+      const done = await api.uploadAvatars({ images: [image] });
+      gallery.reload();
+      let chosen = done.added[0];
+      if (!chosen && globalThis.crypto?.subtle) {
+        const bytes = Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        chosen = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+      if (chosen) onChoose(chosen);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="avatar-choice">
       <div className="avatar-choice-actions">
-        <button type="button" disabled={!others.length} onClick={() => onChoose(others[Math.floor(Math.random() * others.length)])}>
-          随机换一张
+        <button type="button" disabled={busy} onClick={() => input.current?.click()}>
+          <Icon name="plus" size={12} />
+          {busy ? "上传中…" : "上传头像图片"}
         </button>
+        <input ref={input} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={uploadOne} />
+        {ids.length > 0 && (
+          <button type="button" disabled={!others.length} onClick={() => onChoose(others[Math.floor(Math.random() * others.length)])}>
+            随机换一张
+          </button>
+        )}
         {current && (
           <button type="button" onClick={onText}>
-            用文字
+            用文字 / Emoji
           </button>
         )}
       </div>
-      <div className="gallery-grid compact" role="radiogroup" aria-label="从图库选头像">
-        {ids.map((id) => (
-          <button type="button" key={id} role="radio" aria-checked={id === current} className={`gallery-pick ${id === current ? "on" : ""}`} onClick={() => onChoose(id)}>
-            <GalleryThumb id={id} size={32} />
-          </button>
-        ))}
-      </div>
+      <ErrorBox error={error} />
+      {ids.length > 0 && (
+        <div className="gallery-grid compact" role="radiogroup" aria-label="从图库选头像">
+          {ids.map((id) => (
+            <button type="button" key={id} role="radio" aria-checked={id === current} className={`gallery-pick ${id === current ? "on" : ""}`} onClick={() => onChoose(id)}>
+              <GalleryThumb id={id} size={32} />
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

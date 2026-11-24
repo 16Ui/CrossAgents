@@ -29,6 +29,7 @@ pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod prices;
+pub mod project_quota;
 pub mod refresh;
 pub mod replies;
 pub mod resume;
@@ -69,6 +70,7 @@ use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
 use crossagents_plugins::cursor_account::CursorAccounts;
+use crossagents_plugins::deepseek_account::DeepseekAccounts;
 use crossagents_plugins::gemini_account::GeminiAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -185,6 +187,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 Arc::new(ClaudeAccounts::default()),
                 Arc::new(CodebuddyAccounts::default()),
                 Arc::new(CursorAccounts::default()),
+                Arc::new(DeepseekAccounts::default()),
                 Arc::new(GeminiAccounts::with_login(login_helper("gemini-login"))),
                 Arc::new(AntigravityAccounts::with_login(login_helper("agy-login"))),
             ],
@@ -368,6 +371,15 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     if let Err(err) = orchestrator.settle_claims().await {
         tracing::warn!(error = %err, "cannot drop stale claims");
     }
+    let shutdown = CancellationToken::new();
+    project_quota::start(
+        paths.home.clone(),
+        bus.clone(),
+        runtime.clone(),
+        accounts.clone(),
+        shutdown.clone(),
+    )
+    .await;
     orchestrator.resume().await?;
 
     let started_at = Utc::now();
@@ -382,7 +394,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     crate::paths::write_atomic(&paths.hub_file(), &serde_json::to_vec_pretty(&hub_file)?)
         .context("cannot write hub.json")?;
 
-    let shutdown = CancellationToken::new();
     // Vendor status/model probes can take tens of seconds. Serve first; account.created
     // events refresh clients as local logins are discovered, without delaying hub readiness.
     let account_start = tokio::spawn({
@@ -451,7 +462,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         link: Arc::new(link::LinkService::new(&paths.home)),
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
-    state.link.resume(&state, addr).await;
+    tokio::spawn({
+        let state = state.clone();
+        async move {
+            state.link.resume(&state, addr).await;
+        }
+    });
     let link = state.link.clone();
     bus.publish(EventKind::HubStarted {
         version: VERSION.into(),

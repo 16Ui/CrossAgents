@@ -8,6 +8,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { ACTIVE_RUN, useRunTree } from "./App";
 import { api } from "./api";
 import { useHubData } from "./hub";
+import { projectForWorkspace } from "./lib/expertise";
 import { homeOf, isChat, projectMembers, standaloneSessions, wsKey, wsName } from "./lib/projectView";
 export { homeOf, isChat, wsKey, wsName } from "./lib/projectView";
 import { useAgents } from "./components";
@@ -26,19 +27,25 @@ export const wsHref = (key: string) => `#/w/${encodeURIComponent(key)}`;
 export function useWorkspaces() {
   const tree = useRunTree();
   const agents = useAgents();
+  const projects = useHubData(() => api.projects(), [], (e) => e.type === "run.created", "projects");
   const runs = tree.data ?? [];
   const all = agents.data ?? [];
+  const projectList = projects.data ?? [];
   const map = new Map<string, Workspace>();
   const get = (path: string) => {
     const key = wsKey(path);
     let ws = map.get(key);
     if (!ws) {
-      ws = { key, path, name: wsName(path), runs: [], agents: [] };
+      const bound = projectForWorkspace(projectList, path);
+      ws = { key, path, name: bound?.name || wsName(path), runs: [], agents: [] };
       map.set(key, ws);
     }
     return ws;
   };
 
+  for (const p of projectList) {
+    for (const at of p.paths) if (at.node === "local" && at.path) get(at.path);
+  }
   for (const d of runs) get(d.run.repo).runs.push(d);
   const members = projectMembers(all, runs);
   for (const agent of all) if (!isChat(agent) && homeOf(agent)) get(homeOf(agent));

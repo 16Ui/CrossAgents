@@ -279,19 +279,28 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
     });
   };
   const once = async () => {
-    const { version, exe } = await ensureInstalled();
-    const hub = await probe(home);
+    const [hub, version] = await Promise.all([probe(home), exeVersion(shipped)]);
     const decision = plan(hub, version, home);
     log(`local hub: ${decision.action}${hub ? ` (running ${hub.version} from ${hub.file.exe ?? "unknown"})` : ""}, shipped ${version}`);
     dev = decision.action === "dev" ? { exe: decision.exe, running: decision.running, shipped: version } : undefined;
+    if (decision.action === "keep" || decision.action === "dev" || decision.action === "foreign" || decision.action === "newer") {
+      if (hub?.file.exe) {
+        void cleanup(home, [join(binRoot(home), version), join(hub.file.exe, "..")]).then((removed) => {
+          if (removed.length) log(`local hub: removed old versions ${removed.join(", ")}`);
+        });
+      }
+      return;
+    }
+    const exe = await install(shipped, home, version);
     if (decision.action === "replace") {
       // Agents in runtime hosts keep running; the new hub adopts them (docs/PROCESS-SUPERVISION.md).
       await run(exe, ["hub", "stop"]);
     }
     if (decision.action === "start" || decision.action === "replace") await run(exe, ["hub", "start"]);
     const now = await readHubFile(home);
-    const removed = await cleanup(home, [join(binRoot(home), version), ...(now?.exe ? [join(now.exe, "..")] : [])]);
-    if (removed.length) log(`local hub: removed old versions ${removed.join(", ")}`);
+    void cleanup(home, [join(binRoot(home), version), ...(now?.exe ? [join(now.exe, "..")] : [])]).then((removed) => {
+      if (removed.length) log(`local hub: removed old versions ${removed.join(", ")}`);
+    });
   };
 
   const check = () => {

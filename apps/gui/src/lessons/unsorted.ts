@@ -9,18 +9,21 @@ import type { TodoItem } from "../lib/todos";
 export function useUnsortedIssues(runs: readonly RunDetail[]): TodoItem[] {
   const ids = runs.map((d) => d.run.id);
   const counts = useHubData(
-    () => Promise.all(ids.map((id) => api.runIssues(id).then((r) => r.unsorted, () => 0))),
+    () => Promise.all(ids.map((id) => api.runIssues(id).then((r) => r.issues.filter((i) => !i.triage).map((i) => i.key), () => [] as string[]))),
     [ids.join(",")],
     (e) => e.type === "issue.recorded" || e.type === "issue.triaged",
   );
   const out: TodoItem[] = [];
   runs.forEach((d, i) => {
-    const n = counts.data?.[i] ?? 0;
+    const keys = counts.data?.[i] ?? [];
+    const n = keys.length;
     if (n > 0)
       out.push({
         id: `issues:${d.run.id}`,
         agent: d.run.planner,
         kind: "notice",
+        issueRun: d.run.id,
+        issueKeys: keys,
         summary: `${d.run.title}：${n} 条问题未整理`,
         action: "view",
         href: "#/runs/" + encodeURIComponent(d.run.id),

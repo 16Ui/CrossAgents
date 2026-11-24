@@ -64,14 +64,14 @@ fn planned_task_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "key": { "type": "string", "description": "Short unique id: a-z, 0-9, -" },
+            "key": { "type": "string", "minLength": 1, "maxLength": 24, "pattern": "^[a-z0-9-]+$", "description": "Short unique id, 1–24 characters: a-z, 0-9, -" },
             "title": { "type": "string" },
             "spec": spec_schema(),
             "depends_on": { "type": "array", "items": { "type": "string" } },
-            "assignee": { "type": "string", "description": "Name of a teammate whose specialty fits this task, or of any session (a new execution session copies its model); omit for the default worker. With fresh: false, any session of this workspace (see agent_list or your kickoff's sessions)" },
+            "assignee": { "type": "string", "description": "Name or ID of a teammate whose specialty fits this task, or of any session (a new execution session copies its model); omit for the default worker. With fresh: false, any session of this workspace (see agent_list or your kickoff's sessions)" },
             "fresh": { "type": "boolean", "description": "Default true: a new execution session of the assignee takes the task, from a clean context. false: the assignee itself does it, with its conversation; refused (with the reason) when it is busy with a person or another run, archived, or cannot move" },
             "restore": { "type": "boolean", "description": "With fresh: false, restore the assignee first if it is archived" },
-            "reviewer": { "type": "string", "description": "Name of a session to review it: a reviewer on your team (e.g. a security reviewer) or any other session" },
+            "reviewer": { "type": "string", "description": "Name or ID of a session to review it: a reviewer on your team (e.g. a security reviewer) or any other session" },
             "reviewer_fresh": { "type": "boolean", "description": "Like fresh, for the reviewer (default true)" }
         },
         "required": ["key", "title", "spec"]
@@ -195,12 +195,25 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "human_ask",
-        description: "Ask the person a question and end your turn; the answer arrives as a message. Give options (and a default) when you can: depending on the run's policy, an unanswered question falls back to its default after a while (you are told when that happens), or asking is not allowed and you must decide yourself.",
+        description: "Ask only when the person must decide. Lead with a plain-language question about a concrete action. In two or three short lines, say what is blocked, what the person should do, and what happens next. Put commands, error output and identifiers in detail. End your turn; the answer arrives as a message. Give options (and a default) when you can: depending on the run's policy, an unanswered question falls back to its default after a while (you are told when that happens), or asking is not allowed and you must decide yourself.",
         groups: ALL,
         schema: || {
             object(
                 json!({
-                    "text": { "type": "string" },
+                    "text": { "type": "string", "description": "Start with a short, plain-language question suitable for a desktop notification. Then give the exact action, why it is needed, and what happens next. Use the person's language. Do not put logs, paths, IDs, secrets or tool names in the first line." },
+                    "detail": { "type": "string", "description": "Optional technical details shown inside the app, such as commands, paths and error evidence." },
+                    "escalation": {
+                        "type": "object",
+                        "description": "Required for managed project leads. Use only for a concrete decision outside the lead's authority.",
+                        "properties": {
+                            "kind": { "enum": ["security", "irreversible", "external_commitment"] },
+                            "why_lead_cannot_decide": { "type": "string" },
+                            "impact": { "type": "string" },
+                            "decision": { "type": "string" }
+                        },
+                        "required": ["kind", "why_lead_cannot_decide", "impact", "decision"],
+                        "additionalProperties": false
+                    },
                     "options": { "type": "array", "items": { "type": "string" } },
                     "default": { "type": "string", "description": "Used if nobody answers in time; defaults to the first option." },
                     "task": { "type": "string" }
@@ -461,7 +474,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once. Write spec.scope.allow (the files each task will touch) for tasks that should run in parallel: a task with an empty allow may touch anything, so it runs one after another with every other task.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. The hub puts every task in this run repository. If source work belongs in another repository, coordinate a separate run in that repository or report that the workspace must be configured by the operator. A path in a task description cannot add workspace or file access. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once. Write spec.scope.allow (the files each task will touch) for tasks that should run in parallel: a task with an empty allow may touch anything, so it runs one after another with every other task.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -560,6 +573,20 @@ const TOOLS: &[ToolDef] = &[
             task_schema(
                 json!({ "path": { "type": "string" }, "from_line": { "type": "integer" }, "to_line": { "type": "integer" } }),
             )
+        },
+    },
+    ToolDef {
+        name: "task_command",
+        description: "Request one exact shell command in your active task's isolated worktree. CrossAgents runs it only with a matching existing grant or a live one-time approval. Include what it does and whether it will use the GPU or other shared resources. A denied, expired or disconnected request must not be retried unchanged.",
+        groups: RUN,
+        schema: || {
+            let mut schema = task_schema(json!({
+                "command": { "type": "string" },
+                "purpose": { "type": "string" },
+                "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 1800 }
+            }));
+            schema["required"] = json!(["task", "command", "purpose"]);
+            schema
         },
     },
     ToolDef {
@@ -1022,13 +1049,19 @@ pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
         .map_err(|e| CoreError::Conflict(format!("invalid arguments: {e}")))
 }
 
+fn legacy_command_tool(name: &str) -> bool {
+    matches!(name, "workspace_run" | "checks_run" | "task_verify" | "gui_screenshot")
+}
+
 impl Orchestrator {
     /// The tools `agent` may call, by its permission groups.
     pub async fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
         let groups = self.groups(agent).await;
+        let guarded_commands = self.guards_native_commands(agent).await;
         let mut tools: Vec<ToolInfo> = TOOLS
             .iter()
             .filter(|t| t.groups.iter().any(|g| groups.contains(g)))
+            .filter(|t| !guarded_commands || !legacy_command_tool(t.name))
             .map(|t| ToolInfo {
                 name: t.name.to_owned(),
                 description: t.description.to_owned(),
@@ -1128,6 +1161,9 @@ impl Orchestrator {
                 id: name.to_owned(),
             })?;
         let groups = self.groups(caller).await;
+        if legacy_command_tool(name) && self.guards_native_commands(caller).await {
+            return Err(CoreError::Conflict("Use task_command for protected command execution.".into()));
+        }
         if !tool.groups.iter().any(|g| groups.contains(g)) {
             return Err(CoreError::Conflict(format!(
                 "{name} is not available to you (your groups: {})",
@@ -1191,6 +1227,13 @@ impl Orchestrator {
                     tasks: Vec<PlannedTask>,
                 }
                 let a: A = args(input)?;
+                if a.tasks.iter().any(|task| !task.spec.acceptance.is_empty())
+                    && self.guards_native_commands(caller).await
+                {
+                    return Err(CoreError::Conflict(
+                        "In a protected native session, request executable checks through task_command instead of spec.acceptance.".into(),
+                    ));
+                }
                 let run = self.submit_plan(caller, a.tasks).await?;
                 let next = if run.status == RunStatus::AwaitingApproval {
                     "The plan waits for the person's approval. End your turn now."
@@ -1237,6 +1280,7 @@ impl Orchestrator {
             }
             "workspace_diff" => self.workspace_diff(caller, input).await,
             "workspace_read" => self.workspace_read(caller, input).await,
+            "task_command" => self.task_command(caller, input).await,
             "workspace_run" => self.workspace_run(caller, input).await,
             "checks_run" => self.checks_run(caller, input).await,
             "gui_screenshot" => self.gui_screenshot(caller, input).await,

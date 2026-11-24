@@ -204,6 +204,7 @@ fn parse_in(
         }
     }
     tracing::debug!(origin, name = manifest.name, "agent description");
+    let has_base = manifest.extends.is_some();
     Ok((
         manifest.name.clone(),
         PluginConfig {
@@ -212,12 +213,20 @@ fn parse_in(
             label: manifest.label,
             extends: manifest.extends,
             hidden: manifest.hidden,
-            provider: Some(manifest.provider.unwrap_or_else(|| manifest.name.clone())),
+            provider: if has_base {
+                manifest.provider
+            } else {
+                Some(manifest.provider.unwrap_or_else(|| manifest.name.clone()))
+            },
             model_env: manifest.model_env,
-            // Stored resolved: an ACP entry that says nothing is `acp-generic`, so a reader
-            // never has to guess the entry's protocol. Every native builtin names its driver
-            // explicitly; `None` only survives for entries a config overlay trimmed down.
-            driver: Some(manifest.driver.unwrap_or_default()),
+            // Stored resolved for standalone entries: an ACP entry that says nothing is
+            // `acp-generic`, so a reader never has to guess the entry's protocol. Entries
+            // with `extends` keep `None` until overlaid onto their base.
+            driver: if has_base {
+                manifest.driver
+            } else {
+                Some(manifest.driver.unwrap_or_default())
+            },
             native_command,
             efforts,
             min_version: manifest.min_version,

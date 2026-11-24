@@ -18,7 +18,12 @@ pub struct Guard {
 #[async_trait]
 impl PermissionHandler for Guard {
     async fn decide(&self, request: &PermissionRequest) -> PermissionDecision {
-        let Some(why) = danger(&request.kind, &request.title) else {
+        let reason = if request.kind == "acp_tool" {
+            Some("此操作需要确认")
+        } else {
+            danger(&request.kind, &request.title)
+        };
+        let Some(why) = reason else {
             return PermissionDecision::Allow;
         };
         let Some(orchestrator) = self.orchestrator.get() else {

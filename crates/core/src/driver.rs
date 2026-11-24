@@ -598,6 +598,12 @@ pub trait DriverSession: Send + Sync {
         None
     }
 
+    /// Returns `true` once if the driver proactively rotated/compacted its session context
+    /// after hitting a token budget cap, so the hub can inject a compact state snapshot.
+    fn take_context_rotated(&self) -> bool {
+        false
+    }
+
     /// Hands a message to the running turn, without starting a new one. Fails when the
     /// driver cannot, or no turn runs: the hub then queues the message. The driver reports
     /// [`SessionEventKind::SteerRead`] once the model has read it.

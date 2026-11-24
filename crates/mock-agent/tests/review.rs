@@ -123,6 +123,15 @@ async fn a_verified_report_is_reviewed_by_the_hub_and_the_lead_hears_one_quiet_l
         notice_to(boss.clone(), "waits for your acceptance"),
     )
     .await;
+    let submitted = w.find("a successful review tool reply", |event| {
+        matches!(&event.kind, EventKind::AgentToolUsed { tool, ok: true, .. } if tool == "review_submit")
+    }).await;
+    let EventKind::AgentToolUsed { id: reviewer, .. } = submitted.kind else {
+        unreachable!()
+    };
+    w.find("reviewer's turn ended normally", |event| {
+        matches!(&event.kind, EventKind::AgentTurnCompleted { id, stop_reason: crossagents_core::StopReason::EndTurn, .. } if *id == reviewer)
+    }).await;
     let d = detail(&t, &id).await;
     let task = &d["tasks"][0];
     assert_eq!(task["status"], "passed", "{task}");

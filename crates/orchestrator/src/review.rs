@@ -467,7 +467,7 @@ impl Orchestrator {
         let mut noted = false;
         if rework && reopen {
             if task.reviewer.take().is_some() {
-                self.let_go_task(run.id, task.id, Some(crossagents_core::ClaimRole::Reviewer))
+                self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
                     .await;
             }
             crossagents_core::Handoff::end(
@@ -498,8 +498,12 @@ impl Orchestrator {
             .await;
         }
         let text = remarks_text(&task, &remarks, note.as_deref(), rework && reopen);
-        if rework && reopen && self.rework_over(&run, worker).is_some() {
+        if rework && reopen {
             let envelope = crossagents_core::Envelope::new(MessageSource::Human, text);
+            // Reopening a task must attach its next attempt to the message that starts it.
+            // Otherwise a worker that returns without reporting leaves a phantom Running task.
+            crate::attempts::begin(&mut task, Some(worker), Some(envelope.id));
+            self.store.update_task(&task).await?;
             self.send_rework(&run, &task, worker, envelope, noted).await;
         } else {
             self.deliver(worker, MessageSource::Human, text);
@@ -1031,20 +1035,21 @@ impl Orchestrator {
         let issuer = task.issuer_or(run.planner);
         task.report.findings = findings.clone();
         task.report.verdict = Some(verdict);
+        task.report.verdict_by = Some(caller.id);
         task.report.review = Some(notes.clone());
-        // Its review is in; the run lets go of the reviewer.
+        // Store the verdict before scheduling cleanup. Closing this session
+        // synchronously would wait on the turn that is awaiting review_submit.
         task.reviewer = None;
-        let _ = self
-            .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
-            .await;
+        self.transition(&mut task, TaskStatus::Passed).await?;
+        if let Err(error) = self.let_go_after_review(run.id, caller.id).await {
+            tracing::warn!(task = %task.id, %error, "cannot schedule reviewer cleanup after verdict");
+        }
         if submission.approve {
-            self.transition(&mut task, TaskStatus::Passed).await?;
             self.ready_to_accept(&run, &task, issuer).await;
             return Ok(());
         }
         // Changes are needed: the work goes back along its route, as a failed check does
         // (`return_work`). The task is Passed while the route decides.
-        self.transition(&mut task, TaskStatus::Passed).await?;
         let head = format!(
             "Review of #{} (round {}): changes needed ({})",
             task.key,

@@ -166,9 +166,9 @@ pub struct RunPolicy {
     pub rework_new_session_tokens: Option<u64>,
 }
 
-/// The default of [`RunPolicy::rework_new_session_tokens`]. A starting point read off four
-/// tasks (docs/USAGE-TRIM.md §8), not a tuned value.
-pub const DEFAULT_REWORK_NEW_SESSION_TOKENS: u64 = 150_000;
+/// The default of [`RunPolicy::rework_new_session_tokens`]. Lowered to 50k to avoid
+/// dragging bloated contexts through multi-round rework loops.
+pub const DEFAULT_REWORK_NEW_SESSION_TOKENS: u64 = 50_000;
 
 fn default_ask_timeout() -> f64 {
     30.0
@@ -224,7 +224,7 @@ impl RunPolicy {
     }
 }
 
-/// Optional, bounded supervisor wakeups. The cap is per run, not per task.
+/// Optional, bounded supervisor wakeups. A new merged milestone replenishes the allowance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(default)]

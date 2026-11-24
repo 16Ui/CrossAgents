@@ -377,13 +377,14 @@ ipcMain.on("update:install", (event) => {
 /**
  * A system notice the page wants said out loud. It is shown only while the window is not in
  * front — with the window focused the page already shows it, and a toast would be noise.
- * Clicking brings the window forward and asks the page to open that conversation.
+ * Clicking brings the window forward and asks the page to open the work round or question.
  */
 const notices = new Set<Notification>();
 ipcMain.on("notify:show", (event, raw: unknown) => {
   if (!fromApp(event) || !raw || typeof raw !== "object") return;
-  const { title, body, agentId } = raw as { title?: unknown; body?: unknown; agentId?: unknown };
-  if (typeof title !== "string" || typeof body !== "string" || !title || !body) return;
+  const { title, body, href } = raw as { title?: unknown; body?: unknown; href?: unknown };
+  if (typeof title !== "string" || typeof body !== "string" || typeof href !== "string" || !title || !body) return;
+  if (!/^#\/(?:runs\/[^/#?]+(?:\/tasks\/[^/#?]+)?|s\/[^/#?]+\/questions\/[^/#?]+)$/.test(href)) return;
   const win = BrowserWindow.getAllWindows()[0];
   if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) return;
   if (!Notification.isSupported()) return;
@@ -397,7 +398,7 @@ ipcMain.on("notify:show", (event, raw: unknown) => {
   notification.on("click", () => {
     drop();
     showWindow();
-    if (typeof agentId === "string" && agentId) broadcast("notify:open", agentId);
+    broadcast("notify:open", href);
   });
   notification.show();
 });

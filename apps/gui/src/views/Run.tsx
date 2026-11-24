@@ -111,7 +111,7 @@ const CONTINUATION_LABELS: Record<string, Key> = {
   ended: "continuation.phase.ended", paused: "continuation.phase.paused", waiting_approval: "continuation.phase.waiting_approval",
   unavailable: "continuation.phase.unavailable", waiting_human: "continuation.phase.waiting_human", working: "continuation.phase.working",
   waiting_tasks: "continuation.phase.waiting_tasks", waiting_checks: "continuation.phase.waiting_checks", finalize: "continuation.phase.finalize",
-  continue: "continuation.phase.continue", recover: "continuation.phase.recover", exhausted: "continuation.phase.exhausted",
+  continue: "continuation.phase.continue", recover: "continuation.phase.recover", recovery_blocked: "continuation.phase.recovery_blocked", exhausted: "continuation.phase.exhausted",
 };
 
 /** What a continuation's phase says, in words; a phase the table lacks is shown as the hub sent it. */
@@ -167,7 +167,9 @@ export function RunView({
   const header = (
     <div className="topbar">
       <span className="title">{run.title}</span>
-      <StatusChip status={run.status} tone={runTone(run.status)} />
+      {run.continuation?.phase === "recovery_blocked"
+        ? <StatusChip status="paused" tone={runTone("paused")} />
+        : <StatusChip status={run.status} tone={runTone(run.status)} />}
       <RunModeTag run={run} />
       {run.work_id && (
         <a className="chip" href={`#/work/${encodeURIComponent(run.work_id)}/${encodeURIComponent(run.id)}`} title="查看所属工作组的全部轮次">
@@ -204,6 +206,11 @@ export function RunView({
     <div className="run-head">
       <RelayBanner run={run} tasks={tasks} agents={agents.data} />
       <InlineNeeds items={asks} agents={agents.data ?? []} />
+      {run.continuation?.phase === "recovery_blocked" && (
+        <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="恢复已暂停" summary={firstSentence(run.continuation.next_step)}>
+          <div style={{ whiteSpace: "pre-line" }}>{run.continuation.next_step}</div>
+        </OneLine>
+      )}
       {run.status === "paused" && (
         <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="已暂停" summary={firstSentence(run.note ?? "等你决定")}>
           {`${run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。`}

@@ -1081,7 +1081,7 @@ async fn agent_settings(
                 let normalized = crossagents_drivers::process::normalize_proxy_url(raw)
                     .ok_or_else(|| {
                         AppError::bad_request(format!(
-                            "invalid proxy address {raw:?} (expected \"direct\", http://host:port or socks5://host:port)"
+                            "invalid proxy address {raw:?} (expected \"auto\", \"direct\", http://host:port or socks5://host:port)"
                         ))
                     })?;
                 agent.config["proxy"] = normalized.into();
@@ -1851,10 +1851,9 @@ async fn delete_avatar(
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
     let registry = state.runtime.plugins();
-    let mut plugins = Vec::new();
-    for d in registry.defaults() {
-        plugins.push(plugin_info(&state, d.as_ref()).await);
-    }
+    let drivers = registry.defaults();
+    let plugins =
+        futures::future::join_all(drivers.iter().map(|d| plugin_info(&state, d.as_ref()))).await;
     Json(ListPluginsResponse { plugins })
 }
 
@@ -2029,18 +2028,26 @@ async fn self_check_plugin(
         kind: "plugin",
         id: name.clone(),
     })?;
-    // The cheapest model it offers here, else whatever the CLI picks by itself.
+    // The cheapest model it offers synchronously, else whatever the CLI picks by itself.
     let model = state
         .models
-        .filter(
-            &name,
-            crate::models::available(registry, &state.accounts, &name).await,
-        )
+        .filter(&name, driver.models())
         .into_iter()
-        .find(|model| model.contains("haiku") || model.contains("mini"));
+        .find(|model| {
+            let lower = model.to_ascii_lowercase();
+            lower.contains("haiku") || lower.contains("mini") || lower.contains("flash")
+        });
+    let pinned_site = registry.config(&name).and_then(|c| c.pinned_site());
     let started = state
         .self_check
-        .start(state.bus.clone(), state.cli_runs.clone(), driver, model)
+        .start(
+            state.bus.clone(),
+            state.cli_runs.clone(),
+            driver,
+            model,
+            Some(state.accounts.clone()),
+            pinned_site,
+        )
         .await;
     if !started {
         // Say which of the two reasons it was: "no reaction" on the row is exactly this
@@ -2490,9 +2497,13 @@ async fn update_run_policy(
             }
             run.config.policy.continuation = Some(policy);
         } else {
-            // Off leaves nothing behind for the clock (or a client) to read as still on.
             run.config.policy.continuation = None;
-            run.continuation = None;
+            // A temporary model in flight must still be restored after this turn.
+            if run.continuation.as_ref().and_then(|state| state.provider_fallback.as_ref())
+                .is_none_or(|probe| !probe.active)
+            {
+                run.continuation = None;
+            }
         }
     }
     if req.reset_attempts
@@ -2502,6 +2513,7 @@ async fn update_run_policy(
         // was told the old one ran out is forgotten, so the next exhaustion tells again.
         continuation.attempts = 0;
         continuation.exhausted_notified = false;
+        continuation.recovery = None;
         // Re-arming also lifts a pause the automation breaker set: the person has looked at
         // the failing stretch and asked for it to run again, so the counts start over.
         continuation.health = Default::default();
@@ -3350,9 +3362,8 @@ async fn my_tools(
     State(state): State<Arc<AppState>>,
     Extension(agent): Extension<Agent>,
 ) -> Json<ListToolsResponse> {
-    Json(ListToolsResponse {
-        tools: state.orchestrator.tools_for(&agent).await,
-    })
+    let tools = state.orchestrator.tools_for(&agent).await;
+    Json(ListToolsResponse { tools })
 }
 
 async fn call_tool(
@@ -3363,6 +3374,19 @@ async fn call_tool(
 ) -> ApiResult<Json<serde_json::Value>> {
     let input = body.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
     tracing::info!(agent = %agent.name, tool = %name, "tool call");
+    if name == "task_command" {
+        // A command waiting on the person belongs to this live request. Dropping the
+        // request drops its approval waiter and must never leave a detached executor.
+        let result = state.orchestrator.call_tool(&agent, &name, input).await;
+        if let Err(err) = state.bus.publish(EventKind::AgentToolUsed {
+            id: agent.id,
+            tool: name,
+            ok: result.is_ok(),
+        }).await {
+            tracing::warn!(error = %err, "cannot record a tool call");
+        }
+        return Ok(Json(result?));
+    }
     // Detached: a tool may end the caller's own session (e.g. a reviewer's verdict removes
     // the reviewer), which drops this request. The state change must still finish.
     let orchestrator = state.orchestrator.clone();
@@ -3601,12 +3625,9 @@ async fn egress_candidates(
     State(state): State<Arc<AppState>>,
 ) -> ApiResult<Json<EgressCandidatesResponse>> {
     let configured = collect_configured_proxies(&state).await;
-    let candidates = crate::egress::discover_candidates(
-        &state.home,
-        state.accounts.echo_url(),
-        &configured,
-    )
-    .await;
+    let candidates =
+        crate::egress::discover_candidates(&state.home, state.accounts.echo_url(), &configured)
+            .await;
     Ok(Json(EgressCandidatesResponse { candidates }))
 }
 

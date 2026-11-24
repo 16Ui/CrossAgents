@@ -214,6 +214,7 @@ async function send(method: Method, path: string, body?: unknown): Promise<{ sta
 
 /** Why requests are refused (the hub speaks another API version, see hub.ts); `/v1/info` still goes, to check again. */
 let refusal: string | undefined;
+const inflightGets = new Map<string, Promise<unknown>>();
 
 export function refuseRequests(reason: string | undefined) {
   refusal = reason;
@@ -221,6 +222,24 @@ export function refuseRequests(reason: string | undefined) {
 
 async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
+  if (method === "GET" && body === undefined && !opts.text) {
+    const existing = inflightGets.get(path);
+    if (existing) return existing as Promise<T>;
+    const promise = send(method, path, body)
+      .then((response) => {
+        if (response.status >= 400) {
+          const error = errorFromBody(response.status, response.body);
+          if (response.status === 403) noteForbidden(method, path, error.message);
+          throw error;
+        }
+        return (response.body ? JSON.parse(response.body) : undefined) as T;
+      })
+      .finally(() => {
+        inflightGets.delete(path);
+      });
+    inflightGets.set(path, promise);
+    return promise;
+  }
   const response = await send(method, path, body);
   if (response.status >= 400) {
     const error = errorFromBody(response.status, response.body);
@@ -533,6 +552,8 @@ export const api = {
     request<string>("GET", `/v1/projects/${enc(project)}/lessons/export`, undefined, { text: true }),
   /** The problems a run recorded (run notes under issue/) and how each was sorted. */
   runIssues: (run: string) => request<ListRunIssuesResponse>("GET", `/v1/runs/${enc(run)}/issues`),
+  dismissRunIssues: (run: string, issues: string[], why = "") =>
+    request<ListRunIssuesResponse>("POST", `/v1/runs/${enc(run)}/issues/dismiss`, { issues, why }),
 
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),

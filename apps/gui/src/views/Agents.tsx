@@ -28,11 +28,12 @@ import { ConnectExternal, ConnectInstructions } from "./External";
 import { prettyModel, vendorLabel } from "../lib/models";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
-import { permissionOf, type PermissionChoice } from "../lib/permission";
+import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
 import { useOperation } from "../lib/features";
 import { EgressPicker, proxyOf, shortProxyLabel } from "../egressPicks";
 import { PermissionPicks } from "../permissionPicks";
 import { unusableOf } from "../lib/unusable";
+import { useWorkspaces } from "../workspace";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
 
@@ -53,6 +54,15 @@ export function AgentsPage() {
   // Opened from a card's 「去设置权限」: the editor scrolls to the permission choice and focuses it.
   const [focusPermission, setFocusPermission] = useState(false);
   const [connect, setConnect] = useState<ConnectInfo>();
+  const [templates, setTemplates] = useState<AgentTemplate[]>(loadTemplates);
+  const saveTemplatesList = (next: AgentTemplate[]) => {
+    setTemplates(next);
+    persistTemplates(next);
+  };
+  const addTemplate = (draft: Omit<AgentTemplate, "id">) => {
+    const id = `tpl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    saveTemplatesList([...templates, { ...draft, id }]);
+  };
   const list = (agents.data ?? []).filter((a) => !a.archived_at);
   // A run that was deleted no longer exists to link to (docs/tasks/R1.md §3.2).
   const runIds = runs.data ?? new Set<string>();
@@ -71,6 +81,12 @@ export function AgentsPage() {
         这里列出 hub 里所有的 agent。不用手动组队：Chat 里的 agent 会按需要自己找帮手，也可以在消息里用 @ 点名；Work 的主导 agent 会自己招人。改名、换头像和人设也可以在会话里点头像。
       </p>
       <VendorClis />
+      <AgentTemplates
+        templates={templates}
+        onChange={saveTemplatesList}
+        allAgents={agents.data ?? []}
+        onCreated={() => agents.reload()}
+      />
       <div className="row">
         <span className="chip">{list.length} 个</span>
         <div className="spacer" />
@@ -96,7 +112,7 @@ export function AgentsPage() {
         {list.map((agent) =>
           typeof editing === "object" && editing.id === agent.id ? (
             <div key={agent.id} className="team-wide">
-              <ProfileEditor agent={agent} focusPermission={focusPermission} onDone={done} />
+              <ProfileEditor agent={agent} focusPermission={focusPermission} onSaveTemplate={addTemplate} onDone={done} />
             </div>
           ) : (
             <MemberCard
@@ -143,6 +159,7 @@ function VendorClis() {
       e.type.startsWith("account.") ||
       e.type === "plugin.changed" ||
       e.type.startsWith("cli.install."),
+    "plugins",
   );
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
@@ -163,10 +180,8 @@ function VendorClis() {
       api
         .selfCheckPlugin(plugin)
         .catch((err) => setCheckError({ plugin, text: errorText(err) }))
-        .finally(() => {
-          setChecking(undefined);
-          reload();
-        });
+        .then(() => reload())
+        .finally(() => setChecking(undefined));
     },
     [reload],
   );
@@ -237,23 +252,23 @@ function VendorClis() {
 
   const list = (plugins.data ?? []).filter((p) => p.cli);
   const installed = list.filter((p) => p.cli?.installed).length;
-  // Asking, either because the request is out or because a row's version is being probed.
+  // Asking, either because the request is out or because a row's version is being probed or self-checked.
   const probing = list.some((p) => p.cli?.probing);
+  const checkingAny = list.some((p) => p.cli?.self_checking);
+  const polling = probing || checkingAny;
   const detecting = asking || probing;
 
-  // A probe the hub started on its own (at startup) can end without an event reaching this
-  // window; while a row still says it is asking, read the list again now and then. This only
-  // reads: asking the hub to look again would start a new probe. The hub ends a probe within
-  // five seconds (its timeout), so this stops by itself; the count is a safety net only.
+  // A probe or self-check running on the hub can finish between events; poll gently while any
+  // row reports an active probe or self-check.
   useEffect(() => {
-    if (!probing) return;
+    if (!polling) return;
     let left = PROBE_POLLS;
     const timer = setInterval(() => {
       reload();
       if (--left <= 0) clearInterval(timer);
     }, 1500);
     return () => clearInterval(timer);
-  }, [probing, reload]);
+  }, [polling, reload]);
 
   if (!list.length) return null;
 
@@ -726,12 +741,23 @@ function MemberCard({
 }
 
 /** Edits an agent's card: name, face, persona, model. Agents are made by the start page or by a lead. */
-export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent; onDone: () => void; focusPermission?: boolean }) {
+export function ProfileEditor({
+  agent,
+  onDone,
+  focusPermission,
+  onSaveTemplate,
+}: {
+  agent: Agent;
+  onDone: () => void;
+  focusPermission?: boolean;
+  onSaveTemplate?: (tpl: Omit<AgentTemplate, "id">) => void;
+}) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
   const [name, setName] = useState(agent.name);
   const [error, setError] = useState<string>();
+  const [savedTpl, setSavedTpl] = useState(false);
   const [busy, setBusy] = useState(false);
   const remove = useArmed();
   const models = plugins.data?.find((p) => p.name === agent.plugin)?.models ?? [];
@@ -886,6 +912,35 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
         <button type="button" className="ghost" onClick={() => onDone()}>
           取消
         </button>
+        {onSaveTemplate && (
+          <button
+            type="button"
+            className="ghost"
+            disabled={busy}
+            onClick={() => {
+              const raw = (name.trim() || agent.name).replace(/-\d+$/, "") || name.trim() || agent.name;
+              onSaveTemplate({
+                prefix: raw,
+                title: profile.title ?? "",
+                plugin: agent.plugin,
+                model: modelValue,
+                role: agent.role === "planner" ? "planner" : "worker",
+                permission,
+                avatar: profile.avatar ?? null,
+                avatar_image: profile.avatar_image ?? null,
+                color: profile.color ?? null,
+                persona: profile.persona ?? "",
+                account:
+                  typeof (agent.config as Record<string, unknown> | null)?.account === "string"
+                    ? ((agent.config as Record<string, unknown>).account as string)
+                    : defaultAccountForPlugin(agent.plugin),
+              });
+              setSavedTpl(true);
+            }}
+          >
+            {savedTpl ? "已存为模板 ✓" : "存为模板"}
+          </button>
+        )}
         <div className="spacer" />
         <button
           type="button"
@@ -961,5 +1016,607 @@ function ModelField({ value, models, plugin, onChange }: { value: string; models
         <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="插件默认" />
       )}
     </Field>
+  );
+}
+
+type AgentTemplate = {
+  id: string;
+  prefix: string;
+  title: string;
+  plugin: string;
+  model: string;
+  role?: "planner" | "worker";
+  account?: string | null;
+  permission: PermissionChoice;
+  avatar: string | null;
+  avatar_image: string | null;
+  color: string | null;
+  persona: string;
+};
+
+const TEMPLATES_KEY = "crossagents.agentTemplates.v3";
+
+function defaultAccountForPlugin(plugin: string): string | null {
+  if (plugin === "workbuddy-cn") return "codebuddy-cn";
+  if (plugin === "workbuddy-intl") return "codebuddy-intl";
+  return null;
+}
+
+/**
+ * Built-in recommended capability hierarchy and WorkBuddy offload templates:
+ * Tier 1..4 ordered from highest to lowest capability, plus WorkBuddy CN/INTL
+ * DeepSeek Flash & GLM 5.3 Flash templates to share Tokenworks load.
+ * Higher tiers orchestrate, plan, and review; lower tiers execute and test.
+ */
+const DEFAULT_TEMPLATES: AgentTemplate[] = [
+  {
+    "id": "tpl-managed-lead",
+    "prefix": "Codex-GPT6.2-项目总工",
+    "title": "项目总工",
+    "plugin": "codex",
+    "model": "gpt-6.2-sol",
+    "account": "codex",
+    "role": "planner",
+    "permission": "guard",
+    "avatar": "🧭",
+    "avatar_image": null,
+    "color": "indigo",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你是唯一总负责人。把授权目标拆成有输入、文件范围、接口、依赖、执行者、验收标准的有界任务，并使用平台任务工具真正指派；不能只口头安排。负责复杂架构、集成和最终交付，明确分出快模型可承担的工作。默认最多两项执行、共享构建目录和GPU测量串行，除非项目另有明确配置。阶段验收后自动推进后续任务，必要时用同一work的run_next接续，不每轮索取“继续”，也不完成后制造新目标。留检查点以便恢复；同因连续失败两次先诊断，不无限重试。监控实际进展，不把running标签当工作证据；区分限流、额度、登录、配置、调度错误。定期issue_pending，值得复用的整理为排障记录，其他用issue_keep注明原因关闭通知；不替用户批准危险操作。普通决策自主，真实权限或外部输入阻塞及时报告并继续独立工作。"
+  },
+  {
+    "id": "tpl-managed-gi",
+    "prefix": "Codex-GPT6.2-光照研发",
+    "title": "光照研发",
+    "plugin": "codex",
+    "model": "gpt-6.2-sol",
+    "account": "codex",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "💡",
+    "avatar_image": null,
+    "color": "amber",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你负责实时渲染/GI算法、Shader、GPU资源同步、时空重建、性能定位与复杂实现。先读已有实现与任务接口，不把已有能力冒称新增。不靠过度模糊掩盖追踪/重投影错误；明确空间、颜色/能量、深度、运动向量和历史有效性约定。逐项消融，分别计入追踪、重建、资源与整帧开销。以固定场景和重复输入验证画质、稳定性与耗时；负收益如实记录。低推理机械工作交总工拆分，不递归招人；只在分配文件范围写入。"
+  },
+  {
+    "id": "tpl-managed-ue",
+    "prefix": "Codex-GPT6.2-引擎接入",
+    "title": "引擎接入",
+    "plugin": "codex",
+    "model": "gpt-6.2-sol",
+    "account": "codex",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "🔌",
+    "avatar_image": null,
+    "color": "teal",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你负责引擎接口、UE插件/渲染扩展、资源输入、合成与跨引擎适配。先核实本机引擎版本和公开接口；优先独立工程，不覆盖课程工程或共享引擎安装。明确深度、法线、材质、HDR、运动向量、预曝光、视口与每视图历史契约。编译成功不等于Shader/RDG/场景运行验证通过；给出真实日志、退出码、截图或GPU读回证据及未覆盖项。运行前取得共享GPU使用窗口，超时只处理自己启动并记录的进程；冷编译用可恢复缓存和有界续验，不反复从零开始。"
+  },
+  {
+    "id": "tpl-managed-review",
+    "prefix": "Codex-GPT6.2-质量验收",
+    "title": "质量验收",
+    "plugin": "codex",
+    "model": "gpt-6.2-sol",
+    "account": "codex",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "🔍",
+    "avatar_image": null,
+    "color": "emerald",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你是独立审查者。读取真实最终差异、基线和产物，不仅转述作者成功回复。核对最终源码/提交或文件hash与被验证程序是否一致，验证命令、退出码、适用范围、边界与回归。指出阻断缺陷、证据缺口和可接受局限，区分代码问题、环境阻塞和未验证。性能对比固定其他变量，计入准备开销，报告中位数/P95与画质代价；不虚构收益。未获写租约不修改被审文件；用结构化任务审查回报总工，不能自行批准发布。"
+  },
+  {
+    "id": "tpl-managed-advisor",
+    "prefix": "Gemini-Hyd-M-架构顾问",
+    "title": "架构顾问（按需）",
+    "plugin": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "account": "agy",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "🧠",
+    "avatar_image": null,
+    "color": "violet",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你是团队唯一稀缺Gemini顾问，默认待命。只接总工提出的明确架构取舍、论文理解、复杂根因假设等咨询；每个问题先一轮，使用必要摘录和证据，不请求整仓/完整历史，不日常编码或反复扫描。不接替GPT研发主力，不因其他模型限额升级或切换账号。给出依据、不同选项代价、未知项和最小验证建议；建议不等于已实测，也不宣称比主力更准确。"
+  },
+  {
+    "id": "tpl-managed-hyd-lead",
+    "prefix": "Gemini-Hyd-M-项目总工",
+    "title": "项目总工",
+    "plugin": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "account": "agy",
+    "role": "planner",
+    "permission": "guard",
+    "avatar": "🧭",
+    "avatar_image": null,
+    "color": "indigo",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你是唯一总负责人。把授权目标拆成有输入、文件范围、接口、依赖、执行者、验收标准的有界任务，并使用平台任务工具真正指派；不能只口头安排。负责复杂架构、集成和最终交付，明确分出快模型可承担的工作。默认最多两项执行、共享构建目录和GPU测量串行，除非项目另有明确配置。阶段验收后自动推进后续任务，必要时用同一work的run_next接续，不每轮索取“继续”，也不完成后制造新目标。留检查点以便恢复；同因连续失败两次先诊断，不无限重试。监控实际进展，不把running标签当工作证据；区分限流、额度、登录、配置、调度错误。定期issue_pending，值得复用的整理为排障记录，其他用issue_keep注明原因关闭通知；不替用户批准危险操作。普通决策自主，真实权限或外部输入阻塞及时报告并继续独立工作。"
+  },
+  {
+    "id": "tpl-managed-hyd-gi",
+    "prefix": "Gemini-Hyd-M-光照研发",
+    "title": "光照研发",
+    "plugin": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "account": "agy",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "💡",
+    "avatar_image": null,
+    "color": "amber",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你负责实时渲染/GI算法、Shader、GPU资源同步、时空重建、性能定位与复杂实现。先读已有实现与任务接口，不把已有能力冒称新增。不靠过度模糊掩盖追踪/重投影错误；明确空间、颜色/能量、深度、运动向量和历史有效性约定。逐项消融，分别计入追踪、重建、资源与整帧开销。以固定场景和重复输入验证画质、稳定性与耗时；负收益如实记录。低推理机械工作交总工拆分，不递归招人；只在分配文件范围写入。"
+  },
+  {
+    "id": "tpl-managed-hyd-ue",
+    "prefix": "Gemini-Hyd-M-引擎接入",
+    "title": "引擎接入",
+    "plugin": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "account": "agy",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "🔌",
+    "avatar_image": null,
+    "color": "teal",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你负责引擎接口、UE插件/渲染扩展、资源输入、合成与跨引擎适配。先核实本机引擎版本和公开接口；优先独立工程，不覆盖课程工程或共享引擎安装。明确深度、法线、材质、HDR、运动向量、预曝光、视口与每视图历史契约。编译成功不等于Shader/RDG/场景运行验证通过；给出真实日志、退出码、截图或GPU读回证据及未覆盖项。运行前取得共享GPU使用窗口，超时只处理自己启动并记录的进程；冷编译用可恢复缓存和有界续验，不反复从零开始。"
+  },
+  {
+    "id": "tpl-managed-hyd-review",
+    "prefix": "Gemini-Hyd-M-质量验收",
+    "title": "质量验收",
+    "plugin": "antigravity",
+    "model": "gemini-4-hydrogen-medium",
+    "account": "agy",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "🔍",
+    "avatar_image": null,
+    "color": "emerald",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n你是独立审查者。读取真实最终差异、基线和产物，不仅转述作者成功回复。核对最终源码/提交或文件hash与被验证程序是否一致，验证命令、退出码、适用范围、边界与回归。指出阻断缺陷、证据缺口和可接受局限，区分代码问题、环境阻塞和未验证。性能对比固定其他变量，计入准备开销，报告中位数/P95与画质代价；不虚构收益。未获写租约不修改被审文件；用结构化任务审查回报总工，不能自行批准发布。"
+  },
+  {
+    "id": "tpl-managed-gemini-fast",
+    "prefix": "Gemini-3.8F-快速辅助",
+    "title": "快速辅助",
+    "plugin": "antigravity",
+    "model": "gemini-3.8-flash",
+    "account": "agy",
+    "role": "worker",
+    "permission": "guard",
+    "avatar": "⚡",
+    "avatar_image": null,
+    "color": "sky",
+    "persona": "你是CrossAgents团队成员。先读当前工作目录的AGENTS.md、项目任务书和该任务的持久检查点；模板不绑定某个项目，不读取无关项目资料。按平台-模型-职责编号命名，派工使用稳定ID或agent_list的当前名称。\n按任务难度派工。主力负责架构、算法、同步、复杂定位与独立验收。低推理工作优先交 Gemini 3.8 Flash，复杂研发与独立验收交 GPT-6.2-Sol / Gemini 4 Hydrogen；仅使用 GPT 与 Gemini。交接前先确认原写者停止、保存检查点，遵守项目暂停规则。\n文件单写者；保留用户已有修改和可恢复基线，不reset/clean、强制覆盖或全量提交。遵守宿主权限和项目操作审批，模板不授权自动发布、推送、购买额度或降低安全设置。验证实际文件、命令退出码及产物，区分已实现、已编译、已运行和未验证。长日志留文件，回报使用简洁中文。\n\n负责定点核查、工件验证、数据整理和边界清楚的常规修改。发现跨模块或算法问题交总工判断，按任务给出文件、证据与验证结果。"
+  }
+];
+
+const MODEL_TEMPLATE_MIGRATION_KEY = "crossagents.agentTemplates.gptGeminiOnly.v1";
+
+function loadTemplates(): AgentTemplate[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? "[]");
+    if (Array.isArray(raw)) {
+      const saved = raw as AgentTemplate[];
+      if (!localStorage.getItem(MODEL_TEMPLATE_MIGRATION_KEY)) {
+        const filtered = saved.filter(
+          (t) =>
+            !["tpl-managed-fast", "tpl-managed-cn", "tpl-managed-intl"].includes(t.id) &&
+            !["tokenworks", "workbuddy-cn", "workbuddy-intl"].includes(t.plugin)
+        );
+        const updated = filtered.map((template) => {
+          const managed = DEFAULT_TEMPLATES.find((item) => item.id === template.id);
+          if (managed) return { ...template, prefix: managed.prefix, model: managed.model, persona: managed.persona };
+          return template.plugin === "codex" && template.model === "gpt-6.1-sol"
+            ? { ...template, model: "gpt-6.2-sol", prefix: template.prefix.replace("GPT6.1", "GPT6.2") }
+            : template;
+        });
+        const next = [...updated, ...DEFAULT_TEMPLATES.filter((item) => !updated.some((t) => t.id === item.id))];
+        persistTemplates(next);
+        localStorage.setItem(MODEL_TEMPLATE_MIGRATION_KEY, "1");
+        return next;
+      }
+      return saved;
+    }
+  } catch {
+    // Fall through to the default preset list if storage is unavailable or invalid.
+  }
+  const defaults = DEFAULT_TEMPLATES.map((template) => ({ ...template }));
+  persistTemplates(defaults);
+  return defaults;
+}
+
+function persistTemplates(list: AgentTemplate[]) {
+  try {
+    localStorage.setItem(TEMPLATES_KEY, JSON.stringify(list));
+  } catch {
+    // Ignore storage quota / private mode failures.
+  }
+}
+
+function templatePreviewAgent(tpl: Omit<AgentTemplate, "id">): Agent {
+  return {
+    node: null,
+    id: "preview",
+    name: tpl.prefix.trim() || "agent",
+    name_source: "chosen",
+    topic: null,
+    archived_at: null,
+    home: "",
+    plugin: tpl.plugin,
+    driver: null,
+    model: tpl.model || null,
+    role: tpl.role ?? "worker",
+    cwd: "",
+    config: {},
+    status: "stopped",
+    created_at: "",
+    profile: {
+      display_name: null,
+      title: tpl.title.trim() || null,
+      avatar: tpl.avatar,
+      avatar_image: tpl.avatar_image,
+      color: tpl.color,
+      persona: tpl.persona.trim() || null,
+    },
+  };
+}
+
+function AgentTemplates({
+  templates,
+  onChange,
+  allAgents,
+  onCreated,
+}: {
+  templates: AgentTemplate[];
+  onChange: (next: AgentTemplate[]) => void;
+  allAgents: Agent[];
+  onCreated: () => void;
+}) {
+  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const { list: workspaces } = useWorkspaces();
+  const [editing, setEditing] = useState<Omit<AgentTemplate, "id"> & { id?: string }>();
+  const [spawningId, setSpawningId] = useState<string>();
+  const [targetCwd, setTargetCwd] = useState("");
+  const [count, setCount] = useState(4);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [note, setNote] = useState<string>();
+
+  const pluginList = (plugins.data ?? []).filter((p) => p.cli?.installed !== false);
+  const defaultPlugin = pluginList[0]?.name ?? plugins.data?.[0]?.name ?? "claude";
+  const pickFolder = window.crossagents?.pickFolder;
+
+  const openNew = () => {
+    setError(undefined);
+    setNote(undefined);
+    setEditing({
+      prefix: "worker",
+      title: "",
+      plugin: defaultPlugin,
+      model: "",
+      role: "worker",
+      account: defaultAccountForPlugin(defaultPlugin),
+      permission: null,
+      avatar: null,
+      avatar_image: null,
+      color: null,
+      persona: "",
+    });
+  };
+
+  const restoreDefaults = () => {
+    setEditing(undefined);
+    setSpawningId(undefined);
+    setError(undefined);
+    onChange(DEFAULT_TEMPLATES.map((t) => ({ ...t })));
+    setNote(`已恢复 ${DEFAULT_TEMPLATES.length} 套已确定的团队模板。`);
+  };
+
+  const openSpawn = (tpl: AgentTemplate) => {
+    setError(undefined);
+    setNote(undefined);
+    setSpawningId(spawningId === tpl.id ? undefined : tpl.id);
+    if (!targetCwd && workspaces[0]?.path) setTargetCwd(workspaces[0].path);
+  };
+
+  const saveEdit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    const prefix = editing.prefix.trim();
+    if (!prefix) {
+      setError("模板前缀不能为空（例如 coder、frontend）。");
+      return;
+    }
+    const clean: Omit<AgentTemplate, "id"> = { ...editing, prefix };
+    if (editing.id) {
+      onChange(templates.map((t) => (t.id === editing.id ? { ...clean, id: editing.id! } : t)));
+    } else {
+      const id = `tpl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      onChange([...templates, { ...clean, id }]);
+    }
+    setEditing(undefined);
+    setError(undefined);
+  };
+
+  const spawnBatch = async (tpl: AgentTemplate) => {
+    const qty = Math.max(1, Math.min(10, Math.round(count)));
+    const prefix = tpl.prefix.trim();
+    if (!prefix) return;
+    setBusy(true);
+    setError(undefined);
+    setNote(undefined);
+    try {
+      const taken = new Set(allAgents.map((a) => a.name.toLowerCase()));
+      const created: string[] = [];
+      const boundAccount = tpl.account?.trim() || defaultAccountForPlugin(tpl.plugin);
+      const baseConfig = boundAccount ? { account: boundAccount } : {};
+      let n = 1;
+      for (let i = 0; i < qty; i++) {
+        while (taken.has(`${prefix}${String(n).padStart(2, "0")}`.toLowerCase())) n++;
+        const nextName = `${prefix}${String(n).padStart(2, "0")}`;
+        taken.add(nextName.toLowerCase());
+        n++;
+        const agent = await api.createAgent({
+          name: nextName,
+          plugin: tpl.plugin,
+          driver: null,
+          model: tpl.model.trim() || null,
+          role: tpl.role ?? "worker",
+          cwd: targetCwd.trim(),
+          config: configWithPermission(baseConfig, tpl.permission),
+          profile: {
+            display_name: null,
+            title: tpl.title.trim() || null,
+            avatar: tpl.avatar?.trim() || null,
+            avatar_image: tpl.avatar_image,
+            color: tpl.color,
+            persona: tpl.persona.trim() || null,
+          },
+        });
+        created.push(`@${agent.name}`);
+      }
+      setSpawningId(undefined);
+      setNote(`已按模板「${tpl.prefix}」创建 ${created.join("、")}`);
+      onCreated();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const editedModels = editing
+    ? reasoningModels(
+        editing.plugin,
+        plugins.data?.find((p) => p.name === editing.plugin)?.models ?? [],
+        editing.model,
+      )
+    : [];
+
+  return (
+    <section className="settings-section">
+      <div className="settings-head">
+        <h2>默认智能体模板</h2>
+        <span className="chip">{templates.length} 个</span>
+        <div className="spacer" />
+        {!editing && (
+          <>
+            <button
+              type="button"
+              className="ghost"
+              onClick={restoreDefaults}
+              title="恢复 Codex 6.2 Sol、Hydrogen Medium、Gemini 3.8 Flash、词元与 WorkBuddy 模板"
+            >
+              恢复推荐预设
+            </button>
+            <button type="button" className="ghost" onClick={openNew} title="设置一套默认头像、人设、模型和权限模板，随时按编号批量创建到不同项目">
+              + 新建模板
+            </button>
+          </>
+        )}
+      </div>
+      <p className="setting-hint" style={{ margin: 0 }}>
+        定义一套默认智能体人设（前缀、头像、默认提示词、模型与权限），需要时可一键为指定项目生成编号为 1、2、3、4 的一组实例；也可在下方任意现有智能体点「编辑 → 存为模板」。
+      </p>
+      <ErrorBox error={error} />
+      {note && <div className="cli-done ok">{note}</div>}
+      {editing && (
+        <form className="card form editor" onSubmit={saveEdit}>
+          <div className="editor-who">
+            <Avatar agent={templatePreviewAgent(editing)} size={52} />
+            <div className="editor-face">
+              <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+                <Field label="名称前缀（生成 1、2、3、4）">
+                  <input value={editing.prefix} onChange={(e) => setEditing({ ...editing, prefix: e.target.value })} maxLength={24} placeholder="coder" />
+                </Field>
+                <Field label="备注头衔（可选）">
+                  <input value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} placeholder="比如：后端开发" />
+                </Field>
+                <Field label="头像（emoji 或两个字母）">
+                  <input
+                    value={editing.avatar ?? ""}
+                    onChange={(e) =>
+                      setEditing({
+                        ...editing,
+                        avatar: e.target.value,
+                        ...(e.target.value.trim() ? { avatar_image: null } : {}),
+                      })
+                    }
+                    placeholder="🤖"
+                    maxLength={8}
+                  />
+                </Field>
+              </div>
+              <AvatarChoice
+                current={editing.avatar_image}
+                onChoose={(id) => setEditing({ ...editing, avatar_image: id })}
+                onText={() =>
+                  setEditing({
+                    ...editing,
+                    avatar_image: null,
+                    avatar: editing.avatar || Array.from(editing.prefix.trim() || "A")[0]?.toUpperCase() || null,
+                  })
+                }
+              />
+              <div className="swatches" role="radiogroup" aria-label="头像颜色">
+                {AVATAR_COLORS.map((c) => (
+                  <button
+                    type="button"
+                    key={c}
+                    className={`swatch av-${c} ${editing.color === c ? "on" : ""}`}
+                    onClick={() => setEditing({ ...editing, color: editing.color === c ? null : c })}
+                    aria-label={c}
+                    aria-checked={editing.color === c}
+                    role="radio"
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <Field label="CLI / 站点入口">
+              <select
+                value={editing.plugin}
+                onChange={(e) =>
+                  setEditing({
+                    ...editing,
+                    plugin: e.target.value,
+                    model: "",
+                    account: defaultAccountForPlugin(e.target.value),
+                  })
+                }
+              >
+                {(plugins.data ?? []).map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <ModelField
+              value={editing.model}
+              models={editedModels}
+              plugin={editing.plugin}
+              onChange={(m) => setEditing({ ...editing, model: m })}
+            />
+          </div>
+          <Field label="默认提示词 / 开场说明（按此模板创建的实例都会带上）">
+            <textarea
+              rows={4}
+              value={editing.persona}
+              onChange={(e) => setEditing({ ...editing, persona: e.target.value })}
+              placeholder="例如：你负责代码实现与单元测试，修改前先阅读相邻文件与规范……"
+            />
+          </Field>
+          <div className="field">
+            <span>默认权限</span>
+            <PermissionPicks
+              value={editing.permission}
+              onChange={(p) => setEditing({ ...editing, permission: p })}
+              plugin={editing.plugin}
+              radioName="template-permission"
+            />
+          </div>
+          <div className="row">
+            <button type="submit" className="primary">
+              保存模板
+            </button>
+            <button type="button" className="ghost" onClick={() => setEditing(undefined)}>
+              取消
+            </button>
+          </div>
+        </form>
+      )}
+      {templates.length > 0 && (
+        <div className="team-grid">
+          {templates.map((tpl) => {
+            const pInfo = plugins.data?.find((p) => p.name === tpl.plugin);
+            return (
+              <div className="member template-card" key={tpl.id}>
+                <div className="member-head">
+                  <Avatar agent={templatePreviewAgent(tpl)} size={36} />
+                  <div className="member-who">
+                    <span className="member-name">{tpl.prefix}-1..N</span>
+                    {tpl.title && <span className="member-title muted">{tpl.title}</span>}
+                  </div>
+                  <VendorMark plugin={pInfo?.provider ?? tpl.plugin} entry={tpl.plugin} size={14} />
+                </div>
+                {tpl.persona && <p className="member-persona">{tpl.persona}</p>}
+                <div className="member-foot">
+                  <span className="muted small">{tpl.model || pInfo?.label || tpl.plugin}</span>
+                  <div className="spacer" />
+                  <button type="button" className="ghost small" onClick={() => setEditing(tpl)}>
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost small danger"
+                    onClick={() => onChange(templates.filter((t) => t.id !== tpl.id))}
+                  >
+                    删除
+                  </button>
+                  <button type="button" className="primary small" onClick={() => openSpawn(tpl)}>
+                    批量创建
+                  </button>
+                </div>
+                {spawningId === tpl.id && (
+                  <div className="template-spawn">
+                    <Field label="目标项目目录（留空则为独立会话）">
+                      <div className="row" style={{ gap: 6 }}>
+                        <input
+                          value={targetCwd}
+                          onChange={(e) => setTargetCwd(e.target.value)}
+                          list="template-workspaces"
+                          placeholder="D:\project\my-app"
+                          style={{ flex: 1, minWidth: 0 }}
+                        />
+                        {pickFolder && (
+                          <button
+                            type="button"
+                            className="ghost small"
+                            onClick={async () => {
+                              const picked = await pickFolder();
+                              if (picked) setTargetCwd(picked);
+                            }}
+                          >
+                            选目录
+                          </button>
+                        )}
+                      </div>
+                      <datalist id="template-workspaces">
+                        {workspaces.map((ws) => (
+                          <option key={ws.key} value={ws.path}>
+                            {ws.name}
+                          </option>
+                        ))}
+                      </datalist>
+                    </Field>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <label className="small muted">数量</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={count}
+                        onChange={(e) => setCount(Number(e.target.value) || 1)}
+                        style={{ width: 64 }}
+                      />
+                      <div className="spacer" />
+                      <button type="button" className="ghost small" disabled={busy} onClick={() => setSpawningId(undefined)}>
+                        取消
+                      </button>
+                      <button type="button" className="primary small" disabled={busy} onClick={() => void spawnBatch(tpl)}>
+                        {busy ? "创建中…" : `创建 ${Math.max(1, Math.min(10, Math.round(count)))} 个`}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }

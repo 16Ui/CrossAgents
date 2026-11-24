@@ -189,9 +189,9 @@ export interface CrossAgentsBridge {
    * A system notice (a toast). The main process drops it while the window is in front: with
    * the window focused the page already shows what happened.
    */
-  notify?(notice: { title: string; body: string; agentId?: string }): void;
-  /** The person clicked a notice: open that conversation. Returns an unsubscribe function. */
-  onNoticeOpen?(listener: (agentId: string) => void): () => void;
+  notify?(notice: { title: string; body: string; href: string }): void;
+  /** The person clicked a notice: open the work round or question. Returns an unsubscribe function. */
+  onNoticeOpen?(listener: (href: string) => void): () => void;
   /** The GUI's update, and checking or installing it. `null`: this build does not update itself. */
   updates?: {
     get(): Promise<UpdateState | null>;

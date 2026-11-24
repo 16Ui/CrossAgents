@@ -2,8 +2,28 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
+
+/// Sentinel value stored on accounts/agents when the hub should dynamically pick the
+/// lowest-latency working proxy from egress candidate probes.
+pub const AUTO_PROXY: &str = "auto";
+
+static AUTO_BEST_PROXY: OnceLock<RwLock<Option<String>>> = OnceLock::new();
+
+fn auto_best_slot() -> &'static RwLock<Option<String>> {
+    AUTO_BEST_PROXY.get_or_init(|| RwLock::new(None))
+}
+
+/// Updates the cached best proxy URL chosen by egress candidate probing.
+pub fn set_auto_best_proxy(proxy: Option<String>) {
+    *auto_best_slot().write().unwrap() = proxy;
+}
+
+/// Returns the cached best proxy URL (never `"auto"` itself), if one has been probed.
+pub fn auto_best_proxy() -> Option<String> {
+    auto_best_slot().read().unwrap().clone()
+}
 
 use crossagents_core::CoreError;
 use crossagents_core::EgressPolicy;
@@ -206,6 +226,9 @@ pub fn normalize_proxy_url(raw: &str) -> Option<String> {
     if trimmed.eq_ignore_ascii_case("direct") {
         return Some("direct".to_owned());
     }
+    if trimmed.eq_ignore_ascii_case(AUTO_PROXY) {
+        return Some(AUTO_PROXY.to_owned());
+    }
     let parsed = ProxyUrl::parse(trimmed)?;
     if !matches!(
         parsed.scheme.as_str(),
@@ -220,13 +243,34 @@ pub fn normalize_proxy_url(raw: &str) -> Option<String> {
     })
 }
 
-/// Proxy environment variables for an explicit proxy choice (`"direct"` or a proxy URL);
-/// empty when `proxy` is `None` (follow default). Empty values on proxy keys mark variables
-/// to remove from the child environment when `"direct"` is selected.
+/// Resolves an explicit proxy setting (`None`, `"direct"`, `"auto"`, or a URL) to the
+/// concrete proxy target currently used at runtime.
+pub fn resolve_proxy_target(proxy: Option<&str>) -> Option<String> {
+    match proxy.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) if raw.eq_ignore_ascii_case("direct") => Some("direct".to_owned()),
+        Some(raw) if raw.eq_ignore_ascii_case(AUTO_PROXY) => auto_best_proxy()
+            .filter(|p| !p.eq_ignore_ascii_case(AUTO_PROXY))
+            .or_else(|| effective_proxy_url(&[])),
+        Some(raw) => normalize_proxy_url(raw),
+        None => effective_proxy_url(&[]),
+    }
+}
+
+/// Proxy environment variables for an explicit proxy choice (`"direct"`, `"auto"`, or a
+/// proxy URL); empty when `proxy` is `None` (follow default). Empty values on proxy keys
+/// mark variables to remove from the child environment when `"direct"` is selected.
 pub fn explicit_proxy_env(proxy: Option<&str>) -> Vec<(String, String)> {
     let Some(raw) = proxy.map(str::trim).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
+    if raw.eq_ignore_ascii_case(AUTO_PROXY) {
+        return match auto_best_proxy() {
+            Some(resolved) if !resolved.eq_ignore_ascii_case(AUTO_PROXY) => {
+                explicit_proxy_env(Some(&resolved))
+            }
+            _ => system_proxy_env(),
+        };
+    }
     if raw.eq_ignore_ascii_case("direct") {
         return vec![
             ("HTTPS_PROXY".into(), String::new()),
@@ -1224,5 +1268,23 @@ mod tests {
                 .windows(16)
                 .any(|window| window == b"api.example.test")
         );
+    }
+
+    #[test]
+    fn auto_proxy_normalizes_and_resolves_cached_best() {
+        assert_eq!(normalize_proxy_url("auto").as_deref(), Some("auto"));
+        assert_eq!(normalize_proxy_url(" AUTO ").as_deref(), Some("auto"));
+        set_auto_best_proxy(Some("http://127.0.0.1:7897".to_owned()));
+        assert_eq!(
+            resolve_proxy_target(Some("auto")).as_deref(),
+            Some("http://127.0.0.1:7897")
+        );
+        let pairs = explicit_proxy_env(Some("auto"));
+        assert!(
+            pairs
+                .iter()
+                .any(|(k, v)| k == "HTTPS_PROXY" && v == "http://127.0.0.1:7897")
+        );
+        set_auto_best_proxy(None);
     }
 }

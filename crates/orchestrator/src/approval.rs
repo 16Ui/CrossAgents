@@ -45,7 +45,7 @@ pub fn unguarded(agent: &Agent, policy: Option<&RunPolicy>) -> bool {
             == Some(PermissionPolicy::Bypass)
 }
 
-fn unusable_on_platform(
+pub(crate) fn unusable_on_platform(
     agent: &Agent,
     policy: Option<&RunPolicy>,
     windows: bool,
@@ -58,7 +58,12 @@ fn unusable_on_platform(
             Some(ApprovalPolicy::Guard) => PermissionPolicy::Guard,
             _ => PermissionPolicy::Bypass,
         });
-    if windows && agent.plugin == "cursor" && permission != PermissionPolicy::Bypass {
+    if agent.plugin == "antigravity"
+        && agent.driver.as_deref() == Some("acp-generic")
+        && permission != PermissionPolicy::Bypass
+    {
+        Some("This Antigravity approval transport is disabled for protected sessions. Keep this operation blocked until an approved execution route is available.".into())
+    } else if windows && agent.plugin == "cursor" && permission != PermissionPolicy::Bypass {
         Some("Cursor cannot use this permission on Windows: set this agent's permission to 自动执行 (bypass), or set the run's approvals to off (全托管).".into())
     } else {
         None
@@ -157,8 +162,13 @@ fn guards_with_run(agent: &Agent, guarded_run: bool) -> bool {
 }
 
 impl Orchestrator {
+    pub(crate) async fn guards_native_commands(&self, agent: &Agent) -> bool {
+        (agent.plugin == "antigravity" || agent.driver.as_deref() == Some("antigravity-native"))
+            && self.guards(agent).await
+    }
+
     /// Whether `agent` asks before dangerous actions: as its `config.permission` says, else
-    /// when it works on a task of a run whose policy guards its workers.
+    /// when it leads or works on a task of an active run whose policy requests approvals.
     pub async fn guards(&self, agent: &Agent) -> bool {
         if agent
             .config
@@ -173,7 +183,11 @@ impl Orchestrator {
                 task.assignee == Some(agent.id)
                     && run.config.policy.approvals == ApprovalPolicy::Guard
             }
-            None => false,
+            None => self.run_of(agent.id).await.ok().flatten().is_some_and(|(run, _)| {
+                run.planner == agent.id
+                    && !run.status.is_terminal()
+                    && run.config.policy.approvals == ApprovalPolicy::Guard
+            }),
         };
         guards_with_run(agent, guarded_run)
     }
@@ -182,11 +196,27 @@ impl Orchestrator {
     /// go ahead. A run that may not ask the person declines at once; an unanswered question
     /// declines when it times out.
     pub async fn ask_approval(&self, agent: &Agent, title: &str, why: &str) -> bool {
+        self.ask_approval_with_summary(agent, title, why, None).await
+    }
+
+    pub(crate) async fn ask_approval_with_summary(
+        &self, agent: &Agent, title: &str, why: &str, summary: Option<&str>,
+    ) -> bool {
         let found = self.task_for_agent(agent.id).await;
-        let policy: RunPolicy = match &found {
-            Some((run, _)) => run.config.policy.clone(),
-            None => crate::team::chat_policy(agent),
+        let lead_run = if found.is_none() {
+            match self.run_of(agent.id).await {
+                Ok(run) => run.map(|(run, _)| run).filter(|run| {
+                    run.planner == agent.id && !run.status.is_terminal()
+                }),
+                Err(_) => return false,
+            }
+        } else {
+            None
         };
+        let run = found.as_ref().map(|(run, _)| run).or(lead_run.as_ref());
+        let policy: RunPolicy = run
+            .map(|run| run.config.policy.clone())
+            .unwrap_or_else(|| crate::team::chat_policy(agent));
         if policy.human_ask == AskPolicy::Deny {
             return false;
         }
@@ -195,18 +225,44 @@ impl Orchestrator {
         } else {
             DEFAULT_WAIT_MINUTES
         };
+        let Ok(wait) = std::time::Duration::try_from_secs_f64(minutes * 60.0) else {
+            return false;
+        };
+        let Ok(span) = chrono::Duration::from_std(wait) else {
+            return false;
+        };
+        let Some(timeout_at) = Utc::now().checked_add_signed(span) else {
+            return false;
+        };
         let who = self.person_name(agent, found.as_ref()).await;
+        let scope = found.as_ref().map(|(_, task)| task.title.as_str())
+            .or_else(|| run.map(|run| run.title.as_str()));
+        let question = match (why, scope) {
+            ("pushes to a remote", _) => "是否允许推送到远程仓库？".into(),
+            ("merges or releases on GitHub", _) => "是否允许在 GitHub 上合并或发布？".into(),
+            ("publishes a package", _) => "是否允许发布软件包？".into(),
+            ("runs as administrator", _) => "是否允许以管理员权限执行？".into(),
+            ("runs a script from the internet", _) => "是否允许运行这段网络脚本？".into(),
+            ("stops the hub", _) => "是否允许停止 CrossAgents 后台？".into(),
+            ("deletes files outside the working directory", _) => "是否允许删除工作目录之外的文件？".into(),
+            ("changes CI configuration", _) => "是否允许更改持续集成配置？".into(),
+            ("task command", _) => summary
+                .map(|summary| format!("是否允许这项操作？{}", crate::engine::first_line(summary, 96)))
+                .unwrap_or_else(|| "是否允许这次任务命令？".into()),
+            (_, Some(scope)) => format!("是否允许「{scope}」继续这次操作？"),
+            _ => format!("是否允许 {who} 执行这次操作？"),
+        };
         let item = HumanItem {
             id: format!("a-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
-            detail: None,
+            detail: Some(title.into()),
             kind: HumanItemKind::Question,
             from: agent.id,
-            run_id: found.as_ref().map(|(run, _)| run.id),
+            run_id: run.map(|run| run.id),
             task_id: found.as_ref().map(|(_, task)| task.id),
-            text: format!("{who} 想要执行（{why}）：\n{title}"),
+            text: format!("{question}\n{who} 正在等待确认。允许仅放行这一次。拒绝或超时后，这项操作会停止。"),
             options: vec![ALLOW.into(), DENY.into()],
             default: Some(DENY.into()),
-            timeout_at: Some(Utc::now() + chrono::Duration::seconds((minutes * 60.0) as i64)),
+            timeout_at: Some(timeout_at),
             status: HumanItemStatus::Open,
             answer: None,
             answered_at: None,
@@ -221,8 +277,14 @@ impl Orchestrator {
         }
         self.publish(crossagents_core::EventKind::HumanAsked { item })
             .await;
-        // A hub going away drops the sender: declined.
-        rx.await.unwrap_or(false)
+        // Bound the request itself even when the periodic card sweep has not run yet.
+        let remaining = (timeout_at - Utc::now()).to_std().unwrap_or_default();
+        tokio::time::timeout(remaining, rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+            && Utc::now() < timeout_at
     }
 
     /// Who the person knows `agent` as: a task's worker is a clone named after the run and
@@ -245,15 +307,18 @@ impl Orchestrator {
         }
     }
 
+    /// Whether this action is still waiting for a decision in this hub process.
+    pub(crate) fn approval_live(&self, id: &str) -> bool {
+        self.approvals.lock().unwrap().get(id).is_some_and(|tx| !tx.is_closed())
+    }
+
     /// The person (or the timeout) decided approval `id`. `false` if nobody waits for it.
     pub(crate) fn approval_decided(&self, id: &str, answer: Option<&str>) -> bool {
-        match self.approvals.lock().unwrap().remove(id) {
-            Some(tx) => {
-                let _ = tx.send(answer == Some(ALLOW));
-                true
-            }
-            None => false,
-        }
+        self.approvals
+            .lock()
+            .unwrap()
+            .remove(id)
+            .is_some_and(|tx| tx.send(answer == Some(ALLOW)).is_ok())
     }
 }
 

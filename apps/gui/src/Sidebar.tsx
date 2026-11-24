@@ -11,7 +11,7 @@ import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
-import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel } from "./components";
+import { Avatar, BrandMark, Icon, ModelMark, VendorMark, ago, displayName, isAgent, relationText, sessionHref, sessionLabel, vendorName } from "./components";
 import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
 import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
@@ -24,6 +24,7 @@ import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
 import { CENTRE_MACHINE, machineFoldKey, machineGroups, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
+import { IssueNoticeActions } from "./lessons/IssueNoticeActions";
 import { useUnboundProjects } from "./lessons/projects";
 import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
@@ -130,6 +131,7 @@ function useWorks(enabled: boolean) {
     },
     [enabled],
     (e) => e.type.startsWith("work.") || e.type.startsWith("run."),
+    "works",
   );
 }
 
@@ -167,7 +169,7 @@ function WorkRow({ work, runs, lead, active, selected }: { work: Work; runs: Run
   // title — no state, no mode.
   const loaded = runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
   const current = loaded[loaded.length - 1];
-  const state = current ? runState(current.status) : undefined;
+  const state = current ? runState(current.continuation?.phase === "recovery_blocked" ? "paused" : current.status) : undefined;
   const dot: Dot = !state ? undefined : state.bucket === "active" ? "live" : state.bucket === "needs_you" ? "warn" : state.tone === "danger" ? "danger" : undefined;
   // Its rounds are read when the fold opens; until they arrive the fold shows nothing, so a
   // partial set of loaded rounds is never numbered as if it were all of them.
@@ -212,7 +214,7 @@ function WorkRow({ work, runs, lead, active, selected }: { work: Work; runs: Run
       {open && (
         <ul className="work-round-list">
           {rounds.map((round, i) => {
-            const state = runState(round.status);
+            const state = runState(round.continuation?.phase === "recovery_blocked" ? "paused" : round.status);
             return (
               <li key={round.id}>
                 <a
@@ -331,7 +333,9 @@ export function Sidebar({ route }: { route: string[] }) {
       off();
     };
   }, []);
+  const dismissedFailures = dismissedRunFailures.use();
   const todos = todoItems({
+    dismissedFailures,
     items: questions.data?.items ?? [],
     runs,
     now: Date.now(),
@@ -548,7 +552,10 @@ export function Sidebar({ route }: { route: string[] }) {
   );
 }
 
-function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
+function NeedsYou({ items: incoming, agents }: { items: TodoItem[]; agents: Agent[] }) {
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const signature = (item: TodoItem) => item.id + ":" + [...(item.issueKeys ?? [])].sort().join("|");
+  const items = incoming.filter((item) => !dismissed.has(signature(item)));
   const collapsed = useCollapsed();
   const closed = collapsed.has("__needs_you");
   const [all, setAll] = useState(false);
@@ -574,6 +581,25 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
                 <span className="todo-summary">{item.summary}</span>
                 <span className="todo-action">{actionWord(item.action)}</span>
               </>
+            );
+            if (item.dismissKey && item.href) {
+              const key = item.dismissKey;
+              return (
+                <div key={item.kind + item.id} className="todo-dismissible">
+                  <a className="todo-row" href={item.href} title={who + "：" + item.summary}>{body}</a>
+                  <button type="button" className="todo-close" title={t("sidebar.dismissRunFailureHint")}
+                    onClick={() => dismissedRunFailures.toggle(key)}>
+                    {t("sidebar.dismissRunFailure")}
+                  </button>
+                </div>
+              );
+            }
+            if (item.issueRun && item.issueKeys?.length) return (
+              <div key={item.kind + item.id}>
+                <a className="todo-row" href={item.href} title={who + "：" + item.summary}>{body}</a>
+                <IssueNoticeActions run={item.issueRun} issues={item.issueKeys} lead={item.agent}
+                  onClosed={() => setDismissed((old) => new Set([...old, signature(item)]))} />
+              </div>
             );
             return item.href && !reason ? (
               <a key={item.kind + item.id} className="todo-row" href={item.href} title={who + "：" + item.summary}>
@@ -1084,42 +1110,49 @@ function storedSet(key: string) {
 
 const projectOrder = storedSet("crossagents.projectOrder");
 const pins = storedSet("crossagents.pinned");
+const dismissedRunFailures = storedSet("crossagents.dismissedRunFailures.v1");
 const collapsedGroups = storedSet("crossagents.collapsed");
 const usePinned = pins.use;
 const togglePinned = pins.toggle;
 const useCollapsed = collapsedGroups.use;
 const toggleCollapsed = collapsedGroups.toggle;
 
-/** The most used quota window of all accounts, e.g. "额度 8% · 30 天". */
+/** Each account that reports quota windows, shown as a compact strip at the foot of the sidebar. */
 function QuotaMini() {
   const quota = useQuota();
-  const found = tightest(
-    (quota.data?.accounts ?? []).map((a) => ({
-      ...a,
-      windows: a.status.rate_limits,
-    })),
-  );
-  if (!found) return null;
-  const pct = Math.round(found.window.used_percent);
-  const name = found.account.account.label || found.account.account.id;
+  const items = (quota.data?.accounts ?? [])
+    .map((account) => {
+      const found = tightest([{ ...account, windows: account.status.rate_limits }]);
+      return found ? { account, window: found.window } : undefined;
+    })
+    .filter((item): item is NonNullable<typeof item> => !!item);
+  if (!items.length) return null;
   return (
-    <a
-      className="quota-mini"
-      href="#/usage"
-      title={t("quota.miniTitle", {
-        name,
-        window: windowLabel(found.window),
-        pct,
+    <div className="quota-mini-list">
+      {items.map(({ account, window }) => {
+        const usedPct = Math.max(0, Math.min(100, Math.round(window.used_percent)));
+        const remPct = Math.max(0, Math.min(100, Math.round(100 - window.used_percent)));
+        const site = account.account.codebuddy_site;
+        const entry = site === "china" ? "workbuddy-cn" : site === "international" ? "workbuddy-intl" : undefined;
+        const shortName = site === "china" ? "WB 国内" : site === "international" ? "WB 国际" : vendorName(account.account.provider);
+        const fullName = account.account.label || account.account.id;
+        return (
+          <a
+            key={account.account.id}
+            className="quota-mini"
+            href="#/usage"
+            title={`${fullName} · ${windowLabel(window)} 剩 ${remPct}%（已用 ${usedPct}%）`}
+          >
+            <VendorMark plugin={account.account.provider} entry={entry} size={12} />
+            <span className="quota-mini-name">{shortName}</span>
+            <span className={`quota-bar ${level(usedPct, account.status.limit_reached)}`}>
+              <span style={{ width: `${remPct}%` }} />
+            </span>
+            <span className="quota-mini-pct">剩 {remPct}%</span>
+          </a>
+        );
       })}
-    >
-      <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
-        <span style={{ width: `${Math.min(100, pct)}%` }} />
-      </span>
-      {t("quota.mini", {
-        pct,
-        window: windowLabel(found.window).replace(/限额$/, ""),
-      })}
-    </a>
+    </div>
   );
 }
 

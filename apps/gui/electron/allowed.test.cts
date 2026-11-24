@@ -158,3 +158,11 @@ test("settings and repo initialization require admin while runs remain write", (
     assert.ok(allowed("POST", path));
   }
 });
+
+
+test("issue dismissal passes the desktop gate without widening issue mutations", () => {
+  assert.ok(allowed("POST", "/v1/runs/01a1ea07-eedb-776b-8d4f-2c4bf730b6f7/issues/dismiss"));
+  assert.ok(!allowed("DELETE", "/v1/runs/example/issues"));
+  assert.ok(!allowed("POST", "/v1/runs/example/issues/dismiss/extra"));
+  assert.ok(!allowed("POST", "/v1/runs/example/issues/approve"));
+});

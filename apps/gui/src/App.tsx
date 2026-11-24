@@ -67,6 +67,7 @@ export function useRunTree() {
     },
     [],
     (e) => e.type.startsWith("run.") || e.type === "task.status_changed" || e.type === "task.handed_off",
+    "runTree",
   );
 }
 

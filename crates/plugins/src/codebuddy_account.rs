@@ -11,7 +11,7 @@
 //! Explicit site accounts additionally move the child process's user-data profile, so
 //! mainland and international credentials cannot overwrite the machine's shared login.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -167,7 +167,11 @@ impl CodebuddyAccounts {
             Ok(init) => init,
             Err(err) => {
                 status.note = Some(format!("cannot ask codebuddy: {err}"));
-                return (status, Vec::new());
+                let home = account.home.clone();
+                let cached = tokio::task::spawn_blocking(move || cached_models(&home, None))
+                    .await
+                    .unwrap_or_default();
+                return (status, cached);
             }
         };
         read_initialize(
@@ -177,14 +181,34 @@ impl CodebuddyAccounts {
         );
         let mut models = models_of(&init);
         let login = init.get("account").filter(|a| a.is_object());
-        if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
-            let home = account.home.clone();
-            let uid = uid.to_owned();
-            let rates = tokio::task::spawn_blocking(move || multipliers(&home, &uid))
-                .await
-                .unwrap_or_default();
-            for model in &mut models {
+        let uid = login
+            .and_then(|a| a.get("uid"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let home = account.home.clone();
+        let uid_clone = uid.clone();
+        let cached = tokio::task::spawn_blocking(move || {
+            let scoped = cached_models(&home, uid_clone.as_deref());
+            if scoped.is_empty() && uid_clone.is_some() {
+                cached_models(&home, None)
+            } else {
+                scoped
+            }
+        })
+        .await
+        .unwrap_or_default();
+        let rates: HashMap<String, f64> = cached
+            .iter()
+            .filter_map(|m| m.credit_multiplier.map(|r| (m.id.clone(), r)))
+            .collect();
+        for model in &mut models {
+            if model.credit_multiplier.is_none() {
                 model.credit_multiplier = rates.get(&model.id).copied();
+            }
+        }
+        for model in cached {
+            if !models.iter().any(|existing| existing.id == model.id) {
+                models.push(model);
             }
         }
         // Billing: credentials never cross sites — an international login asks the
@@ -315,17 +339,31 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
-/// Each model's credit multiplier for the user `uid` (`"x0.69 credits"` → 0.69), from the
-/// model list the CLI caches under `local_storage/` (one JSON file per cached request, named
-/// by a hash, holding `[{ userId, data: { models } }]`). Undocumented: anything that does not
-/// fit is skipped, and no multipliers is a fine answer.
-fn multipliers(home: &Path, uid: &str) -> HashMap<String, f64> {
-    let mut rates = HashMap::new();
+fn parse_credits_rate(model: &Value) -> Option<f64> {
+    let credits = model.get("credits").and_then(Value::as_str)?;
+    credits
+        .trim()
+        .trim_start_matches(['x', 'X', '×'])
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<f64>().ok())
+}
+
+/// Models (and their credit multipliers, `"x0.69 credits"` → 0.69) cached by CodeBuddy CLI
+/// under `<home>/local_storage/*.info` (`[{ userId, data: { models } }]`). Filtering by
+/// `uid` matches that account's entries; `None` reads all cached `.info` model entries.
+fn cached_models(home: &Path, uid: Option<&str>) -> Vec<ModelInfo> {
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
     let Ok(files) = std::fs::read_dir(home.join("local_storage")) else {
-        return rates;
+        return found;
     };
     for file in files.flatten() {
-        let Ok(text) = std::fs::read_to_string(file.path()) else {
+        let path = file.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("info") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
         let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&text) else {
@@ -333,28 +371,45 @@ fn multipliers(home: &Path, uid: &str) -> HashMap<String, f64> {
         };
         let models = entries
             .iter()
-            .filter(|e| e.get("userId").and_then(Value::as_str) == Some(uid))
+            .filter(|e| uid.is_none_or(|target| e.get("userId").and_then(Value::as_str) == Some(target)))
             .filter_map(|e| e.pointer("/data/models")?.as_array())
             .flatten();
         for model in models {
-            let (Some(id), Some(credits)) = (
-                model.get("id").and_then(Value::as_str),
-                model.get("credits").and_then(Value::as_str),
-            ) else {
+            let Some(id) = model.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let rate = credits
-                .trim()
-                .trim_start_matches(['x', 'X', '×'])
-                .split_whitespace()
-                .next()
-                .and_then(|n| n.parse::<f64>().ok());
-            if let Some(rate) = rate {
-                rates.insert(id.to_owned(), rate);
+            if !seen.insert(id.to_owned()) {
+                continue;
             }
+            let name = model
+                .get("name")
+                .or_else(|| model.get("displayName"))
+                .or_else(|| model.get("label"))
+                .and_then(Value::as_str)
+                .unwrap_or(id)
+                .to_owned();
+            found.push(ModelInfo {
+                id: id.to_owned(),
+                name,
+                description: model
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                context_window: None,
+                credit_multiplier: parse_credits_rate(model),
+            });
         }
     }
-    rates
+    found
+}
+
+/// Each model's credit multiplier for the user `uid`, backed by [`cached_models`].
+#[cfg(test)]
+fn multipliers(home: &Path, uid: &str) -> HashMap<String, f64> {
+    cached_models(home, Some(uid))
+        .into_iter()
+        .filter_map(|m| m.credit_multiplier.map(|rate| (m.id, rate)))
+        .collect()
 }
 
 /// The note when nothing says what is left; cleared once the billing summary does.
@@ -582,8 +637,26 @@ impl AccountProvider for CodebuddyAccounts {
         Ok(result)
     }
 
-    /// The models the CLI listed when the status was last read.
+    /// The models the CLI listed when the status was last read, or cached in `local_storage`.
     async fn models(&self, account: &Account) -> Vec<ModelInfo> {
+        {
+            let live = self.live.lock().unwrap();
+            if let Some((_, status, models)) = live.get(&account.home) {
+                if !models.is_empty() {
+                    return models.clone();
+                }
+                if !status.logged_in {
+                    return Vec::new();
+                }
+            }
+        }
+        let home = account.home.clone();
+        let cached = tokio::task::spawn_blocking(move || cached_models(&home, None))
+            .await
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            return cached;
+        }
         if !self.live.lock().unwrap().contains_key(&account.home) {
             self.status(account).await;
         }
@@ -895,5 +968,53 @@ mod tests {
             login.env.get("CODEBUDDY_CONFIG_DIR"),
             Some(&other.home.display().to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn cached_local_storage_supplies_full_model_catalog_and_ignores_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("local_storage");
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(
+            storage.join("entry_catalog.info"),
+            serde_json::json!([{
+                "userId": "u-1",
+                "data": {
+                    "models": [
+                        {"id": "gpt-6-astra", "name": "GPT-6-Astra", "credits": "x1.5 credits"},
+                        {"id": "gemini-3.8-flash", "name": "Gemini-3.8-Flash"}
+                    ]
+                }
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            storage.join("entry_catalog.info.123.tmp"),
+            serde_json::json!([{
+                "userId": "u-1",
+                "data": { "models": [{"id": "stale-tmp", "name": "Stale"}] }
+            }])
+            .to_string(),
+        )
+        .unwrap();
+
+        let providers = CodebuddyAccounts::new(None);
+        let acc = Account {
+            codebuddy_site: Some(CodebuddySite::International),
+            egress: None,
+            proxy: None,
+            id: "codebuddy-intl".into(),
+            provider: "codebuddy".into(),
+            label: "CodeBuddy 国际站".into(),
+            home: dir.path().to_path_buf(),
+            created_at: Utc::now(),
+        };
+        let models = providers.models(&acc).await;
+        assert_eq!(
+            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["gpt-6-astra", "gemini-3.8-flash"]
+        );
+        assert_eq!(models[0].credit_multiplier, Some(1.5));
     }
 }

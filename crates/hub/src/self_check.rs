@@ -14,11 +14,12 @@ use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, Driver, EventBus, EventKind, NameSource, PermissionPolicy, Role,
-    SessionSpec,
+    Agent, AgentId, AgentStatus, CodebuddySite, Driver, EventBus, EventKind, NameSource,
+    PermissionPolicy, Role, SessionSpec,
 };
 use tokio::sync::{Mutex, mpsc};
 
+use crate::accounts::Accounts;
 use crate::cli_runs::{CliRuns, Witness};
 
 /// How long the one turn may take before the check gives up (recorded as nothing).
@@ -47,6 +48,8 @@ impl SelfCheck {
         runs: Arc<CliRuns>,
         driver: Arc<dyn Driver>,
         model: Option<String>,
+        accounts: Option<Arc<Accounts>>,
+        pinned_site: Option<CodebuddySite>,
     ) -> bool {
         let plugin = driver.name().to_owned();
         let Some(located) = driver.cli_status().await.and_then(|status| status.located) else {
@@ -67,7 +70,7 @@ impl SelfCheck {
             .await;
         tokio::spawn(async move {
             let witness = Witness::new(runs, plugin.clone(), path, version);
-            check(driver, model, witness).await;
+            check(driver, model, witness, bus.clone(), accounts, pinned_site).await;
             this.running.lock().await.remove(&plugin);
             let _ = bus.publish(EventKind::PluginChanged { name: plugin }).await;
         });
@@ -75,13 +78,77 @@ impl SelfCheck {
     }
 }
 
-async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witness) {
+async fn resolve_check_env(
+    plugin: &str,
+    bus: &EventBus,
+    accounts: Option<&Arc<Accounts>>,
+    pinned_site: Option<CodebuddySite>,
+) -> (serde_json::Value, Vec<(String, String)>) {
+    let Some(accounts) = accounts else {
+        return (serde_json::json!({}), Vec::new());
+    };
+    let vendor = crossagents_plugins::provider_of(plugin);
+    let matched = bus
+        .store()
+        .list_accounts()
+        .await
+        .ok()
+        .and_then(|list| {
+            let site_match = pinned_site.and_then(|site| {
+                list.iter()
+                    .find(|a| a.provider == vendor && a.codebuddy_site == Some(site))
+                    .map(|a| a.id.clone())
+            });
+            site_match.or_else(|| {
+                list.into_iter()
+                    .find(|a| {
+                        a.provider == vendor
+                            && (pinned_site.is_none() || a.codebuddy_site.is_none())
+                    })
+                    .map(|a| a.id)
+            })
+        });
+    let config = match matched {
+        Some(id) => serde_json::json!({ "account": id }),
+        None => serde_json::json!({}),
+    };
+    let probe_agent = Agent {
+        node: None,
+        id: AgentId::new(),
+        name: "self-check".into(),
+        name_source: NameSource::Chosen,
+        plugin: plugin.to_owned(),
+        driver: None,
+        model: None,
+        role: Role::Worker,
+        home: PathBuf::new(),
+        cwd: PathBuf::new(),
+        config: config.clone(),
+        status: AgentStatus::Stopped,
+        created_at: Utc::now(),
+        profile: Default::default(),
+        topic: None,
+        archived_at: None,
+    };
+    let env = accounts.agent_env(&probe_agent).await.unwrap_or_default();
+    (config, env)
+}
+
+async fn check(
+    driver: Arc<dyn Driver>,
+    model: Option<String>,
+    mut witness: Witness,
+    bus: Arc<EventBus>,
+    accounts: Option<Arc<Accounts>>,
+    pinned_site: Option<CodebuddySite>,
+) {
     let plugin = driver.name().to_owned();
     let cwd = std::env::temp_dir().join(format!("crossagents-self-check-{}", uuid::Uuid::new_v4()));
     if let Err(err) = std::fs::create_dir_all(&cwd) {
         tracing::warn!(%plugin, error = %err, "cannot make a directory for the self-check");
         return;
     }
+    let (config, env) = resolve_check_env(&plugin, &bus, accounts.as_ref(), pinned_site).await;
     let (events, mut rx) = mpsc::unbounded_channel();
     let spec = SessionSpec {
         agent: Agent {
@@ -95,7 +162,7 @@ async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witn
             role: Role::Worker,
             home: PathBuf::from(&cwd),
             cwd: cwd.clone(),
-            config: serde_json::json!({}),
+            config,
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
             profile: Default::default(),
@@ -107,7 +174,7 @@ async fn check(driver: Arc<dyn Driver>, model: Option<String>, mut witness: Witn
         permissions: None,
         command: None,
         instructions: None,
-        env: Vec::new(),
+        env,
         events,
     };
     // The events are read while the turn runs, so the handshake is seen as it comes.
@@ -188,7 +255,14 @@ mod tests {
         let check = Arc::new(SelfCheck::new());
         assert!(
             !check
-                .start(bus, Arc::new(CliRuns::in_memory()), Arc::new(NoCli), None)
+                .start(
+                    bus,
+                    Arc::new(CliRuns::in_memory()),
+                    Arc::new(NoCli),
+                    None,
+                    None,
+                    None
+                )
                 .await
         );
         assert!(!check.running("acp").await);

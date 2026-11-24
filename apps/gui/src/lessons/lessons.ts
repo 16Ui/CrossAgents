@@ -37,7 +37,7 @@ export function triageText(t: TriageRecord | undefined): string {
     case "merged":
       return `并入排障记录 ${shortId(t.lesson_id)}`;
     case "kept":
-      return `不成记录：${t.why}`;
+      return t.why.startsWith("人工关闭通知") ? t.why : `不成记录：${t.why}`;
   }
 }
 

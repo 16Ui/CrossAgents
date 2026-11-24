@@ -7,13 +7,13 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use crossagents_api_types::{
     Lesson, LessonStatus, ListLessonsResponse, ListRunIssuesResponse, RunIssue, UpdateLessonRequest,
 };
-use crossagents_core::{CoreError, EventKind, ISSUE_PREFIX, NoteScope};
+use crossagents_core::{CoreError, EventKind, ISSUE_PREFIX, NoteScope, IssueRef, TriageStep};
 use crossagents_orchestrator::lessons::{export_markdown, files_changed, search_terms};
 use crossagents_orchestrator::projects::LOCAL_NODE;
 use serde::Deserialize;
@@ -31,6 +31,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/v1/projects/{id}/lessons/export", get(export))
         .route("/v1/lessons/{id}", get(get_lesson).patch(update_lesson))
         .route("/v1/runs/{key}/issues", get(run_issues))
+        .route("/v1/runs/{key}/issues/dismiss", post(dismiss_issues))
         .merge(projects::router())
 }
 
@@ -197,4 +198,44 @@ async fn run_issues(
         issues,
         unsorted,
     }))
+}
+
+
+#[derive(Deserialize)]
+struct DismissIssuesRequest {
+    issues: Vec<String>,
+    #[serde(default)]
+    why: String,
+}
+
+/// A person's explicit dismissal, not a claim that the underlying problem is fixed.
+/// Reuses durable triage so the lead's issue_keep and this UI share one lifecycle.
+async fn dismiss_issues(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<DismissIssuesRequest>,
+) -> ApiResult<Json<ListRunIssuesResponse>> {
+    if req.issues.is_empty() || req.issues.len() > 100 || req.why.len() > 2000 {
+        return Err(AppError::from(CoreError::InvalidName("select 1–100 recorded issues; reason at most 2000 bytes".into())));
+    }
+    let run_id = resolve_run(&state, &key).await?;
+    let store = state.bus.store();
+    let run = store.get_run(run_id).await?;
+    let notes = store.list_notes(NoteScope::Run, Some(run_id), ISSUE_PREFIX).await?;
+    // Validate the complete snapshot before writing anything; never dismiss a future
+    // issue simply because it belongs to this run, nor a question or an approval.
+    let mut issues = Vec::new();
+    for key in req.issues {
+        if !notes.iter().any(|n| n.key == key) {
+            return Err(AppError::from(CoreError::InvalidName("selected issue does not exist in this run".into())));
+        }
+        let issue = IssueRef { run_id, key };
+        if !issues.contains(&issue) { issues.push(issue); }
+    }
+    let why = format!("人工关闭通知（不代表问题已解决）；{}", req.why.trim());
+    // The human API acts on the run's behalf; the reason explicitly records that it
+    // was a person closing the notice, rather than an agent claiming a resolution.
+    let (records, _) = store.triage(&issues, TriageStep::Keep { why }, run.planner).await?;
+    state.bus.publish(EventKind::IssueTriaged { run_id, records }).await?;
+    run_issues(State(state), Path(key)).await
 }

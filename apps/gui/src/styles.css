@@ -815,6 +815,7 @@ a.button.primary:hover { background: var(--accent-hover); }
 .swatch { width: 20px; height: 20px; border-radius: 50%; padding: 0; border: 2px solid var(--surface); background: var(--hue); outline: 1px solid var(--border); }
 .swatch:hover:not(:disabled) { background: var(--hue); outline-color: var(--border-strong); }
 .swatch.on { outline: 2px solid var(--text); }
+.template-spawn { border-top: 1px solid var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
 
 /* Who is speaking, above an agent's reply. */
 .author { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -1192,10 +1193,13 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
   .quota-row .quota-bar { grid-column: 1 / -1; grid-row: 2; }
 }
 
-/* Sidebar: the tightest quota window. */
-.quota-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding: 2px 4px; border-radius: 6px; }
+/* Sidebar: compact quota summary for every signed-in account that reports limits. */
+.quota-mini-list { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.quota-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding: 2px 4px; border-radius: 6px; width: 100%; }
 .quota-mini:hover { background: var(--hover); text-decoration: none; color: var(--text-2); }
-.quota-mini .quota-bar { width: 40px; height: 4px; }
+.quota-mini .quota-bar { width: 42px; height: 4px; flex: none; }
+.quota-mini-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quota-mini-pct { font-variant-numeric: tabular-nums; min-width: 40px; white-space: nowrap; text-align: right; flex: none; }
 .peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 
 /* Questions and notices for the person (H1-2). */
@@ -1488,7 +1492,11 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 
 /* All accounts in one list (views/Quota.tsx): a line each, details open underneath. */
 .accounts { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.accounts .cli-group-head { border-top: 1px solid var(--border); }
+.accounts > .cli-group-head:first-child { border-top: none; }
 .account-row + .account-row { border-top: 1px solid var(--border); }
+.account-row.grouped .account-line { padding-left: 28px; }
+.account-row.grouped .account-egress { padding-left: 26px; }
 .account-line { display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(180px, 2fr) 84px max-content; align-items: center; gap: 14px; padding: 10px 12px 10px 14px; }
 .account-actions button { white-space: nowrap; }
 .account-row.open .account-line { background: color-mix(in srgb, var(--text) 3%, transparent); }
@@ -1500,7 +1508,8 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .meter { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
 .meter .quota-bar { width: 72px; height: 6px; }
 .meter-label { color: var(--muted); white-space: nowrap; }
-.meter-pct { font-variant-numeric: tabular-nums; min-width: 32px; }
+.meter-pct { font-variant-numeric: tabular-nums; min-width: 48px; white-space: nowrap; }
+.meter-reset { color: var(--muted); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .account-health { display: flex; }
 .account-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 /* The exit line under a row (views/Quota.tsx): small and always present, so an unconfirmed
@@ -2134,6 +2143,10 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .flat-sidebar .needs-you-group .todo-action { padding: 0 6px; border-radius: 999px; line-height: 17px; background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .todo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 7px; padding: 3px 6px; color: var(--text); border-radius: var(--radius); min-width: 0; font-size: 13px; line-height: 20px; }
 .todo-row:hover { background: var(--hover); text-decoration: none; }
+.todo-dismissible { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.todo-dismissible > .todo-row { flex: 1; }
+.todo-close { flex: none; padding: 1px 5px; font-size: 11px; color: var(--text); border-color: transparent; }
+.todo-close:hover, .todo-close:focus-visible { background: var(--hover); }
 .todo-who { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .todo-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .todo-action { flex: none; font-size: 11px; color: var(--warn-text); }

@@ -2,7 +2,7 @@
 // account, a bar per rate-limit window with "N% 已用" and when it resets. Vendor-neutral: every
 // provider's AccountStatus renders the same way.
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { ImportableAccount } from "@bindings/ImportableAccount";
@@ -15,7 +15,7 @@ import { api, errorText } from "../api";
 import { DayColumns, RankBars, compact, dailySeries } from "../charts";
 import { ErrorBox, Field, Icon, VendorMark, ago, vendorName } from "../components";
 import { useHubData } from "../hub";
-import { creditText, egressOf, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
+import { creditText, egressOf, level, planLabel, resetCompactText, resetFullText, windowLabel, type Level } from "../lib/quota";
 import { prettyModel } from "../lib/models";
 import { cursorMode } from "../lib/reasoning";
 import { EgressPicker } from "../egressPicks";
@@ -25,7 +25,7 @@ import { useArmed } from "../parts";
 const REFRESH_MS = 60_000;
 
 export function useQuota() {
-  const quota = useHubData(() => api.quota(), [], (e) => e.type.startsWith("account."));
+  const quota = useHubData(() => api.quota(), [], (e) => e.type.startsWith("account."), "quota");
   useEffect(() => {
     const timer = setInterval(quota.reload, REFRESH_MS);
     return () => clearInterval(timer);
@@ -58,21 +58,43 @@ export function QuotaSection() {
       )}
       {accounts.length > 0 && (
         <div className="accounts">
-          {accounts.map((a, i) => (
-            <AccountRow
-              key={a.account.id}
-              quota={a}
-              color={seriesColor(i)}
-              open={open === a.account.id}
-              onToggle={() => setOpen(open === a.account.id ? undefined : a.account.id)}
-              onChange={quota.reload}
-            />
+          {groupAccountsByProvider(accounts).map(([provider, entries]) => (
+            <Fragment key={provider}>
+              {entries.length > 1 && (
+                <div className="cli-group-head">
+                  <VendorMark plugin={provider} size={14} />
+                  {vendorName(provider)}
+                  <span className="hint"> · {entries.length} 个{provider === "codebuddy" ? "站点账号" : "账号"}</span>
+                </div>
+              )}
+              {entries.map(({ item, index }) => (
+                <AccountRow
+                  key={item.account.id}
+                  quota={item}
+                  color={seriesColor(index)}
+                  grouped={entries.length > 1}
+                  open={open === item.account.id}
+                  onToggle={() => setOpen(open === item.account.id ? undefined : item.account.id)}
+                  onChange={quota.reload}
+                />
+              ))}
+            </Fragment>
           ))}
         </div>
       )}
       {accounts.length > 0 && <AllUsage accounts={accounts} />}
     </section>
   );
+}
+
+function groupAccountsByProvider(accounts: AccountQuota[]): [string, { item: AccountQuota; index: number }[]][] {
+  const map = new Map<string, { item: AccountQuota; index: number }[]>();
+  accounts.forEach((item, index) => {
+    const bucket = map.get(item.account.provider);
+    if (bucket) bucket.push({ item, index });
+    else map.set(item.account.provider, [{ item, index }]);
+  });
+  return [...map.entries()];
 }
 
 /** Account i's colour in every chart: categorical slot i, in list order. */
@@ -95,7 +117,21 @@ function byBase(models: readonly ModelInfo[]): ModelInfo[] {
  * One account on one line: who it is, a short meter per rate-limit window, its worst health,
  * and its actions. Clicking the line opens the details (other limits, credits, token usage).
  */
-function AccountRow({ quota, color, open, onToggle, onChange }: { quota: AccountQuota; color: string; open: boolean; onToggle: () => void; onChange: () => void }) {
+function AccountRow({
+  quota,
+  color,
+  grouped = false,
+  open,
+  onToggle,
+  onChange,
+}: {
+  quota: AccountQuota;
+  color: string;
+  grouped?: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onChange: () => void;
+}) {
   const { account, status } = quota;
   const [login, setLogin] = useState<LoginStarted>();
   const [error, setError] = useState<string>();
@@ -147,12 +183,26 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
     }
   }
 
+  const normalizedHome = account.home.replace(/\\/g, "/");
+  const siteEntry =
+    account.codebuddy_site === "china"
+      ? "workbuddy-cn"
+      : account.codebuddy_site === "international"
+        ? "workbuddy-intl"
+        : account.provider === "deepseek"
+          ? account.id === "deepseek-harness" || normalizedHome.endsWith("/.dsh-harness")
+            ? "deepseek-harness"
+            : account.id === "tokenworks" || normalizedHome.endsWith("/.dsh")
+              ? "tokenworks"
+              : undefined
+          : undefined;
+
   return (
-    <div className={`account-row ${open ? "open" : ""}`}>
+    <div className={`account-row ${grouped ? "grouped" : ""} ${open ? "open" : ""}`}>
       <div className="account-line">
         <button className="account-who" onClick={onToggle} aria-expanded={open} title={status.email ?? undefined}>
           <span className="series-key" style={{ background: color }} />
-          <VendorMark plugin={account.provider} size={14} />
+          <VendorMark plugin={account.provider} entry={siteEntry} size={14} />
           <span className="account-name">{account.label || account.id}</span>
           {account.codebuddy_site && <span className="chip">{account.codebuddy_site === "china" ? "国内站" : "国际站"}</span>}
           {plan && <span className="chip">{plan}</span>}
@@ -162,14 +212,18 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
             <span className="chip warn">未登录</span>
           ) : windows.length ? (
             windows.map((w, i) => {
-              const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+              const usedPct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+              const remPct = Math.max(0, Math.min(100, Math.round(100 - w.used_percent)));
+              const resetInfo = resetFullText(w.resets_at);
+              const compactReset = resetCompactText(w.resets_at);
               return (
-                <span key={w.name} className="meter" title={`${windowLabel(w)} · ${poolText(w) ?? `${pct}% 已用`}${w.resets_at ? ` · ${resetText(w.resets_at)}` : ""}`}>
+                <span key={w.name} className="meter" title={`${windowLabel(w)} · 剩 ${remPct}%（已用 ${usedPct}%）${poolText(w) ? ` · ${poolText(w)}` : ""}${resetInfo ? ` · 恢复：${resetInfo}` : ""}`}>
                   <span className="meter-label">{shortWindow(w)}</span>
                   <span className={`quota-bar ${levels[i]}`}>
-                    <span style={{ width: `${pct}%` }} />
+                    <span style={{ width: `${remPct}%` }} />
                   </span>
-                  <span className="meter-pct">{pct}%</span>
+                  <span className="meter-pct">剩 {remPct}%</span>
+                  {compactReset && <span className="meter-reset">{compactReset}</span>}
                 </span>
               );
             })
@@ -219,7 +273,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
           <>
             <code className="egress-value" title="出口 IP">{egress.ip}</code>
             <span className="egress-value" title="国家">{egress.country}</span>
-            <span className="egress-value muted" title="ASN">{egress.asn}</span>
+            {egress.asn !== "ASN 未知" && <span className="egress-value muted" title="ASN">{egress.asn}</span>}
             <span className={`egress-route ${egress.route}`} title={egress.route === "unknown" ? "代理出口无法确认：allow_direct 可能回退直连，NO_PROXY 也可能绕过代理" : undefined}>
               {egress.routeLabel}
             </span>
@@ -304,7 +358,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
 
       {open && (
         <div className="account-detail">
-          {windows.length > 0 && (
+          {status.limits.length === 0 && windows.length > 0 && (
             <div className="quota">
               <div className="quota-title">
                 {windows.some((w) => w.total != null) ? `积分 · 剩 ${creditNumber(windows.reduce((s, w) => s + (w.remaining ?? 0), 0))}` : "用量限额"}
@@ -315,12 +369,13 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
               ))}
             </div>
           )}
-          {/* Separate limits beyond the main one, e.g. one per model. */}
-          {status.limits.slice(1).map((group) => (
+          {/* All limit groups (e.g. Antigravity's Gemini Models / Claude & GPT / Gemini 4 Argon). */}
+          {status.limits.map((group, idx) => (
             <div key={group.id} className="quota">
               <div className="quota-title">
-                {group.name ?? group.model ?? group.id} 的限额
+                {group.name ?? group.model ?? group.id}
                 {group.model && group.name && <span className="muted"> · {group.model}</span>}
+                {idx === 0 && status.email ? ` · ${status.email}` : ""}
               </div>
               {group.windows.map((w) => (
                 <WindowRow key={w.name} window={w} reached={group.reached} />
@@ -430,23 +485,25 @@ function poolText(w: RateWindow): string | undefined {
 }
 
 function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolean }) {
-  const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
-  const tone = level(w.used_percent, reached && pct >= 100);
+  const usedPct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+  const remPct = Math.max(0, Math.min(100, Math.round(100 - w.used_percent)));
+  const tone = level(w.used_percent, reached && usedPct >= 100);
+  const resetInfo = resetFullText(w.resets_at);
   return (
     <div className="quota-row">
       <div className="quota-label">
         {windowLabel(w)}
-        {w.resets_at && <div className="quota-sub">{resetText(w.resets_at)}</div>}
+        {resetInfo && <div className="quota-sub">恢复：{resetInfo}</div>}
       </div>
-      <div className={`quota-bar ${tone}`} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-        <span style={{ width: `${pct}%` }} />
+      <div className={`quota-bar ${tone}`} role="progressbar" aria-valuenow={remPct} aria-valuemin={0} aria-valuemax={100}>
+        <span style={{ width: `${remPct}%` }} />
       </div>
       <div className="quota-value">
         <span className={`health ${tone}`}>
           <span aria-hidden="true">{HEALTH[tone].glyph}</span>
-          {pct >= 100 ? "已用完" : HEALTH[tone].label}
+          {usedPct >= 100 ? "已用完" : HEALTH[tone].label}
         </span>
-        {poolText(w) ?? `${pct}% 已用`}
+        {poolText(w) ? `${poolText(w)}（剩 ${remPct}%）` : `剩 ${remPct}%（已用 ${usedPct}%）`}
       </div>
     </div>
   );
@@ -565,6 +622,15 @@ function TokenUsage({ id }: { id: string }) {
   );
 }
 
+const ACCOUNT_PROVIDER_LABELS: Record<string, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+  codebuddy: "CodeBuddy / WorkBuddy",
+  cursor: "Cursor",
+  deepseek: "DeepSeek / 词元工坊",
+  antigravity: "Antigravity",
+};
+
 function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => void }) {
   const [provider, setProvider] = useState("");
   const [id, setId] = useState("");
@@ -641,7 +707,9 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
             }}
           >
             {providers.map((p) => (
-              <option key={p}>{p}</option>
+              <option key={p} value={p}>
+                {ACCOUNT_PROVIDER_LABELS[p] ?? vendorName(p)}
+              </option>
             ))}
           </select>
         </Field>

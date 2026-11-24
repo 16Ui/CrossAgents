@@ -336,6 +336,69 @@ async fn stalled_worker_recovers_only_the_lead_with_a_durable_cap() {
 }
 
 #[tokio::test]
+async fn identical_stalled_tasks_stop_waking_the_lead_and_rearm_on_progress() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(
+        &t,
+        &plan("inspect", false),
+        json!({
+            "plan_approval":"auto",
+            "continuation":{"max_attempts":24,"interval_seconds":3600}
+        }),
+    )
+    .await;
+    w.until("task stopped without a report", |e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskStatusChanged {
+                to: TaskStatus::Stalled,
+                ..
+            }
+        )
+    })
+    .await;
+    for _ in 0..2 {
+        idle(&t, run.planner).await;
+        phase(&t, &run, "recover").await;
+        due(&t, run.id).await;
+        t.hub.orchestrator.continue_runs().await;
+    }
+    idle(&t, run.planner).await;
+    phase(&t, &run, "recovery_blocked").await;
+    // A routine recovery blocker stays in run state and produces no human action.
+    t.hub.orchestrator.continue_runs().await;
+    assert_eq!(wake_count(&t, &run).await, 2);
+    let held = get(&t, run.id).await.continuation.unwrap();
+    assert!(held.next_at.is_none());
+    assert!(held.next_step.contains("#a"));
+    t.hub.orchestrator.continue_runs().await;
+    assert_eq!(
+        notices(&t, &run)
+            .await
+            .iter()
+            .filter(|notice| notice.text.contains("自动恢复已暂停"))
+            .count(),
+        0
+    );
+    assert_eq!(wake_count(&t, &run).await, 2);
+    t.hub.shutdown();
+    t.hub.wait().await.unwrap();
+    let t = TestHub::start_in(t.home, |_| {}).await;
+    phase(&t, &run, "recovery_blocked").await;
+    assert_eq!(wake_count(&t, &run).await, 2);
+    let store = t.hub.orchestrator.store();
+    let mut task = store.list_tasks(run.id).await.unwrap().remove(0);
+    task.progress = Some("new verified evidence".into());
+    task.updated_at = Utc::now();
+    store.update_task(&task).await.unwrap();
+    phase(&t, &run, "recover").await;
+    let rearmed = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(rearmed.recovery.unwrap().attempts, 0);
+    assert!(rearmed.next_at.is_some());
+}
+#[tokio::test]
 async fn active_worker_and_waiting_dependencies_do_not_consume_recovery() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
@@ -522,6 +585,15 @@ async fn reserved_due_time_survives_restart_and_default_runs_stay_unchanged() {
     // next wakeup reserved, not `working` with nothing due (`settle_continuation`). Wait for
     // it rather than for the clock that would otherwise get there a tick later.
     phase(&t, &run, "continue").await;
+    let wakes = wake_texts(&t, &run).await;
+    assert_eq!(wakes.len(), 1);
+    assert!(wakes[0].contains("has no tasks"), "{}", wakes[0]);
+    assert!(wakes[0].contains("call plan_submit"), "{}", wakes[0]);
+    assert!(
+        wakes[0].contains("Original request:\ninspect first"),
+        "{}",
+        wakes[0]
+    );
     let before = get(&t, run.id).await.continuation.unwrap();
     assert_eq!(before.attempts, 1, "{before:?}");
     assert_eq!(
@@ -639,14 +711,13 @@ async fn a_rearmed_run_tells_the_person_again_when_it_exhausts_once_more() {
     exhaust(&t, &run).await;
     assert_eq!(notices(&t, &run).await.len(), 1);
 
-    let mut current = get(&t, run.id).await;
-    current.continuation.as_mut().unwrap().attempts = 0;
-    t.hub
-        .orchestrator
-        .store()
-        .update_run(&current)
-        .await
-        .unwrap();
+    let response = t
+        .post(
+            &format!("/v1/runs/{}/policy", run.id),
+            json!({ "reset_attempts": true }),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
 
     exhaust(&t, &run).await;
     assert_eq!(
@@ -1366,4 +1437,60 @@ async fn the_automation_breaker_pauses_the_continuation_and_tells_the_person() {
     let rearmed = get(&t, run.id).await.continuation.unwrap();
     assert!(!rearmed.health.is_paused(), "{rearmed:?}");
     assert_eq!(rearmed.attempts, 0, "{rearmed:?}");
+}
+
+#[tokio::test]
+async fn managed_run_outside_git_works_in_place_without_creating_a_failed_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = setup(dir.path()).await;
+    let mut w = t.watch().await;
+    let run = start(&t, &plan("work in this directory", false), enabled()).await;
+    w.find("unversioned plan refused", |event| {
+        matches!(&event.kind, EventKind::AgentToolUsed { id, tool, ok: false }
+            if *id == run.planner && tool == "plan_submit")
+    }).await;
+    phase(&t, &run, "continue").await;
+    assert!(t.hub.orchestrator.store().list_tasks(run.id).await.unwrap().is_empty());
+
+    due(&t, run.id).await;
+    t.hub.orchestrator.continue_runs().await;
+    w.find("in-place continuation", |event| {
+        matches!(&event.kind, EventKind::AgentInput { id, text, .. }
+            if *id == run.planner && text.contains("Work directly within this project's directory"))
+    }).await;
+    assert!(t.hub.orchestrator.store().list_tasks(run.id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn the_hub_restarts_an_errored_lead_after_a_known_provider_failure() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(&t, "Continue from saved work.", enabled()).await;
+    idle(&t, run.planner).await;
+    t.hub.runtime.stop(&AgentKey::Id(run.planner)).await.unwrap();
+
+    t.hub.bus.publish(EventKind::AgentError {
+        id: run.planner,
+        message: "API error (attempt 1): request failed: stream idle timeout (10m0s)".into(),
+    }).await.unwrap();
+    t.hub.bus.publish(EventKind::AgentError {
+        id: run.planner,
+        message: "Circuit breaker: agent hit consecutive error limit (3); stopping turn loop to protect quota".into(),
+    }).await.unwrap();
+    t.hub.orchestrator.store().update_agent_status(run.planner, AgentStatus::Error).await.unwrap();
+
+    phase(&t, &run, "provider_recover").await;
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert!(state.next_at.unwrap() > Utc::now());
+    assert_eq!(state.attempts, 0);
+    due(&t, run.id).await;
+    t.hub.orchestrator.continue_runs().await;
+    w.find("provider recovery reaches a fresh turn", |event| {
+        matches!(&event.kind, EventKind::AgentInput { id, text, .. }
+            if *id == run.planner && text.contains("The provider stream failed temporarily"))
+    }).await;
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert!(state.provider_recovery_at.is_some());
+    assert_eq!(state.attempts, 1);
 }

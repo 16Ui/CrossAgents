@@ -38,6 +38,30 @@ export function resetText(resetsAt: string | null, now = Date.now()): string | u
   return `${at.getMonth() + 1}月${at.getDate()}日 周${week} 重置`;
 }
 
+/** "11月17日 02:28（2 小时 53 分后重置）", showing both exact clock/date and relative time. */
+export function resetFullText(resetsAt: string | null, now = Date.now()): string | undefined {
+  if (!resetsAt) return undefined;
+  const at = new Date(resetsAt);
+  if (Number.isNaN(at.getTime())) return undefined;
+  const rel = resetText(resetsAt, now);
+  const hm = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const dateStr = `${at.getMonth() + 1}月${at.getDate()}日 ${hm}`;
+  return rel ? `${dateStr}（${rel}）` : dateStr;
+}
+
+/** Compact clock/date reset label beside each main-row bar: "02:28 重置", "明天 02:28 重置", "11/23 21:28 重置". */
+export function resetCompactText(resetsAt: string | null, now = Date.now()): string | undefined {
+  if (!resetsAt) return undefined;
+  const at = new Date(resetsAt);
+  if (Number.isNaN(at.getTime())) return undefined;
+  if (at.getTime() - now <= 0) return "即将重置";
+  const hm = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  const days = Math.round((startOfDay(at) - startOfDay(new Date(now))) / 86_400_000);
+  if (days <= 0) return `${hm} 重置`;
+  if (days === 1) return `明天 ${hm} 重置`;
+  return `${at.getMonth() + 1}/${at.getDate()} ${hm} 重置`;
+}
+
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 
 export type Level = "ok" | "warn" | "danger";

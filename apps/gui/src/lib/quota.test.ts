@@ -79,3 +79,15 @@ test("an exit never recorded has no values to show, and missing ones stay missin
   assert.equal(partial.country, "GB");
   assert.equal(partial.changed, undefined);
 });
+
+test("compact reset times show today's clock, tomorrow, or M/D HH:mm", async () => {
+  const { resetCompactText, resetFullText } = await import("./quota.ts");
+  const now = new Date(2026, 10, 17, 1, 0).getTime();
+  const sameDay = new Date(2026, 10, 17, 2, 28).toISOString();
+  const tomorrow = new Date(2026, 10, 18, 9, 5).toISOString();
+  const nextWeek = new Date(2026, 10, 23, 21, 28).toISOString();
+  assert.equal(resetCompactText(sameDay, now), "02:28 重置");
+  assert.equal(resetCompactText(tomorrow, now), "明天 09:05 重置");
+  assert.equal(resetCompactText(nextWeek, now), "11/23 21:28 重置");
+  assert.match(resetFullText(nextWeek, now) ?? "", /^11月23日 21:28/);
+});

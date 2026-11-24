@@ -79,7 +79,19 @@ pub enum Action {
 /// Whether `error` reads like a fault the platform can fix (`retryable`) or not
 /// (multica §2.5). Words, not codes: a driver says what went wrong in its own words.
 pub fn classify(error: &str) -> Fault {
+    if error.starts_with("Tool permission blocked: ") {
+        return Fault::AgentError;
+    }
     let text = error.to_lowercase();
+    // A named profile that does not exist will still be missing after a
+    // reconnect. Check the cause before transport wrappers and stack traces.
+    if text.lines().any(|line| {
+        line.split_once("profile \"")
+            .and_then(|(_, profile)| profile.split_once("\" "))
+            .is_some_and(|(name, tail)| !name.is_empty() && tail.starts_with("does not exist"))
+    }) {
+        return Fault::AgentError;
+    }
     let has = |needles: &[&str]| needles.iter().any(|n| text.contains(n));
     // First: the session itself is unfit, whatever the vendor calls it.
     if has(&[
@@ -127,6 +139,11 @@ pub fn classify(error: &str) -> Fault {
         "tls",
         "proxy",
         "stream disconnected",
+        ": eof",
+        "unexpected eof",
+        "broken pipe",
+        "connection reset",
+        "client connection lost",
         "网络",
     ]) {
         return Fault::Network;
@@ -692,6 +709,16 @@ mod tests {
         }
         // No retry without a reason to think it helps.
         assert_eq!(classify("the worker gave up"), Fault::Unknown);
+    }
+
+    #[test]
+    fn missing_worker_profile_stops_before_retrying_the_acp_handshake() {
+        let error = "agent error: ACP handshake failed: connection closed\n\
+            Error: dsh: profile \"acp-ustc\" does not exist; create it with dsh plugin";
+        assert_eq!(classify(error), Fault::AgentError);
+        assert!(!start_is_retryable(error));
+        assert_eq!(action_for(classify(error), 0), Action::Stop);
+        assert_eq!(classify("ACP handshake failed: connection closed"), Fault::Network);
     }
 
     #[test]

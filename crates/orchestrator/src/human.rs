@@ -2,6 +2,8 @@
 //! run's policy decides whether agents may ask, and whether a question waits forever or
 //! falls back to its default; every fallback is recorded and listed when the run ends.
 
+use std::path::PathBuf;
+
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AskPolicy, CoreError, Envelope, EventKind, HumanAction, HumanItem,
@@ -20,7 +22,66 @@ fn item_id(prefix: &str) -> String {
     format!("{prefix}-{}", &id[..10])
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EscalationKind {
+    Security,
+    Irreversible,
+    ExternalCommitment,
+}
+
+#[derive(Deserialize)]
+struct Escalation {
+    kind: EscalationKind,
+    why_lead_cannot_decide: String,
+    impact: String,
+    decision: String,
+}
+
+impl Escalation {
+    fn question(&self, summary: &str) -> Option<String> {
+        let kind = match self.kind {
+            EscalationKind::Security => "安全或权限风险",
+            EscalationKind::Irreversible => "难以撤回的操作",
+            EscalationKind::ExternalCommitment => "对外影响或承诺",
+        };
+        let fields = [summary, &self.why_lead_cannot_decide, &self.impact, &self.decision];
+        if fields.iter().any(|field| {
+            field.trim().chars().count() < 8
+                || field.chars().count() > 300
+                || field.chars().any(char::is_control)
+        }) {
+            return None;
+        }
+        Some(format!(
+            "{}\n为什么需要你\n{}（{kind}）\n会有什么影响\n{}\n请你决定\n{}",
+            summary.trim(), self.why_lead_cannot_decide.trim(), self.impact.trim(), self.decision.trim()
+        ))
+    }
+}
+
 impl Orchestrator {
+    // The operator's existing coordination opt-in also scopes the lead's responsibility
+    // for routine decisions. Other projects and independent chats retain their policy.
+    pub(crate) async fn lead_manages_questions(&self, run: &Run) -> bool {
+        let Some(home) = self.config.locks.parent() else {
+            return false;
+        };
+        let Ok(bytes) = tokio::fs::read(home.join("coordination-workspaces.json")).await else {
+            return false;
+        };
+        let Ok(roots) = serde_json::from_slice::<Vec<PathBuf>>(&bytes) else {
+            return false;
+        };
+        let Ok(repo) = dunce::canonicalize(&run.repo) else {
+            return false;
+        };
+        roots.iter().any(|root| dunce::canonicalize(root).is_ok_and(|root| {
+            root == repo || (cfg!(windows) &&
+                root.to_string_lossy().eq_ignore_ascii_case(&repo.to_string_lossy()))
+        }))
+    }
+
     /// The policy that applies to `agent`: its run's, else the defaults.
     async fn policy_for(&self, agent: AgentId) -> Result<(Option<Run>, RunPolicy), CoreError> {
         Ok(match self.run_of(agent).await? {
@@ -37,6 +98,10 @@ impl Orchestrator {
         struct A {
             text: String,
             #[serde(default)]
+            escalation: Option<Escalation>,
+            #[serde(default)]
+            detail: Option<String>,
+            #[serde(default)]
             options: Vec<String>,
             #[serde(default)]
             default: Option<String>,
@@ -51,11 +116,31 @@ impl Orchestrator {
                     .into(),
             ));
         }
-        let timeout_at = (policy.human_ask == AskPolicy::Timeout).then(|| {
+        let (text, managed_escalation) = if let Some(run) = &run
+            && self.lead_manages_questions(run).await
+        {
+            let question = a.escalation.as_ref().and_then(|details| details.question(&a.text));
+            let Some(question) = question.filter(|_| caller.id == run.planner) else {
+                return Ok(json!({
+                    "sent_to_user": false,
+                    "next": "The lead owns routine decisions and recoverable blockers. Continue within the existing mandate; workers should use task_ask to contact the lead. For a sensitive command use task_command. The lead can ask the person about security, irreversible consequences, or external commitments with a plain-language summary, why the lead cannot decide, impact, and the exact decision needed."
+                }));
+            };
+            (question, true)
+        } else {
+            (a.text, false)
+        };
+        // A high-impact decision remains pending until a person answers. A model
+        // cannot make it happen by supplying an affirmative timeout default.
+        let timeout_at = (!managed_escalation && policy.human_ask == AskPolicy::Timeout).then(|| {
             Utc::now()
                 + chrono::Duration::milliseconds((policy.ask_timeout_minutes * 60_000.0) as i64)
         });
-        let default = a.default.or_else(|| a.options.first().cloned());
+        let default = if managed_escalation {
+            None
+        } else {
+            a.default.or_else(|| a.options.first().cloned())
+        };
         if timeout_at.is_some() && default.is_none() {
             return Err(CoreError::Conflict(format!(
                 "questions in this run fall back to their default after {} minutes: give options or a default",
@@ -72,18 +157,18 @@ impl Orchestrator {
             .list_human_items(true)
             .await?
             .into_iter()
-            .find(|i| i.from == caller.id && i.text == a.text && i.kind == HumanItemKind::Question)
+            .find(|i| i.from == caller.id && i.text == text && i.kind == HumanItemKind::Question)
         {
             return Ok(json!({ "question_id": same.id, "repeated": true }));
         }
         let item = HumanItem {
             id: item_id("q"),
-            detail: None,
+            detail: a.detail.filter(|detail| !detail.trim().is_empty()),
             kind: HumanItemKind::Question,
             from: caller.id,
             run_id: run.as_ref().map(|r| r.id),
             task_id,
-            text: a.text,
+            text,
             options: a.options,
             default,
             timeout_at,
@@ -120,6 +205,14 @@ impl Orchestrator {
         }
         let a: A = crate::tools::args(input)?;
         let (run, _) = self.policy_for(caller.id).await?;
+        if let Some(run) = &run
+            && self.lead_manages_questions(run).await
+        {
+            return Ok(json!({
+                "sent_to_user": false,
+                "next": "Record this update in the task or run. The platform sends the round completion notification. Use the protected approval flow for a decision the person actually owns."
+            }));
+        }
         let task_id = match &a.task {
             Some(key) => Some(self.find_task(caller, key).await?.id),
             None => None,
@@ -163,6 +256,24 @@ impl Orchestrator {
         if !matches!(previous, HumanItemStatus::Open | HumanItemStatus::Defaulted) {
             return Err(CoreError::Conflict(format!("{id} is already answered")));
         }
+        let now = Utc::now();
+        let approval = item.action == Some(HumanAction::Approval);
+        if approval {
+            if !item.options.contains(&answer) {
+                return Err(CoreError::Conflict("请点击审批卡片中的允许或拒绝。".into()));
+            }
+            if previous != HumanItemStatus::Open
+                || item.timeout_at.is_some_and(|at| at <= now)
+                || !self.approval_live(&item.id)
+            {
+                if previous == HumanItemStatus::Open {
+                    self.dismiss_current_human(&mut item, now).await?;
+                }
+                return Err(CoreError::Conflict(
+                    "这次审批已失效，原操作没有获准。".into(),
+                ));
+            }
+        }
         // Started before the card closes: if the Work cannot start, the card stays.
         if item.action == Some(HumanAction::Work) {
             self.work_decided(&mut item, Some(&answer)).await?;
@@ -170,8 +281,15 @@ impl Orchestrator {
         let default = item.answer.clone();
         item.status = HumanItemStatus::Answered;
         item.answer = Some(answer.clone());
-        item.answered_at = Some(Utc::now());
+        item.answered_at = Some(now);
         self.store().put_human_item(&item).await?;
+        if approval && !self.approval_decided(&item.id, Some(&answer)) {
+            // The action ended during the store write. It never received approval.
+            self.dismiss_current_human(&mut item, now).await?;
+            return Err(CoreError::Conflict(
+                "原操作已结束，这次审批没有生效。".into(),
+            ));
+        }
         self.publish(EventKind::HumanAnswered { item: item.clone() })
             .await;
 
@@ -183,8 +301,7 @@ impl Orchestrator {
             return Ok(item);
         }
         // The agent waits on its own request; the answer goes there, not as a message.
-        if item.action == Some(HumanAction::Approval) {
-            self.approval_decided(&item.id, Some(&answer));
+        if approval {
             return Ok(item);
         }
         let text = if previous == HumanItemStatus::Defaulted {
@@ -211,27 +328,49 @@ impl Orchestrator {
         if item.status != HumanItemStatus::Open {
             return Ok(());
         }
+        self.dismiss_current_human(&mut item, Utc::now()).await
+    }
+
+    /// Caller holds the card lock.
+    async fn dismiss_current_human(
+        &self, item: &mut HumanItem, now: chrono::DateTime<Utc>,
+    ) -> Result<(), CoreError> {
         item.status = HumanItemStatus::Dismissed;
+        item.answer = None;
         // When it was decided, for the chat's record of a Work that did not start.
-        item.answered_at = Some(Utc::now());
-        self.store().put_human_item(&item).await?;
+        item.answered_at = Some(now);
+        self.store().put_human_item(item).await?;
         if item.action == Some(HumanAction::Approval) {
             self.approval_decided(&item.id, None);
         }
         if item.action == Some(HumanAction::Work) {
-            self.work_decided(&mut item, None).await?;
+            self.work_decided(item, None).await?;
         }
-        self.publish(EventKind::HumanDismissed { id: id.to_owned() })
+        self.publish(EventKind::HumanDismissed { id: item.id.clone() })
             .await;
         Ok(())
     }
 
-    /// Questions past their timeout take their default answer.
+    /// Time out live questions. Close approval cards whose action ended or was lost on restart.
     pub async fn expire_questions(&self) -> Result<(), CoreError> {
         let now = Utc::now();
-        for mut item in self.store().list_human_items(true).await? {
-            let Some(at) = item.timeout_at else { continue };
-            if at > now || item.kind != HumanItemKind::Question {
+        for candidate in self.store().list_human_items(true).await? {
+            if candidate.kind != HumanItemKind::Question
+                || (candidate.timeout_at.is_none_or(|at| at > now)
+                    && candidate.action != Some(HumanAction::Approval))
+            {
+                continue;
+            }
+            let _card = self.lock_card(&candidate.id).await;
+            let mut item = self.store().get_human_item(&candidate.id).await?;
+            if item.status != HumanItemStatus::Open {
+                continue;
+            }
+            if item.action == Some(HumanAction::Approval) && !self.approval_live(&item.id) {
+                self.dismiss_current_human(&mut item, now).await?;
+                continue;
+            }
+            if item.timeout_at.is_none_or(|at| at > now) {
                 continue;
             }
             item.status = HumanItemStatus::Defaulted;

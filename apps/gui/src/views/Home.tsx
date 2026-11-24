@@ -70,7 +70,12 @@ function save(key: string, value: unknown) {
  */
 export function HomeView() {
   const agents = useAgents();
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const plugins = useHubData(
+    () => api.listPlugins().then((r) => r.plugins),
+    [],
+    (e) => e.type.startsWith("account.") || e.type === "plugin.changed",
+    "plugins",
+  );
   const scope = useSelectedWorkspace();
   const { list: all } = useWorkspaces();
   // Projects only: the chats group is not a directory to work in.
@@ -267,8 +272,27 @@ export function HomeView() {
   const effort = effortOn || undefined;
   const activeChoice: Choice | undefined = mode === "chat" ? chatModel : lead?.kind === "model" ? lead : leadAgent?.model ? { plugin: leadAgent.plugin, model: leadAgent.model, account: accountOf(leadAgent) } : undefined;
   const activePlugin = plugins.data?.find((p) => p.name === activeChoice?.plugin);
-  const workerPlugin = plugins.data?.find((p) => p.name === (chosenWorker?.plugin ?? leadPlugin));
-  const workerModel = chosenWorker?.model ?? workerModelFor(workerPlugin?.models ?? [], leadModel ?? "");
+  /** Picks a lower-cost back-tier execution model by default for front-tier leads to save high-tier quota. */
+  const autoWorkerChoice = (leadPlug: string | undefined, leadMod: string | undefined, leadAcc?: string): Choice | undefined => {
+    if (!leadPlug) return undefined;
+    if (leadPlug === "antigravity" || leadPlug === "codex") {
+      const tw = offered.find((p) => p.name === "tokenworks");
+      if (tw) return { plugin: "tokenworks", model: tw.models.find((m) => /deepseek-v4\.1-flash/i.test(m)) ?? tw.models[0] };
+      const wbCn = offered.find((p) => p.name === "workbuddy-cn");
+      if (wbCn) return { plugin: "workbuddy-cn", model: wbCn.models.find((m) => /deepseek-v4\.1-flash|glm-5\.3-flash/i.test(m)) ?? wbCn.models[0], account: "codebuddy-cn" };
+      const wbIntl = offered.find((p) => p.name === "workbuddy-intl");
+      if (wbIntl) return { plugin: "workbuddy-intl", model: wbIntl.models.find((m) => /deepseek-v4\.1-flash|glm-5\.3-flash/i.test(m)) ?? wbIntl.models[0], account: "codebuddy-intl" };
+    }
+    const models = plugins.data?.find((p) => p.name === leadPlug)?.models ?? [];
+    return { plugin: leadPlug, model: workerModelFor(models, leadMod ?? models[0] ?? ""), account: leadAcc };
+  };
+  const defaultWorkerChoice = autoWorkerChoice(
+    leadPlugin,
+    leadModel,
+    leadAgent ? accountOf(leadAgent) : lead?.kind === "model" ? lead.account : undefined,
+  );
+  const workerPlugin = plugins.data?.find((p) => p.name === (chosenWorker?.plugin ?? defaultWorkerChoice?.plugin ?? leadPlugin));
+  const workerModel = chosenWorker?.model ?? defaultWorkerChoice?.model ?? workerModelFor(workerPlugin?.models ?? [], leadModel ?? "");
   const workerKey = JSON.stringify([chosenWorker?.id, workerPlugin?.name, workerModel]);
   const workerOverride = workerReasoning?.key === workerKey ? workerReasoning.choice : undefined;
   const workerSetting = workerOverride ?? { model: workerModel, effort: chosenWorker ? effortOf(chosenWorker.config) ?? "" : "" };
@@ -397,8 +421,16 @@ export function HomeView() {
       // A picked session leads as it is, with its conversation; otherwise the lead's effort applies.
       const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort, false);
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
-      // Workers run on the lead's login, on the cheaper sibling of its model.
-      const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
+      // Default execution workers run on lower-cost back-tier models (Tokenworks / WorkBuddy) when the lead is front-tier.
+      const workerChoice: Choice = autoWorkerChoice(
+        planner.plugin,
+        planner.model ?? leadModel,
+        accountOf(planner),
+      ) ?? {
+        plugin: planner.plugin,
+        model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""),
+        account: accountOf(planner),
+      };
       const workerTemplate = chosenWorker ?? (await agentFor("worker", workerChoice, where, undefined, true, workerPermission));
       const reasoningWorker = workerOverride
         ? reasoningWorkerRequest(workerTemplate, where, workerOverride)
@@ -858,7 +890,7 @@ export function HomeView() {
                     label={t("home.permission")}
                     value={workerPermission}
                     onChange={setWorkPerm}
-                    plugin={chosenWorker?.plugin ?? leadPlugin}
+                    plugin={chosenWorker?.plugin ?? workerPlugin?.name ?? leadPlugin}
                   />
                 </div>
                 <div className="reasoning-picks"><ReasoningPicks plugin={workerPlugin} model={workerSetting.model} effort={workerSetting.effort} onChange={(model, effort) => setWorkerReasoning({ key: workerKey, choice: { model, effort } })} /></div>

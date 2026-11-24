@@ -146,6 +146,19 @@ impl CodexNativeDriver {
             return Ok(None);
         };
         let server = AppServer::start(launched?, true);
+        // A runtime host may survive while its transport is newly connected. Do not
+        // assume the connection has inherited the previous initialize handshake.
+        // Only the explicit refusal proves this request was not accepted; never
+        // re-send turns (which may already have been received) on generic errors.
+        if let Err(err) = server.request(method::THREAD_LOADED_LIST, json!({})).await {
+            if !err.to_string().contains("Not initialized") {
+                return Err(err);
+            }
+            server.request(method::INITIALIZE, wire::initialize_params()).await?;
+            server.peer.notify_without_params(method::INITIALIZED)
+                .map_err(|e| CoreError::Agent(e.to_string()))?;
+            server.request(method::THREAD_LOADED_LIST, json!({})).await?;
+        }
         pool.insert(key, Arc::downgrade(&server));
         Ok(Some(server))
     }
@@ -800,6 +813,8 @@ pub struct CodexSession {
     /// Model and effort for the next turns, from `set_model` (and `config.effort`).
     next: Mutex<(Option<String>, Option<String>)>,
     closed: AtomicBool,
+    /// Serialize generation and compaction until their completion notification.
+    operation: tokio::sync::RwLock<()>,
     /// The turn a previous hub started, taken over with the process.
     adopted: Mutex<Option<oneshot::Receiver<TurnEnd>>>,
     /// `adopted_turn` is waiting for that turn.
@@ -875,6 +890,7 @@ impl CodexSession {
             settings,
             next: Mutex::new((None, effort)),
             closed: AtomicBool::new(false),
+            operation: tokio::sync::RwLock::new(()),
             adopted: Mutex::new(None),
             adopted_waiting: AtomicBool::new(false),
         }
@@ -944,6 +960,7 @@ impl DriverSession for CodexSession {
 
     /// Images go as `localImage` input items (docs/tasks/DOGFOOD.md §3).
     async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        let _operation = self.operation.read().await;
         self.check_open()?;
         let (tx, rx) = oneshot::channel();
         {
@@ -1124,14 +1141,32 @@ impl DriverSession for CodexSession {
     }
 
     async fn compact(&self) -> Result<(), CoreError> {
+        let _operation = self.operation.write().await;
         self.check_open()?;
-        self.server
-            .request(
-                method::THREAD_COMPACT,
-                json!({ "threadId": self.thread_id }),
-            )
-            .await
-            .map(|_| ())
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut turn = self.sink.turn();
+            if turn.active.is_some() || turn.waiter.is_some() {
+                return Err(CoreError::Conflict("cannot compact while a turn runs".into()));
+            }
+            *turn = TurnState { waiter: Some(tx), ..TurnState::default() };
+        }
+        // The RPC only acknowledges scheduling. Install the waiter BEFORE sending it:
+        // even an immediate turn/completed must be observed. A contextCompaction item
+        // alone is too early; Codex still has turn cleanup to do.
+        if let Err(err) = self.server.request(
+            method::THREAD_COMPACT, json!({ "threadId": self.thread_id })
+        ).await {
+            self.sink.end_turn();
+            return Err(err);
+        }
+        let end = rx.await.map_err(|_| CoreError::Agent(
+            "compaction ended without completion (session closed or app-server exited)".into()
+        ))?;
+        if end.status != "completed" {
+            return Err(CoreError::Agent(format!("compaction ended: {}", end.status)));
+        }
+        Ok(())
     }
 
     async fn shutdown(&self) {

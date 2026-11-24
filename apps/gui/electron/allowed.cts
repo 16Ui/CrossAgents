@@ -14,6 +14,7 @@ export type Level = "read" | "write" | "admin";
  * It is kept equal to the hub's table so the two can be compared at a glance.
  */
 export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] = [
+  { method: "POST", path: /^\/v1\/runs\/[^/]+\/issues\/dismiss$/, level: "write" },
   { method: "GET", path: /^\/v1\/info$/, level: "read" },
   // The person's own terminals. `output` is not here: main.cts relays it, as it does events.
   { method: "GET", path: /^\/v1\/terminals$/, level: "admin" },
@@ -125,6 +126,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/rearm$/, level: "admin" },
   { method: "POST", path: /^\/v1\/accounts\/[^/]+\/egress$/, level: "admin" },
   { method: "GET", path: /^\/v1\/egress\/candidates$/, level: "read" },
   { method: "POST", path: /^\/v1\/egress\/proxies$/, level: "admin" },

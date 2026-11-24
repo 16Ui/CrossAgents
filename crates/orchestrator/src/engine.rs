@@ -950,6 +950,17 @@ impl Orchestrator {
                 ),
             };
             kickoff_text.push_str(&handoff);
+        } else if let Ok(Some(note)) = self
+            .store
+            .get_note(NoteScope::Team, None, brief::CONSTRAINTS_NOTE)
+            .await
+        {
+            let text = note.text.trim();
+            if !text.is_empty() {
+                kickoff_text
+                    .push_str("\n\nTeam constraints (team note `constraints`, verbatim):\n");
+                kickoff_text.push_str(text);
+            }
         }
         // A checkout the hub could not prepare says so in the kickoff, not only in a log
         // (docs/tasks/TOOLCHAIN.md §7).
@@ -1359,12 +1370,12 @@ impl Orchestrator {
                 return Some(agent.id);
             }
             // A new execution session copies the named one's model and login: any session will do.
-            if let Ok(agent) = self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
+            if let Ok(agent) = self.store.get_agent(&AgentKey::parse(name)).await {
                 return Some(agent.id);
             }
             let known: Vec<&str> = team.iter().map(|a| a.name.as_str()).collect();
             problems.push(format!(
-                "task {task:?}: no session named {name:?} for {field} (team: {}; agent_list lists the rest)",
+                "task {task:?}: no session matches {name:?} for {field}. Use a registered name or ID (team: {})",
                 if known.is_empty() {
                     "none".to_owned()
                 } else {
@@ -1374,7 +1385,7 @@ impl Orchestrator {
             return None;
         }
         // The session itself: any of the workspace's, archived ones too.
-        match self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
+        match self.store.get_agent(&AgentKey::parse(name)).await {
             Ok(agent) => match self.may_take_self(run, &agent, restore).await {
                 Ok(()) => Some(agent.id),
                 Err(CoreError::Conflict(why)) => {
@@ -1430,6 +1441,11 @@ impl Orchestrator {
         if run.status != RunStatus::Planning {
             return Err(CoreError::Conflict(
                 "the run is no longer waiting for a plan".into(),
+            ));
+        }
+        if !run.versioned() && run.config.policy.continuation.is_some() {
+            return Err(CoreError::Conflict(
+                "this managed run works in a directory outside version control and cannot delegate tasks. Work directly in the assigned directory, preserve existing changes, and finish only after verification.".into(),
             ));
         }
         plan::validate(&tasks)
@@ -1734,6 +1750,14 @@ The person changed: {}",
     /// they name to work on them itself would not take them now (`#key: why`). Those stay
     /// pending, their issuer is told, and the next schedule tries again.
     pub(crate) async fn schedule_reporting(&self, run: &mut Run) -> Result<Vec<String>, CoreError> {
+        self.schedule_pending(run, true).await
+    }
+
+    pub(crate) async fn schedule_pending(
+        &self,
+        run: &mut Run,
+        retry_refused: bool,
+    ) -> Result<Vec<String>, CoreError> {
         let mut refused = Vec::new();
         if run.status != RunStatus::Running {
             return Ok(refused);
@@ -1748,10 +1772,13 @@ The person changed: {}",
         // A stage whose tasks have all ended wakes the lead, before the next one is
         // released (docs/research/multica.md §2.2, `crate::stage`).
         self.wake_stages(run, &tasks).await?;
-        let ready: Vec<Task> = plan::ready_tasks(&tasks, run.config.max_parallel)
-            .into_iter()
-            .cloned()
-            .collect();
+        let ready: Vec<Task> = if retry_refused {
+            plan::ready_tasks(&tasks, run.config.max_parallel)
+        } else {
+            plan::ready_tasks_matching(&tasks, run.config.max_parallel, |task| {
+                !previously_refused_dispatch(task)
+            })
+        }.into_iter().cloned().collect();
         for mut task in ready {
             let itself = !task.worker_fresh && !task.escalated;
             let mut tries = 0u32;
@@ -1775,8 +1802,12 @@ The person changed: {}",
                     continue;
                 }
                 crate::attempts::record_start_failure(&mut task, &why, false);
-                self.fail_task(run, &mut task, why).await?;
-                // fail_task schedules again.
+                if retry_refused {
+                    self.fail_task(run, &mut task, why).await?;
+                } else {
+                    self.record_failure(run, &mut task, why).await?;
+                    // The next tick can start independent tasks without retrying refusals.
+                }
                 return Ok(refused);
             }
         }
@@ -1957,7 +1988,11 @@ The person changed: {}",
         // The task as its issuer wrote it, from the issuer.
         let issuer = task.issuer_or(run.planner);
         self.notify_dispatched(issuer, task, &card).await;
-        let mut opening = brief::handover(task, &card);
+        let mut opening = format!(
+            "{}\n\nTask working directory: {}. Keep source changes in this task checkout. If a required input or another project is outside this workspace and access is denied, report it to your lead with task_ask. Continue only independent work already in scope.",
+            brief::handover(task, &card),
+            worker.cwd.display(),
+        );
         if let Some(note) = setup_note {
             opening = format!("{opening}\n\n{note}");
         }
@@ -2437,6 +2472,16 @@ The person changed: {}",
         task: &mut Task,
         reason: String,
     ) -> Result<(), CoreError> {
+        self.record_failure(run, task, reason).await?;
+        Box::pin(self.schedule(run)).await
+    }
+
+    async fn record_failure(
+        &self,
+        run: &Run,
+        task: &mut Task,
+        reason: String,
+    ) -> Result<(), CoreError> {
         crossagents_core::Handoff::end(
             &mut task.handoffs,
             task.assignee,
@@ -2455,7 +2500,7 @@ The person changed: {}",
             NoticeClass::Decide,
         )
         .await;
-        Box::pin(self.schedule(run)).await
+        Ok(())
     }
 
     /// A line in an agent's notification digest. `class` decides whether it wakes them.
@@ -2479,9 +2524,23 @@ The person changed: {}",
         let this = self.clone();
         let mut events = self.bus.subscribe();
         tokio::spawn(async move {
+            let mut active_turns = HashMap::new();
+            let mut denied_tools = HashMap::new();
             loop {
                 match events.recv().await {
                     Ok(event) => match this.note_running(event) {
+                        EventKind::AgentTurnStarted { id, message_id } => {
+                            active_turns.insert(id, message_id);
+                            denied_tools.remove(&id);
+                        }
+                        EventKind::AgentToolDetail { id, detail, .. } => {
+                            if active_turns.contains_key(&id)
+                                && let Some(reason) =
+                                    detail.error.as_deref().and_then(permission_denial)
+                            {
+                                denied_tools.insert(id, reason.to_owned());
+                            }
+                        }
                         EventKind::AgentError { id, message } => {
                             this.turn_errors.lock().unwrap().insert(id, message);
                         }
@@ -2493,6 +2552,21 @@ The person changed: {}",
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             let error = error.filter(|_| stop_reason == StopReason::Error);
                             let cancelled = stop_reason == StopReason::Cancelled;
+                            let denial = if active_turns.get(&id) == Some(&message_id) {
+                                active_turns.remove(&id);
+                                denied_tools.remove(&id)
+                            } else {
+                                None
+                            };
+                            let error = error.or_else(|| {
+                                (stop_reason == StopReason::EndTurn)
+                                    .then(|| {
+                                        denial.map(|reason| {
+                                            format!("Tool permission blocked: {reason}")
+                                        })
+                                    })
+                                    .flatten()
+                            });
                             this.on_idle(id, Some(message_id), error, cancelled).await
                         }
                         EventKind::AgentUpdated { agent } => {
@@ -2536,6 +2610,8 @@ The person changed: {}",
                             to: AgentStatus::Error,
                             ..
                         } => {
+                            active_turns.remove(&id);
+                            denied_tools.remove(&id);
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             // A process that died says nothing about its turn: no id to match.
                             this.on_idle(id, None, error, false).await
@@ -2543,6 +2619,8 @@ The person changed: {}",
                         _ => {}
                     },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        active_turns.clear();
+                        denied_tools.clear();
                         tracing::warn!(skipped = n, "orchestrator fell behind on events");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -2704,6 +2782,10 @@ The person changed: {}",
     }
 }
 
+pub(crate) fn previously_refused_dispatch(task: &Task) -> bool {
+    task.progress.as_deref().is_some_and(|progress| progress.starts_with("not started: "))
+}
+
 /// What a new worker's name starts with: `e` on the run's escalation teammate, `w` on any
 /// other worker.
 pub(crate) fn worker_prefix(run: &Run, task: &Task, template: AgentId) -> &'static str {
@@ -2827,5 +2909,34 @@ pub(crate) fn first_line(text: &str, max: usize) -> String {
         format!("{}…", line.chars().take(max).collect::<String>())
     } else {
         line.to_owned()
+    }
+}
+
+/// The headless provider can refuse a tool while the turn itself ends successfully.
+/// Forward the provider's first line only; leave instructions and output in the transcript.
+pub(crate) fn permission_denial(error: &str) -> Option<&str> {
+    let reason = error.lines().next()?.trim();
+    (reason.starts_with("permission check failed for ")
+        && reason.contains("user denied permission"))
+    .then_some(reason)
+}
+
+#[cfg(test)]
+mod permission_denial_tests {
+    use super::permission_denial;
+
+    #[test]
+    fn recognizes_a_soft_denial_and_excludes_unrelated_tool_errors() {
+        let deny =
+            r#"permission check failed for mcp "crossagents/plan_submit": user denied permission"#;
+        assert_eq!(
+            permission_denial(&format!("{deny}\nAdditional provider instructions.")),
+            Some(deny)
+        );
+        assert_eq!(permission_denial("file does not exist"), None);
+        assert_eq!(
+            permission_denial("permission check failed for file: timeout"),
+            None
+        );
     }
 }

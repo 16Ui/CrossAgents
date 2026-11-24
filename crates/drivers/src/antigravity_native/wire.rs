@@ -50,6 +50,16 @@ impl Step {
     pub fn is_tool(&self) -> bool {
         self.step_type == "tool"
     }
+
+    /// The completed provider request's context. The step reports fresh and cached input
+    /// separately. The final result's input counter instead accumulates across the session.
+    pub fn context_input(&self) -> Option<u64> {
+        if self.is_answer() && self.state.eq_ignore_ascii_case("DONE") {
+            self.usage.map(|usage| usage.input.saturating_add(usage.cache_read))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -109,13 +109,14 @@ test("unavailable runs and missing tasks retain the todo and explain the missing
   assert.equal(missingTask.id, "lost-task");
 });
 
-test("task approval and acceptance use persistent task destinations with escaped IDs", () => {
+test("tool approval opens the exact card and acceptance opens the task", () => {
   const r = run({ id: "run / 1" });
   const t = task({ id: "task / 1", run_id: r.id });
   const approval = human("approval", { action: "approval", run_id: r.id, task_id: t.id });
   const items = derive([approval], [{ run: r, tasks: [t, t] }]);
   assert.equal(items.length, 2);
-  assert.ok(items.every((item) => item.href === "#/runs/run%20%2F%201/tasks/task%20%2F%201"));
+  assert.equal(items.find((item) => item.kind === "approval")?.href, "#/s/leo/questions/approval");
+  assert.equal(items.find((item) => item.kind === "acceptance")?.href, "#/runs/run%20%2F%201/tasks/task%20%2F%201");
   assert.equal(items.find((item) => item.kind === "acceptance")?.action, "confirm");
 });
 
@@ -128,4 +129,68 @@ test("failures managed by a running issuer are quiet; paused or failed work need
     assert.equal(items[0].summary, "Needs recovery");
     assert.equal(items[0].href, "#/runs/run");
   }
+});
+
+test("a Codex stop continued by a later run in the same repo stops asking for a person", () => {
+  const stop = "Codex额度数据不可用或已过期，按严格规则停止";
+  const old = run({ id: "old", status: "paused", note: stop, repo: "C:\\Work\\App", created_at: at(1) });
+  const alone = derive([], [{ run: old, tasks: [] }]);
+  assert.equal(alone.length, 1);
+  assert.equal(alone[0].kind, "failure");
+  // Windows spellings of one repo: separators, case and a trailing slash differ.
+  const newer = run({ id: "newer", repo: "c:/work/app/", created_at: at(2) });
+  assert.deepEqual(derive([], [{ run: old, tasks: [] }, { run: newer, tasks: [] }]), []);
+  assert.equal(old.status, "paused");
+  assert.equal(old.note, stop); // the historical round itself is unchanged
+  // Not a continuation: earlier, another repo, another note, or another status.
+  const earlier = run({ id: "earlier", repo: "C:/work/app", created_at: at(0) });
+  assert.equal(derive([], [{ run: old, tasks: [] }, { run: earlier, tasks: [] }]).length, 1);
+  const elsewhere = run({ id: "elsewhere", repo: "C:/work/app2", created_at: at(2) });
+  assert.equal(derive([], [{ run: old, tasks: [] }, { run: elsewhere, tasks: [] }]).length, 1);
+  const threshold = run({ id: "threshold", status: "paused", repo: "C:/work/app", created_at: at(1),
+    note: "Codex剩余2.0% ≤ 保留线3.0%，本项目全团队已停止；必须由用户明确恢复" });
+  assert.equal(derive([], [{ run: threshold, tasks: [] }, { run: newer, tasks: [] }]).length, 1);
+  const failed = run({ id: "failed", status: "failed", note: stop, repo: "C:/work/app", created_at: at(1) });
+  assert.equal(derive([], [{ run: failed, tasks: [] }, { run: newer, tasks: [] }]).length, 1);
+});
+
+test("a Gemini quota retry pauses locally without asking for a person", () => {
+  const wait = "Gemini 周额度查询失败，暂停并继续轮询";
+  for (const from of ["planning", "awaiting_approval", "running"]) {
+    const retrying = run({ id: from, status: "paused", note: `${wait} · ${from}` });
+    assert.deepEqual(derive([], [{ run: retrying, tasks: [] }]), []);
+  }
+  // Real stops, other suffixes and the bare note still need someone.
+  for (const note of [wait, `${wait} · blocked`, "Gemini 周额度已用 2.0%，EF 已停止"]) {
+    const stopped = run({ id: "stopped", status: "paused", note });
+    const items = derive([], [{ run: stopped, tasks: [] }]);
+    assert.equal(items.length, 1);
+    assert.equal(items[0].summary, note);
+  }
+});
+
+
+test("closing a finished run warning preserves its history and any new actionable alert", () => {
+  const old = run({ status: "failed", note: "3 of 3 tasks did not merge" });
+  const runs = [{ run: old, tasks: [] }];
+  const item = derive([], runs)[0];
+  assert.equal(item.summary, "Work：有 3 项任务未合并");
+  assert.equal(item.href, "#/runs/run");
+  assert.ok(item.dismissKey);
+  const dismissedFailures = new Set([item.dismissKey]);
+  const approval = human("actual-approval", { action: "approval", run_id: old.id });
+  assert.deepEqual(todoItems({ items: [approval], runs, now, dismissedFailures }).map(x => x.id),
+    [approval.id]);
+  assert.equal(old.status, "failed");
+  assert.equal(todoItems({ items: [], runs: [{ run: { ...old, note: "Another failure" }, tasks: [] }],
+    now, dismissedFailures }).length, 1);
+});
+
+test("the lead owns routine acceptance while a managed run is active", () => {
+  const active = run();
+  active.config.policy = { ...active.config.policy, continuation: {
+    max_attempts: 24, interval_seconds: 300, stuck_minutes: 20,
+  } };
+  const approval = human("sensitive-command", { action: "approval", run_id: active.id });
+  assert.deepEqual(derive([approval], [{ run: active, tasks: [task()] }]).map(x => x.id), [approval.id]);
 });

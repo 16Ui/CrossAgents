@@ -102,15 +102,59 @@ pub struct CollabSetup {
     pub orchestrator: Arc<OnceLock<Arc<crossagents_orchestrator::Orchestrator>>>,
 }
 
+const COORDINATION_ENV: &str = crossagents_drivers::antigravity_native::COORDINATION_ENV;
+
 impl CollabSetup {
+    /// The operator opts a workspace in. Only a live role claim in one of those exact
+    /// workspaces can add task tools to a protected Antigravity session.
+    async fn coordination_role(&self, agent: &Agent) -> Option<&'static str> {
+        if agent.plugin != "antigravity" {
+            return None;
+        }
+        let orchestrator = self.orchestrator.get()?;
+        let store = orchestrator.store();
+        let claim = store.claim_of(agent.id).await.ok()??;
+        let run = store.get_run(claim.run_id).await.ok()?;
+        if !matches!(
+            run.status,
+            crossagents_core::RunStatus::Planning | crossagents_core::RunStatus::Running
+        ) {
+            return None;
+        }
+        let settings = self
+            .worktrees
+            .parent()?
+            .join("coordination-workspaces.json");
+        let roots: Vec<PathBuf> = serde_json::from_slice(&std::fs::read(settings).ok()?).ok()?;
+        let repo = dunce::canonicalize(&run.repo).ok()?;
+        if !roots.iter().any(|root| {
+            dunce::canonicalize(root).is_ok_and(|resolved| {
+                resolved == repo
+                    || (cfg!(windows)
+                        && resolved
+                            .to_string_lossy()
+                            .eq_ignore_ascii_case(&repo.to_string_lossy()))
+            })
+        }) {
+            return None;
+        }
+        Some(match claim.role {
+            crossagents_core::ClaimRole::Lead if run.planner == agent.id => "lead",
+            crossagents_core::ClaimRole::Worker if claim.task_id.is_some() => "worker",
+            crossagents_core::ClaimRole::Reviewer if claim.task_id.is_some() => "reviewer",
+            _ => return None,
+        })
+    }
+
     /// The account's environment, plus what the project declares for an agent in a run
     /// worktree; the account's wins (docs/tasks/TOOLCHAIN.md §3.2).
     async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
         let account = self.accounts.agent_env(agent).await?;
-        let env = with_project_env(
+        let mut env = with_project_env(
             account,
             worktree_env(&self.worktrees, &agent.cwd, self.shims.as_deref()),
         );
+        env.retain(|(name, _)| !name.eq_ignore_ascii_case(COORDINATION_ENV));
         Ok(env)
     }
 }
@@ -156,7 +200,10 @@ impl SessionSetup for CollabSetup {
         // (docs/research/multica.md §2.9). A CLI that has not answered its version starts as
         // before.
         crate::version_gate::check(agent, &self.plugins).await?;
-        let agent_env = self.agent_env(agent).await?;
+        let mut agent_env = self.agent_env(agent).await?;
+        if let Some(role) = self.coordination_role(agent).await {
+            agent_env.push((COORDINATION_ENV.into(), role.into()));
+        }
         // Use the driver's existing proxy-only refusal for sessions that have no proxy,
         // including drivers which do not otherwise run the vendor reachability probe.
         if crossagents_drivers::process::effective_proxy_url(&agent_env).is_none() {
@@ -274,6 +321,11 @@ pub struct HubHost {
 
 #[async_trait]
 impl AgentHost for HubHost {
+    async fn continuation_dispatch_allowed(&self, lead: AgentId) -> Result<(), CoreError> {
+        self.runtime.continuation_dispatch_allowed(lead).await
+    }
+
+
     async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
         self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
         self.runtime.tell_later(agent, topic, line.to_owned()).await;
@@ -692,7 +744,7 @@ mod tests {
     #[test]
     fn the_accounts_environment_wins_over_the_projects() {
         let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
-        let env = with_project_env(
+        let mut env = with_project_env(
             vec![pair("HTTPS_PROXY", "http://127.0.0.1:7890")],
             vec![
                 pair("HTTPS_PROXY", "http://elsewhere"),
@@ -711,7 +763,7 @@ mod tests {
     #[test]
     fn a_project_cannot_set_the_hubs_egress_policy() {
         let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
-        let env = with_project_env(
+        let mut env = with_project_env(
             Vec::new(),
             vec![
                 pair(EGRESS_ENV, "allow_direct"),
@@ -720,7 +772,7 @@ mod tests {
         );
         assert_eq!(env, [pair("CARGO_TARGET_DIR", "/b")]);
         // Case does not let it in either, on any platform.
-        let env = with_project_env(
+        let mut env = with_project_env(
             Vec::new(),
             vec![pair("crossagents_egress_policy", "allow_direct")],
         );

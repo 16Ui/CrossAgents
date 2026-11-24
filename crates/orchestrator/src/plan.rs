@@ -33,6 +33,15 @@ pub fn validate(tasks: &[PlannedTask]) -> Result<(), String> {
         if task.title.trim().is_empty() {
             problems.push(format!("task {key:?} needs a title"));
         }
+        for entry in &task.spec.scope.allow {
+            let path = entry.replace('\\', "/");
+            let drive_prefix = path.as_bytes().get(1) == Some(&b':');
+            if path.starts_with('/') || drive_prefix || path.split('/').any(|part| part == "..") {
+                problems.push(format!(
+                    "task {key:?} write scope {entry:?} must be relative to this run's checkout; use a separate run for another workspace"
+                ));
+            }
+        }
         if task.spec.goal.trim().is_empty() {
             problems.push(format!("task {key:?} needs spec.goal"));
         }
@@ -171,6 +180,14 @@ pub fn empty_scope_keys(tasks: &[PlannedTask]) -> Vec<&str> {
 /// [`crate::stage`]), no scope overlap with work in progress or with each other, and within the
 /// parallelism limit.
 pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
+    ready_tasks_matching(tasks, max_parallel, |_| true)
+}
+
+pub(crate) fn ready_tasks_matching(
+    tasks: &[Task],
+    max_parallel: u32,
+    eligible: impl Fn(&Task) -> bool,
+) -> Vec<&Task> {
     let merged: HashSet<&str> = tasks
         .iter()
         .filter(|t| t.status == TaskStatus::Merged)
@@ -181,7 +198,7 @@ pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
         .filter(|t| t.status != TaskStatus::Pending && !t.status.is_terminal())
         .collect();
     let mut ready = Vec::new();
-    for task in tasks.iter().filter(|t| t.status == TaskStatus::Pending) {
+    for task in tasks.iter().filter(|t| t.status == TaskStatus::Pending && eligible(t)) {
         // A task split off another works in its own worktree and merges back into it: the
         // tasks it came from neither block it nor count against the limit (they wait for it).
         let others: Vec<&&Task> = active
@@ -327,6 +344,20 @@ mod tests {
         assert!(err.contains("cycle"), "{err}");
     }
 
+    #[test]
+    fn rejects_write_scopes_outside_the_run_checkout() {
+        for path in [
+            "D:/Other/**",
+            r"\\server\repo\**",
+            "../other/**",
+            "/tmp/other/**",
+        ] {
+            let mut task = planned("outside", &[]);
+            task.spec.scope.allow = vec![path.into()];
+            let error = validate(&[task]).unwrap_err();
+            assert!(error.contains("relative to this run's checkout"), "{error}");
+        }
+    }
     #[test]
     fn scope_overlap() {
         let s = |allow: &[&str]| Scope {

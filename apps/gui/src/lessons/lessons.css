@@ -36,3 +36,9 @@
 .lesson-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .lesson-files li { display: flex; align-items: center; gap: 6px; }
 .lesson-clue { font-size: 12px; }
+
+
+/* Keep actions usable in a narrow sidebar even when a long request error is shown. */
+.issue-notice-actions { padding: 4px 8px; flex-wrap: wrap; min-width: 0; }
+.issue-notice-actions > button { flex: 0 0 auto; white-space: nowrap; }
+.issue-notice-actions > [role="alert"] { flex: 1 0 100%; min-width: 0; width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }

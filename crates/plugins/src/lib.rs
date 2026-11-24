@@ -26,6 +26,7 @@ pub mod claude_account;
 pub mod codebuddy_account;
 pub mod codex_account;
 pub mod cursor_account;
+pub mod deepseek_account;
 pub mod env_driver;
 pub mod gemini_account;
 pub mod manifest;
@@ -777,6 +778,13 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_uses_native_without_offering_unsafe_acp_by_default() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        assert_eq!(registry.get("antigravity").unwrap().kind(), DriverKind::AntigravityNative);
+        assert!(registry.driver("antigravity", Some("acp-generic")).is_err());
+    }
+
+    #[test]
     fn claude_defaults_to_its_native_driver_and_unknown_drivers_fail() {
         let registry = PluginRegistry::with_config(&BTreeMap::new());
         assert_eq!(
@@ -843,6 +851,14 @@ mod tests {
                 .unwrap()
                 .native_command
                 .is_empty()
+        );
+        assert_eq!(
+            registry.get("workbuddy-cn").unwrap().kind(),
+            DriverKind::CodebuddyNative
+        );
+        assert_eq!(
+            registry.get("workbuddy-intl").unwrap().kind(),
+            DriverKind::CodebuddyNative
         );
     }
 

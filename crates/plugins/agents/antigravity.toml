@@ -9,6 +9,7 @@
 # the `gemini` plugin above stays for enterprise Code Assist and pay-as-you-go API keys.
 name = "antigravity"
 driver = "antigravity-native"
+# Guarded ACP is unavailable: the vendor may execute an unanswered approval.
 # The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them the
 # CLI still runs, marked unverified.
 verified = ["1.5"]

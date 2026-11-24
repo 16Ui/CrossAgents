@@ -197,3 +197,19 @@ hub 的登录命令拿到的是**关闭的 stdin**，所以码没处可写。补
 - 自更新：`agy update`，或后台自动（`~/.gemini/antigravity-cli/updater/update.lock`）。
 - 国内网络注意：`storage.googleapis.com` 下载二进制这一跳经常握手失败，`antigravity.google`
   和 Cloud Run 的 manifest 却能通；代理要能到 Google Storage 才行。
+
+
+### Task command approval in CrossAgents
+
+Protected task sessions request commands through `task_command`. The request contains
+the task key, exact command, purpose and a time limit. The hub resolves the active task
+worktree, shows it on the approval card and executes through the workspace resource locks.
+A one-time approval only releases the request that created the card. A denial, expired
+card or lost client connection cannot grant a subsequent attempt.
+
+The host administrator may put existing reusable grants in `task-command-grants.json` under CrossAgents
+home. The file is an array of records containing agent, task, directory, command,
+timeout_secs and expires_at. The agent and task are UUIDs, the directory identifies the
+exact managed worktree, and the expiration is an ISO 8601 timestamp. A grant matches the
+exact command and allows requests up to its time limit. A one-time approval is never
+written as a reusable grant.

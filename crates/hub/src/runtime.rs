@@ -384,6 +384,7 @@ impl Inbox {
     /// Pops the next message and marks a turn running, under the queue's lock: a closing
     /// [`Self::close_if_idle`] sees the message still queued, or the turn running, never
     /// neither. `None` when closed or nothing is waiting.
+    #[cfg(test)]
     fn pop_turn(&self) -> Option<(MessageId, Prompt)> {
         let mut waiting = self.waiting.lock().unwrap();
         if self.closed.load(Ordering::SeqCst) {
@@ -393,6 +394,36 @@ impl Inbox {
         self.busy.store(true, Ordering::SeqCst);
         *self.running.lock().unwrap() = Some(message.0);
         Some(message)
+    }
+
+    /// Pops the next message and coalesces any queued non-human messages behind it (up to
+    /// `max_extra`) into one turn so bursty teammate updates do not trigger N separate turns.
+    fn pop_turn_batch(&self, max_extra: usize) -> Option<(MessageId, Prompt, Vec<MessageId>)> {
+        let mut waiting = self.waiting.lock().unwrap();
+        if self.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let (first_id, mut first_prompt) = waiting.pop_front()?;
+        self.busy.store(true, Ordering::SeqCst);
+        *self.running.lock().unwrap() = Some(first_id);
+        let mut extras = Vec::new();
+        let from_person = self.from_person.lock().unwrap();
+        if !from_person.contains(&first_id) {
+            while extras.len() < max_extra {
+                let Some((next_id, _)) = waiting.front() else {
+                    break;
+                };
+                if from_person.contains(next_id) {
+                    break;
+                }
+                let (extra_id, extra_prompt) = waiting.pop_front().unwrap();
+                first_prompt.text.push_str("\n\n---\n");
+                first_prompt.text.push_str(&extra_prompt.text);
+                first_prompt.attachments.extend(extra_prompt.attachments);
+                extras.push(extra_id);
+            }
+        }
+        Some((first_id, first_prompt, extras))
     }
 
     /// Closes the queue unless a turn runs in it, decided under the queue's lock (see
@@ -500,6 +531,8 @@ enum Control {
     Compacted,
     Stopped,
     Detached,
+    CircuitTripped(String),
+    Coalesced(Vec<MessageId>, StopReason),
 }
 
 /// A session's event and control channels.
@@ -605,6 +638,11 @@ impl Runtime {
         &self.plugins
     }
 
+    pub(crate) async fn continuation_dispatch_allowed(&self, lead: AgentId) -> Result<(), CoreError> {
+        let agent = self.store().get_agent(&AgentKey::Id(lead)).await?;
+        crate::project_quota::check(self.home.as_deref(), &agent)
+    }
+
     fn store(&self) -> &Arc<dyn Store> {
         self.bus.store()
     }
@@ -660,7 +698,11 @@ impl Runtime {
                     }
                 }
             }
-            set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+            // A quota-protecting circuit break is durable. A hub restart must not
+            // turn it into a routine wakeup that bypasses the recovery decision.
+            if agent.status != AgentStatus::Error {
+                set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+            }
             if let Some(message_id) = running {
                 publish(
                     &self.bus,
@@ -1001,6 +1043,7 @@ impl Runtime {
     /// Starts the agent's session if it is not running. Idempotent.
     pub async fn start(&self, key: &AgentKey) -> Result<Agent, CoreError> {
         let agent = self.store().get_agent(key).await?;
+        crate::project_quota::check(self.home.as_deref(), &agent)?;
         if agent.plugin == EXTERNAL_PLUGIN {
             return Err(CoreError::Conflict(format!(
                 "{} runs outside the hub; it reads its messages with inbox_read",
@@ -1009,8 +1052,26 @@ impl Runtime {
         }
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
-        if self.is_live(agent.id).await {
-            return Ok(agent);
+        let retired = {
+            let mut live = self.live.lock().await;
+            match live.get(&agent.id) {
+                Some(session) if !session.inbox.is_closed() => return Ok(agent),
+                Some(_) => live.remove(&agent.id),
+                None => None,
+            }
+        };
+        if let Some(retired) = retired {
+            // The failed turn already ended. Transfer every still-waiting
+            // message to the replacement session, as renew() does.
+            let mut carried = self.carried.lock().await;
+            match carried.get(&agent.id) {
+                Some(queue) => queue.take_from(&retired.inbox),
+                None => {
+                    carried.insert(agent.id, retired.inbox.clone());
+                }
+            }
+            drop(carried);
+            retired.session.shutdown().await;
         }
         // Read again under the lock: `place` may have moved it meanwhile.
         let agent = self.store().get_agent(&AgentKey::Id(agent.id)).await?;
@@ -1022,6 +1083,7 @@ impl Runtime {
     /// session that cannot be resumed is an error instead of a new one: the agent was moved
     /// to work with its conversation (docs/tasks/S1.md §3.1).
     async fn open(&self, agent: &Agent, carry: bool) -> Result<(), CoreError> {
+        crate::project_quota::check(self.home.as_deref(), agent)?;
         crate::builtin_node::check_node(agent)?;
         let agent = agent.clone();
         let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
@@ -1537,6 +1599,7 @@ impl Runtime {
             ),
             Err(_) => (StreamRules::default(), None),
         };
+        let context_used = Arc::new(AtomicU64::new(0));
         tokio::spawn(forward_events(
             self.bus.clone(),
             id,
@@ -1546,11 +1609,13 @@ impl Runtime {
             generation,
             rules,
             witness,
+            context_used.clone(),
         ));
         if adopted.is_some() {
             inbox.busy.store(true, Ordering::SeqCst);
         }
         tokio::spawn(run_turns(
+            id,
             session,
             inbox.clone(),
             control_tx,
@@ -1558,6 +1623,8 @@ impl Runtime {
             adopted,
             self.notice_state.clone(),
             self.store().clone(),
+            context_used,
+            self.home.clone(),
         ));
         self.live.lock().await.insert(id, live);
         inbox
@@ -1674,6 +1741,7 @@ impl Runtime {
     ) -> Result<Delivery, SteerFailure> {
         let message_id = envelope.id;
         let stored = self.store().get_agent(key).await?;
+        crate::project_quota::check(self.home.as_deref(), &stored)?;
         let live = if stored.archived_at.is_none() && stored.plugin != EXTERNAL_PLUGIN {
             self.live.lock().await.get(&stored.id).cloned()
         } else {
@@ -1908,7 +1976,7 @@ impl Runtime {
         )
         .await;
         let rows = self.store().list_pending_notices(Some(stored.id)).await?;
-        if stored.archived_at.is_some() {
+        if stored.archived_at.is_some() || stored.status == AgentStatus::Error {
             return Ok(());
         }
         if self.has_waiting_digest(stored.id).await || self.should_wake(stored.id, &rows) {
@@ -1930,9 +1998,9 @@ impl Runtime {
             let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
                 continue;
             };
-            // Archived agents are not delivered to. The rows stay on this agent id, so a
-            // later session of the same agent still has them.
-            if agent.archived_at.is_some() {
+            // Keep notices on the agent while it is archived or its error breaker
+            // is open. A deliberate recovery or manual start can carry them later.
+            if agent.archived_at.is_some() || agent.status == AgentStatus::Error {
                 continue;
             }
             let stale = self.notice_state.digest_message(id).is_some()
@@ -1970,6 +2038,7 @@ impl Runtime {
         queued_reason: Option<QueuedReason>,
     ) -> Result<Delivery, CoreError> {
         let stored = self.store().get_agent(key).await?;
+        crate::project_quota::check(self.home.as_deref(), &stored)?;
         let claimed = match self.claim_client(stored.id, client_message_id).await {
             ClientClaim::Repeat(delivery) => return Ok(delivery),
             ClientClaim::RepeatUnknown(_) => {
@@ -2284,8 +2353,15 @@ impl Runtime {
 
     fn can_start_wake(&self, id: AgentId, row: &PendingNotice) -> bool {
         let inflight = self.notice_state.inflight_versions(id);
+        // The run already reserved this wake and schedules the next one.
+        // Retain the notice for carry-along, but never start an extra retry.
+        let limit = if row.topic.starts_with("continuation:") {
+            1
+        } else {
+            Self::notice_auto_limit()
+        };
         row.carried_by.is_none()
-            && row.wake_tries < Self::notice_auto_limit()
+            && row.wake_tries < limit
             && !version_inflight(row, &inflight)
     }
 
@@ -3172,9 +3248,75 @@ async fn set_status(bus: &EventBus, id: AgentId, to: AgentStatus) {
     publish(bus, EventKind::AgentStatusChanged { id, from, to }).await;
 }
 
+/// Builds a compact Markdown state snapshot for the active run's lead whose session
+/// context was rotated, containing: (1) Run Goal/Spec, (2) DB Markdown task table, and
+/// (3) active human/task blockers.
+async fn build_lead_state_snapshot(store: &dyn Store, agent_id: AgentId) -> Option<String> {
+    // The actual run owner may be an existing chat with a different template role.
+    let runs = store.list_runs().await.ok()?;
+    let run = runs
+        .iter()
+        .find(|r| r.planner == agent_id && !r.status.is_terminal())?;
+
+    let goal: String = run.request.chars().take(400).collect();
+    let mut out = format!(
+        "### Compact State Snapshot (Context Rotated)\n**Run**: {} (`{:?}`)\n**Spec / Goal**: {}\n\n",
+        run.title, run.status, goal.replace('\n', " ")
+    );
+
+    if let Ok(tasks) = store.list_tasks(run.id).await
+        && !tasks.is_empty()
+    {
+        let agents = store.list_agents().await.unwrap_or_default();
+        let name_of = |id: Option<AgentId>| -> String {
+            id.and_then(|aid| agents.iter().find(|a| a.id == aid).map(|a| a.name.clone()))
+                .unwrap_or_else(|| "-".to_owned())
+        };
+        out.push_str("| Key | Title | Assignee | Status | Summary / Progress |\n|---|---|---|---|---|\n");
+        for t in &tasks {
+            let summary = t
+                .report
+                .failure
+                .as_deref()
+                .or(t.progress.as_deref())
+                .or(t.report.summary.as_deref())
+                .unwrap_or("-");
+            let short: String = summary.replace(['\n', '|'], " ").chars().take(80).collect();
+            let title: String = t.title.replace(['\n', '|'], " ").chars().take(50).collect();
+            out.push_str(&format!(
+                "| #{} | {} | {} | {:?} | {} |\n",
+                t.key,
+                title,
+                name_of(t.assignee),
+                t.status,
+                short
+            ));
+        }
+        out.push('\n');
+    }
+
+    if let Ok(items) = store.list_human_items(true).await {
+        let blockers: Vec<_> = items
+            .into_iter()
+            .filter(|i| i.run_id == Some(run.id))
+            .collect();
+        if !blockers.is_empty() {
+            out.push_str("**Active Blockers / Questions**:\n");
+            for b in blockers.iter().take(5) {
+                let text: String = b.text.replace('\n', " ").chars().take(120).collect();
+                out.push_str(&format!("- [{}] {}\n", b.id, text));
+            }
+            out.push('\n');
+        }
+    }
+
+    Some(out)
+}
+
 /// Runs one prompt at a time from the inbox. With `diff_dir` (drivers without
 /// `structured_diff`), snapshots that directory around each turn to tell what it changed.
 async fn run_turns(
+    agent_id: AgentId,
     session: Arc<dyn DriverSession>,
     inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
@@ -3182,6 +3324,8 @@ async fn run_turns(
     adopted: Option<MessageId>,
     notices: Arc<NoticeState>,
     store: Arc<dyn Store>,
+    context_used: Arc<AtomicU64>,
+    quota_home: Option<PathBuf>,
 ) {
     // The turn a previous hub started goes on in the process taken over; it ends first.
     if let Some(message_id) = adopted {
@@ -3198,7 +3342,29 @@ async fn run_turns(
             return;
         }
     }
-    while let Some((message_id, prompt)) = next_turn(&inbox, &notices).await {
+    let mut consecutive_errors: usize = 0;
+    const MAX_CONSECUTIVE_ERRORS: usize = 3;
+    let is_planner = store
+        .get_agent(&AgentKey::Id(agent_id))
+        .await
+        .is_ok_and(|a| a.role == crossagents_core::Role::Planner);
+
+    while let Some((message_id, mut prompt, extras)) = next_turn(&inbox, &notices).await {
+        let quota = match store.get_agent(&AgentKey::Id(agent_id)).await {
+            Ok(agent) => crate::project_quota::check(quota_home.as_deref(), &agent),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = quota {
+            inbox.close();
+            let _ = report_turn(&control, message_id, Err(err.to_string()), None).await;
+            return;
+        }
+        // A rotated model context receives the current lead's saved work and blockers.
+        if session.take_context_rotated()
+            && let Some(snapshot) = build_lead_state_snapshot(store.as_ref(), agent_id).await
+        {
+            prompt.text = format!("{snapshot}---\n{}", prompt.text);
+        }
         // Before the turn is announced: an interrupt that follows the announcement must find
         // the prompt already running.
         let base = match &diff_dir {
@@ -3211,6 +3377,37 @@ async fn run_turns(
             .await
             .map(|outcome| outcome.stop_reason)
             .map_err(|e| e.to_string());
+
+        let is_error = matches!(&result, Ok(StopReason::Error) | Err(_));
+        let err_text = result.as_ref().err().map(String::as_str).unwrap_or("");
+        let lower_err = err_text.to_ascii_lowercase();
+        let hard_quota = lower_err.contains("individual quota reached")
+            || lower_err.contains("insufficient balance");
+        let rate_limited = !hard_quota
+            && (lower_err.contains("rate limit")
+                || lower_err.contains("too many requests")
+                || err_text.contains("超出频率限制")
+                || lower_err
+                    .split(|c: char| !c.is_ascii_digit())
+                    .any(|n| n == "429"));
+        if is_error {
+            consecutive_errors = if hard_quota {
+                MAX_CONSECUTIVE_ERRORS
+            } else {
+                consecutive_errors + 1
+            };
+            tracing::warn!(
+                %message_id,
+                consecutive_errors,
+                max = MAX_CONSECUTIVE_ERRORS,
+                hard_quota,
+                rate_limited,
+                "agent turn failed with error"
+            );
+        } else if matches!(&result, Ok(StopReason::EndTurn)) {
+            consecutive_errors = 0;
+        }
+
         let diff = match (&diff_dir, base) {
             (Some(dir), Some(base)) => match crate::snapshot::take(dir).await {
                 Some(head) => crate::snapshot::diff(dir, &base, &head).await,
@@ -3222,9 +3419,62 @@ async fn run_turns(
         // rows and counts one failed automatic wake.
         let ended = matches!(&result, Ok(StopReason::EndTurn));
         notices.settle(store.as_ref(), message_id, ended).await;
+        for &extra_id in &extras {
+            notices.settle(store.as_ref(), extra_id, ended).await;
+        }
         inbox.finish_turn();
+        if !extras.is_empty() {
+            let reason = match &result {
+                Ok(r) => *r,
+                Err(_) => StopReason::Error,
+            };
+            let _ = control.send(Control::Coalesced(extras, reason));
+        }
         if !report_turn(&control, message_id, result, diff).await {
             return;
+        }
+
+        if ended {
+            if let Ok(agent) = store.get_agent(&AgentKey::Id(agent_id)).await {
+                if crate::project_quota::check(quota_home.as_deref(), &agent).is_err() {
+                    inbox.close();
+                    return;
+                }
+            }
+            let used = context_used.load(Ordering::Relaxed);
+            let max_tokens = if is_planner { 100_000 } else { 120_000 };
+            if used >= max_tokens {
+                context_used.store(0, Ordering::Relaxed);
+                match session.compact().await {
+                    Ok(()) => {
+                        let _ = control.send(Control::Compacted);
+                        tracing::info!(
+                            %agent_id,
+                            used,
+                            max_tokens,
+                            "auto-compacted/rotated session at context cap"
+                        );
+                    }
+                    Err(CoreError::Unsupported(_)) => {}
+                    Err(err) => {
+                        tracing::warn!(%agent_id, error = %err, "auto-compact failed");
+                    }
+                }
+            }
+        }
+
+        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            let reason = format!(
+                "agent hit consecutive error limit ({MAX_CONSECUTIVE_ERRORS}); stopping turn loop to protect quota"
+            );
+            tracing::error!(%reason, "tripping circuit breaker");
+            inbox.close();
+            let _ = control.send(Control::CircuitTripped(reason));
+            return;
+        }
+        if rate_limited {
+            tracing::info!(%agent_id, "rate limited (429); backing off 15s before next turn");
+            tokio::time::sleep(Duration::from_secs(15)).await;
         }
     }
 }
@@ -3252,18 +3502,24 @@ async fn report_turn(
 
 /// The next inbox message, marking its notice versions in flight in the same critical
 /// section as the pop so a flush cannot queue them a second time.
-async fn next_turn(inbox: &Inbox, notices: &NoticeState) -> Option<(MessageId, Prompt)> {
+async fn next_turn(
+    inbox: &Inbox,
+    notices: &NoticeState,
+) -> Option<(MessageId, Prompt, Vec<MessageId>)> {
     loop {
         enum Step {
             Closed,
             Wait,
-            Ready((MessageId, Prompt)),
+            Ready((MessageId, Prompt, Vec<MessageId>)),
         }
         let step = {
             let _turn = notices.turn.lock().unwrap();
-            if let Some(message) = inbox.pop_turn() {
-                notices.mark_inflight(message.0);
-                Step::Ready(message)
+            if let Some(batch) = inbox.pop_turn_batch(10) {
+                notices.mark_inflight(batch.0);
+                for &extra in &batch.2 {
+                    notices.mark_inflight(extra);
+                }
+                Step::Ready(batch)
             } else if inbox.is_closed() {
                 Step::Closed
             } else {
@@ -3272,7 +3528,7 @@ async fn next_turn(inbox: &Inbox, notices: &NoticeState) -> Option<(MessageId, P
         };
         match step {
             Step::Closed => return None,
-            Step::Ready(message) => return Some(message),
+            Step::Ready(batch) => return Some(batch),
             Step::Wait => inbox.wait_for_message().await,
         }
     }
@@ -3346,6 +3602,7 @@ async fn forward_events(
     generation: u64,
     mut rules: StreamRules,
     mut witness: Option<crate::cli_runs::Witness>,
+    context_used: Arc<AtomicU64>,
 ) {
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
@@ -3360,6 +3617,12 @@ async fn forward_events(
             event = events.recv(), if events_open && control.is_empty() => match event {
                 Some(event) => {
                     if let Some(witness) = witness.as_mut() { witness.observe(&event); }
+                    if let SessionEventKind::Usage { used, tokens, .. } = &event.kind {
+                        let ctx = tokens.as_ref().map(|t| t.input).unwrap_or(0).max(*used);
+                        if ctx > 0 {
+                            context_used.store(ctx, Ordering::Relaxed);
+                        }
+                    }
                     if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                     let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
@@ -3380,6 +3643,12 @@ async fn forward_events(
                 if !matches!(ctl, Some(Control::TurnStarted(..))) {
                     while let Ok(event) = events.try_recv() {
                         if let Some(witness) = witness.as_mut() { witness.observe(&event); }
+                    if let SessionEventKind::Usage { used, tokens, .. } = &event.kind {
+                        let ctx = tokens.as_ref().map(|t| t.input).unwrap_or(0).max(*used);
+                        if ctx > 0 {
+                            context_used.store(ctx, Ordering::Relaxed);
+                        }
+                    }
                         if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                         let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                         if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
@@ -3454,10 +3723,25 @@ async fn forward_events(
                         // The next turn may start now (see `Control`).
                         let _ = done.send(());
                     }
+                    Some(Control::Coalesced(extras, stop_reason)) => {
+                        for message_id in extras {
+                            publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason }).await;
+                        }
+                    }
                     Some(Control::Stopped) | None => {
                         if let Some(message_id) = running.take() {
                             publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: StopReason::Cancelled }).await;
                         }
+                        return;
+                    }
+                    Some(Control::CircuitTripped(reason)) => {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: StopReason::Error }).await;
+                        }
+                        publish(&bus, EventKind::AgentError { id, message: format!("Circuit breaker: {reason}") }).await;
+                        set_status(&bus, id, AgentStatus::Error).await;
+                        announce_inbox(&bus, id, &live, generation).await;
                         return;
                     }
                     Some(Control::Detached) => return,
@@ -3815,8 +4099,8 @@ impl NoticeState {
             turn: std::sync::Mutex::new(()),
             digests: std::sync::Mutex::new(HashMap::new()),
             inflight: std::sync::Mutex::new(HashMap::new()),
-            quiet_ms: AtomicU64::new(60_000),
-            max_ms: AtomicU64::new(180_000),
+            quiet_ms: AtomicU64::new(15_000),
+            max_ms: AtomicU64::new(45_000),
         }
     }
 
@@ -4136,6 +4420,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pop_turn_batch_coalesces_teammate_messages_but_isolates_human_messages() {
+        let inbox = Inbox::default();
+        let m1 = MessageId::new();
+        let m2 = MessageId::new();
+        let h1 = MessageId::new();
+        let m3 = MessageId::new();
+        inbox.push((m1, Prompt::text("worker 1 done")), false);
+        inbox.push((m2, Prompt::text("worker 2 done")), false);
+        inbox.from_person.lock().unwrap().insert(h1);
+        inbox.push((h1, Prompt::text("human question")), false);
+        inbox.push((m3, Prompt::text("worker 3 done")), false);
+
+        let (id, prompt, extras) = inbox.pop_turn_batch(10).unwrap();
+        assert_eq!(id, m1);
+        assert_eq!(extras, vec![m2]);
+        assert!(prompt.text.contains("worker 1 done"));
+        assert!(prompt.text.contains("worker 2 done"));
+        assert!(!prompt.text.contains("human question"));
+        inbox.finish_turn();
+
+        let (id, prompt, extras) = inbox.pop_turn_batch(10).unwrap();
+        assert_eq!(id, h1);
+        assert!(extras.is_empty(), "human messages must not absorb background updates");
+        assert_eq!(prompt.text, "human question");
+        inbox.finish_turn();
+
+        let (id, _, extras) = inbox.pop_turn_batch(10).unwrap();
+        assert_eq!(id, m3);
+        assert!(extras.is_empty());
+    }
+
     const INCIDENT: &str = "400 model [deepseek-v4.1-flash-sg] service info not found (01a1b1fcef287ba683c3c502e76f1bb3/29fac42c-1b53-4461-8bab-4f8b3c92723f)\nCurrently supported models for your account:\n  - hy4free\n  - hy4std\n  - hy3\n  - hy3-x\n  - deepseek-v4.1-flash\n  - glm-5.3\n  - glm-5.3-flash\n  - glm-5.2\n  - space-bunny\n  - minimax-m3.1-flash\n  - minimax-m2.7\n  - kimi-k3.1-pro\n  - kimi-k3-1\n  - kimi-k2.8-preview\n  - deepseek-v4-pro\n  - step-5-preview\n  - mimo-v2.6-pro\nPlease use --model <model_id> to specify a valid model.";
 
     #[test]
@@ -4324,6 +4640,56 @@ mod tests {
         let agent = external(name);
         store.insert_agent(&agent).await.unwrap();
         (store, runtime, agent)
+    }
+
+    #[tokio::test]
+    async fn a_rotated_context_recovers_the_active_run_for_an_existing_worker_chat() {
+        use crossagents_core::{Run, RunConfig, RunId, RunPolicy, RunStatus};
+
+        let (store, _runtime, agent) = harness("existing worker").await;
+        let mut run = Run {
+            origin_chat_id: None,
+            work_id: None,
+            continuation: None,
+            id: RunId::new(),
+            title: "UE local validation".into(),
+            request: "resume from the latest local checkpoint".into(),
+            planner: agent.id,
+            status: RunStatus::Running,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: true,
+                max_parallel: 1,
+                max_attempts: 3,
+                team: Vec::new(),
+                policy: RunPolicy::default(),
+            },
+            repo: agent.cwd.clone(),
+            base_branch: String::new(),
+            branch: String::new(),
+            in_place: true,
+            mode: None,
+            note: None,
+            plan: Vec::new(),
+            lead_note: None,
+            landed: None,
+            summary: None,
+            checks: Vec::new(),
+            checks_state: None,
+            checks_snapshot: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.insert_run(&run).await.unwrap();
+        let snapshot = build_lead_state_snapshot(store.as_ref(), agent.id).await.unwrap();
+        assert!(snapshot.contains("UE local validation"));
+        assert!(snapshot.contains("resume from the latest local checkpoint"));
+
+        run.status = RunStatus::Completed;
+        store.update_run(&run).await.unwrap();
+        assert!(build_lead_state_snapshot(store.as_ref(), agent.id).await.is_none());
     }
 
     fn notice_texts(events: &[crossagents_core::Event]) -> Vec<String> {
@@ -4549,10 +4915,10 @@ mod tests {
             .unwrap();
         // Old enough that quiet would have elapsed, then a fresh update pushes it out,
         // while the original first_at is still inside the maximum wait.
-        stamp(&store, agent.id, "a", 100, 10).await;
+        stamp(&store, agent.id, "a", 30, 5).await;
         runtime.poll_notice_wakes().await.unwrap();
         assert!(notice_texts(&store.events_since(0, 20).await.unwrap()).is_empty());
-        stamp(&store, agent.id, "a", 100, 70).await;
+        stamp(&store, agent.id, "a", 30, 20).await;
         runtime.poll_notice_wakes().await.unwrap();
         let wakes = notice_texts(&store.events_since(0, 20).await.unwrap());
         assert_eq!(wakes.len(), 1, "{wakes:?}");
@@ -4735,6 +5101,28 @@ mod tests {
         let wake = latest_wake(&store.events_since(0, 30).await.unwrap()).unwrap();
         assert!(wake.contains("[decide] choose"), "{wake}");
         assert!(wake.contains("[decide] fresh"), "{wake}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_continuation_wake_waits_for_the_next_scheduled_attempt() {
+        let (store, runtime, agent) = harness("ida").await;
+        let key = AgentKey::Id(agent.id);
+        let topic = "continuation:scheduled-run";
+        runtime.notify(&key, topic, "attempt one", NoticeClass::Decide).await.unwrap();
+        let first = runtime.notice_state.digest_message(agent.id).unwrap();
+        runtime.external.lock().await.get_mut(&agent.id).unwrap().clear();
+        runtime.notice_state.settle(store.as_ref(), first, false).await;
+
+        runtime.poll_notice_wakes().await.unwrap();
+        assert_eq!(notice_texts(&store.events_since(0, 30).await.unwrap()).len(), 1);
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows[0].wake_tries, 1);
+        assert!(rows[0].carried_by.is_none());
+
+        runtime.notify(&key, topic, "attempt two", NoticeClass::Decide).await.unwrap();
+        let events = store.events_since(0, 30).await.unwrap();
+        assert_eq!(notice_texts(&events).len(), 2);
+        assert!(latest_wake(&events).unwrap().contains("attempt two"));
     }
 
     #[tokio::test]
