@@ -1100,18 +1100,18 @@ impl Accounts {
                 // A login that fell away is a risk signal: pause and stop, never retry.
                 record_risk_signal(&bus, &risk, &account.id, signal).await;
             }
-            let models = provider.models(&account).await;
-            let models_changed = if !models.is_empty() {
-                let mut cache = models_cache.lock().unwrap();
-                let diff = cache.get(&account.id) != Some(&models);
-                cache.insert(account.id.clone(), models.clone());
-                diff
-            } else {
-                false
-            };
             // Claude's initialize list is explicitly default-first; aliases such as
             // `default` do not identify a model and must not exclude other groups.
-            if account.provider == "claude" {
+            let models_changed = if account.provider == "claude" {
+                let models = provider.models(&account).await;
+                let diff = if !models.is_empty() {
+                    let mut cache = models_cache.lock().unwrap();
+                    let diff = cache.get(&account.id) != Some(&models);
+                    cache.insert(account.id.clone(), models.clone());
+                    diff
+                } else {
+                    false
+                };
                 let resolved = models
                     .first()
                     .map(|m| m.id.as_str())
@@ -1125,7 +1125,10 @@ impl Accounts {
                         defaults.remove(&account.id);
                     }
                 }
-            }
+                diff
+            } else {
+                false
+            };
             refreshing.lock().unwrap().remove(&account.id);
             save_accounts_cache(&cache_path, &statuses, &models_cache);
             if changed || models_changed {
@@ -3334,6 +3337,20 @@ mod login_tests {
         store.insert_account(&cn).await.unwrap();
         store.insert_account(&intl).await.unwrap();
 
+        assert!(accounts.offered_models("workbuddy-cn").await.is_empty());
+        assert!(accounts.offered_models("workbuddy-intl").await.is_empty());
+        wait_for(|| {
+            let reads = accounts.model_reads.lock().unwrap();
+            reads
+                .entries
+                .get("codebuddy-cn")
+                .is_some_and(|r| !r.loading)
+                && reads
+                    .entries
+                    .get("codebuddy-intl")
+                    .is_some_and(|r| !r.loading)
+        })
+        .await;
         assert_eq!(accounts.offered_models("workbuddy-cn").await, vec!["hy4std"]);
         assert_eq!(
             accounts.offered_models("workbuddy-intl").await,
