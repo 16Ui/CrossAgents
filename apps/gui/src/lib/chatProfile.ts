@@ -62,10 +62,14 @@ export function setChatProfile(patch: Partial<ChatProfile>) {
 }
 
 let syncStarted = false;
+let lastSyncAt = 0;
 export function startChatProfileSync() {
   if (syncStarted || typeof window === "undefined") return;
   syncStarted = true;
-  const sync = async () => {
+  const sync = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastSyncAt < 5000) return;
+    lastSyncAt = now;
     try {
       const remote = await api.profile();
       const remoteName = typeof remote?.name === "string" ? remote.name.slice(0, 32) : "";
@@ -82,9 +86,12 @@ export function startChatProfileSync() {
       // Offline or older hub without /v1/profile: keep local cache.
     }
   };
-  void sync();
+  void sync(true);
   window.crossagents?.onStatus((status) => {
-    if (status === "connected") void sync();
+    if (status === "connected") void sync(true);
+  });
+  window.addEventListener("focus", () => {
+    void sync(false);
   });
 }
 

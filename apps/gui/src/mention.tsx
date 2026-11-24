@@ -10,6 +10,7 @@ import { Avatar, VendorMark, agentTitle, displayName } from "./components";
 import { prettyModel, vendorLabel } from "./lib/models";
 import { cursorMode, reasoningModels } from "./lib/reasoning";
 import { unusableOf } from "./lib/unusable";
+import { isImeEvent } from "./lib/ime";
 
 export type Mention = { key: string; token: string; search: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; group: string; /** Why this machine cannot hand work to it: greyed out, unselectable. */ unusable?: string };
 
@@ -101,7 +102,7 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
   const active = !shown[cursor] || shown[cursor].unusable ? Math.max(0, shown.findIndex((c) => !c.unusable)) : cursor;
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
-    if (!open || e.nativeEvent.isComposing) return false;
+    if (!open || isImeEvent(e)) return false;
     if (e.key === "ArrowDown") setCursor(step(active, 1));
     else if (e.key === "ArrowUp") setCursor(step(active, -1));
     else if ((e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) || e.key === "Tab") pick(shown[active]);

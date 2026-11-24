@@ -422,10 +422,29 @@ fn eligibility_note(original: String) -> String {
     )
 }
 
+/// Unwraps `agy -p /usage --output-format json` / `/credits` printmode envelopes
+/// (`{"status":"SUCCESS","command":{"name":"usage","data":{...}}}`), while still accepting a
+/// bare payload object directly.
+fn command_data(value: &Value) -> &Value {
+    value.pointer("/command/data").unwrap_or(value)
+}
+
+/// Maps `agy`'s explicit bucket `window` token (`"5h"`, `"weekly"`, …) to seconds without
+/// guessing from reset timestamps.
+fn bucket_window_seconds(bucket: &Value) -> Option<u64> {
+    match bucket.get("window").and_then(Value::as_str) {
+        Some("5h") => Some(5 * 3600),
+        Some("weekly") => Some(7 * 24 * 3600),
+        Some("daily" | "24h") => Some(24 * 3600),
+        _ => None,
+    }
+}
+
 /// The CLI's printmode quotaJSON -> groupJSON -> bucketJSON. Missing numeric values
 /// remain unknown; an amount without a total cannot be turned into a percentage.
 fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> {
-    let groups = value
+    let data = command_data(value);
+    let groups = data
         .get("groups")
         .and_then(Value::as_array)
         .ok_or("Antigravity /usage: no quota groups in report")?;
@@ -459,8 +478,7 @@ fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> 
             windows.push(RateWindow {
                 name: label.to_owned(),
                 used_percent: (1.0 - fraction) * 100.0,
-                // Keep the vendor's window label; do not infer duration from reset time.
-                window_seconds: None,
+                window_seconds: bucket_window_seconds(bucket),
                 resets_at: bucket
                     .get("reset_time")
                     .and_then(Value::as_str)
@@ -507,12 +525,13 @@ fn apply_quota(status: &mut AccountStatus, value: &Value) -> Result<(), String> 
 }
 
 fn apply_credits(status: &mut AccountStatus, value: &Value) -> Result<(), String> {
-    status.plan = value
+    let data = command_data(value);
+    status.plan = data
         .get("plan_name")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    let balance = value
+    let balance = data
         .get("remaining_credits")
         .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok()))
         .filter(|n| n.is_finite() && *n >= 0.0)
@@ -842,5 +861,88 @@ console.log('gemini-3.8-flash-high');
         );
         let status = accounts.status(&account(dir.path())).await;
         assert_eq!(status.note.as_deref(), Some(SIGN_IN_NOTE));
+    }
+
+    #[test]
+    fn parses_real_printmode_command_data_envelope() {
+        let mut status = AccountStatus {
+            logged_in: true,
+            auth_mode: Some("google".into()),
+            email: None,
+            plan: None,
+            subscription_until: None,
+            rate_limits: Vec::new(),
+            limit_reached: false,
+            credits: None,
+            limits: Vec::new(),
+            reset_credits: Vec::new(),
+            source: None,
+            as_of: None,
+            note: None,
+        };
+        let usage = serde_json::json!({
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.92,
+                                    "reset_time": "2026-12-01T14:31:34Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.70,
+                                    "reset_time": "2026-11-24T19:31:34Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1.0,
+                                    "reset_time": "2026-12-01T17:47:09Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let credits = serde_json::json!({
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "credits",
+                "data": {
+                    "remaining_credits": 0,
+                    "upgrade_uri": "https://antigravity.google/g1-upgrade"
+                }
+            }
+        });
+
+        apply_quota(&mut status, &usage).unwrap();
+        apply_credits(&mut status, &credits).unwrap();
+        assert_eq!(status.limits.len(), 2);
+        assert_eq!(status.limits[0].name.as_deref(), Some("Gemini Models"));
+        assert_eq!(status.limits[0].windows[0].window_seconds, Some(7 * 24 * 3600));
+        assert_eq!(status.limits[0].windows[1].window_seconds, Some(5 * 3600));
+        assert!((status.limits[0].windows[1].used_percent - 30.0).abs() < 1e-6);
+        assert_eq!(status.rate_limits.len(), 2);
+        assert_eq!(status.credits.as_ref().unwrap().balance.as_deref(), Some("0"));
+        assert_eq!(status.source, Some(DataSource::Live));
     }
 }

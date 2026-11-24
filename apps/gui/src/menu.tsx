@@ -12,6 +12,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type 
 import { createPortal } from "react-dom";
 import { Icon } from "./components";
 import { filterMenu } from "./lib/menuSearch";
+import { isImeEvent } from "./lib/ime";
 
 export type MenuItem =
   | {
@@ -215,7 +216,7 @@ export function ChipMenu({
       className={`chip-menu ${className ?? ""}`.trim()}
       ref={ref}
       onKeyDown={(e) => {
-        if (e.nativeEvent.isComposing) return;
+        if (isImeEvent(e)) return;
         if (!open) {
           if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") {
             e.preventDefault();

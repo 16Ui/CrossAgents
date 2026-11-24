@@ -16,6 +16,7 @@ import * as drafts from "../lib/draft";
 import { queueHeading } from "../lib/delivery";
 import { t } from "../lib/i18n";
 import { canSteer, composerAction, composerHint, composerPlaceholder } from "../lib/steer";
+import { isImeEvent } from "../lib/ime";
 import { mentionsFor, useMention } from "../mention";
 import { ModelEffortPicks } from "../modelPick";
 import { sendMessage } from "../outbox";
@@ -234,7 +235,7 @@ export function Composer({
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (isImeEvent(e)) return;
     if (e.key === "Escape") {
       if (canInterrupt) {
         e.preventDefault();

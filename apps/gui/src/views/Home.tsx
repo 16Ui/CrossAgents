@@ -11,6 +11,7 @@ import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentLine, agentT
 import { useHubData, usePlugins } from "../hub";
 import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
+import { isImeEvent } from "../lib/ime";
 import { modelDisplay } from "../lib/modelDisplay";
 import { favoriteKey, toggleFavorite, useModelFavorites } from "../lib/modelFavorites";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
@@ -550,7 +551,7 @@ export function HomeView() {
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (isImeEvent(e)) return;
     // Enter sends (Ctrl/Cmd+Enter too); Shift+Enter is a newline, as in a conversation.
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -886,7 +887,7 @@ export function HomeView() {
                 value={manualPath}
                 onChange={(e) => setManualPath(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  if (e.key === "Enter" && !isImeEvent(e)) {
                     e.preventDefault();
                     useManualPath();
                   } else if (e.key === "Escape") setPathEntry(false);
