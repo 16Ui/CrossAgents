@@ -414,30 +414,110 @@ async fn collect_plugin_snapshots(registry: &PluginRegistry) -> Vec<PluginSnapsh
     snapshots
 }
 
-/// On Unix (macOS/Linux), queries the user's login shell once for its `PATH` so CLIs installed via
-/// Homebrew, nvm, volta, fnm, or npm global are found even under launchd or non-interactive shells.
+/// On Unix (macOS/Linux), resolves a complete `PATH` combining the current environment, the
+/// user's login/interactive shell `PATH`, and common CLI installation directories so Homebrew,
+/// nvm, fnm, volta, bun, and npm-global binaries are found even when launched from a GUI app.
 #[cfg(unix)]
-async fn login_shell_path() -> Option<String> {
+async fn resolve_unix_path() -> Option<String> {
+    const START: &str = "__CA_PATH_START__";
+    const END: &str = "__CA_PATH_END__";
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    let mut cmd = Command::new(&shell);
-    cmd.args(["-lc", "printf '%s' \"$PATH\""])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    let out = tokio::time::timeout(Duration::from_secs(3), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let script = format!("printf '\\n{START}%s{END}\\n' \"$PATH\"");
+    let mut shell_path: Option<String> = None;
+    for flag in ["-lic", "-lc"] {
+        let mut cmd = Command::new(&shell);
+        cmd.args([flag, &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(3), cmd.output()).await
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(after) = text.split(START).nth(1)
+                && let Some(raw) = after.split(END).next()
+            {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    shell_path = Some(trimmed.to_owned());
+                    break;
+                }
+            }
+        }
     }
-    let val = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!val.is_empty()).then_some(val)
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push_dir = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !dirs.iter().any(|existing| existing == &p) {
+            dirs.push(p);
+        }
+    };
+    if let Some(current) = std::env::var_os("PATH") {
+        for p in std::env::split_paths(&current) {
+            push_dir(p);
+        }
+    }
+    if let Some(raw) = shell_path {
+        for p in std::env::split_paths(&raw) {
+            push_dir(p);
+        }
+    }
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ] {
+        let p = PathBuf::from(fixed);
+        if p.is_dir() {
+            push_dir(p);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for rel in [
+            ".local/bin",
+            ".cargo/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".pnpm",
+            "Library/pnpm",
+            ".asdf/shims",
+            ".mise/shims",
+            ".opencode/bin",
+        ] {
+            let p = home.join(rel);
+            if p.is_dir() {
+                push_dir(p);
+            }
+        }
+        for (root, suffix) in [
+            (home.join(".nvm/versions/node"), "bin"),
+            (home.join(".fnm/node-versions"), "installation/bin"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                let mut versions: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path().join(suffix))
+                    .filter(|p| p.is_dir())
+                    .collect();
+                versions.sort();
+                versions.reverse();
+                for p in versions {
+                    push_dir(p);
+                }
+            }
+        }
+    }
+    std::env::join_paths(dirs)
+        .ok()
+        .and_then(|os| os.into_string().ok())
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(not(unix))]
-async fn login_shell_path() -> Option<String> {
+async fn resolve_unix_path() -> Option<String> {
     None
 }
 
@@ -507,7 +587,7 @@ async fn run_daemon(hub: &str, token: &str, cwd: Option<PathBuf>) -> Result<()> 
         eprintln!("ready local CLIs: {}", ready.join(", "));
     }
 
-    let extra_path = login_shell_path().await;
+    let extra_path = resolve_unix_path().await;
     let hostname = node_hostname();
     let shell = default_shell();
     let chats_dir = paths.home.join("chats");

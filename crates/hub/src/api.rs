@@ -1950,14 +1950,50 @@ async fn get_avatar(
 
 const USER_PROFILE_MAX_AVATAR_BYTES: usize = 512 * 1024;
 
+fn normalize_user_avatar(raw: &str) -> Result<Option<String>, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let b64 = match trimmed.strip_prefix("data:") {
+        Some(rest) => {
+            let Some((meta, payload)) = rest.split_once(',') else {
+                return Err(AppError::bad_request("invalid user avatar"));
+            };
+            if !meta.starts_with("image/") || !meta.ends_with(";base64") {
+                return Err(AppError::bad_request("invalid user avatar"));
+            }
+            payload.trim()
+        }
+        None => trimmed,
+    };
+    let bytes = STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|_| AppError::bad_request("invalid user avatar"))?;
+    if bytes.is_empty() || bytes.len() > USER_PROFILE_MAX_AVATAR_BYTES {
+        return Err(AppError::bad_request("invalid user avatar"));
+    }
+    let mime = crate::attachments::sniff(&bytes);
+    if !matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+        return Err(AppError::bad_request("avatars must be PNG, JPEG or WebP"));
+    }
+    Ok(Some(format!("data:{mime};base64,{}", STANDARD.encode(&bytes))))
+}
+
 async fn get_user_profile(
     State(state): State<Arc<AppState>>,
 ) -> Json<crossagents_api_types::UserProfile> {
     let path = state.home.join("profile.json");
-    let profile = std::fs::read(&path)
+    let mut profile = std::fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<crossagents_api_types::UserProfile>(&bytes).ok())
         .unwrap_or_default();
+    if let Some(raw) = profile.avatar.as_deref()
+        && !raw.starts_with("data:")
+        && let Ok(normalized) = normalize_user_avatar(raw)
+    {
+        profile.avatar = normalized;
+    }
     Json(profile)
 }
 
@@ -1966,12 +2002,8 @@ async fn set_user_profile(
     Json(mut req): Json<crossagents_api_types::UserProfile>,
 ) -> ApiResult<Json<crossagents_api_types::UserProfile>> {
     req.name = req.name.trim().chars().take(32).collect();
-    if let Some(avatar) = &req.avatar {
-        if avatar.is_empty() {
-            req.avatar = None;
-        } else if !avatar.starts_with("data:image/") || avatar.len() > USER_PROFILE_MAX_AVATAR_BYTES {
-            return Err(AppError::bad_request("invalid user avatar"));
-        }
+    if let Some(avatar) = req.avatar.as_deref() {
+        req.avatar = normalize_user_avatar(avatar)?;
     }
     let path = state.home.join("profile.json");
     let bytes = serde_json::to_vec_pretty(&req).map_err(|e| {

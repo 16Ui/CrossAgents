@@ -74,7 +74,7 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
         <div className="guide-goals" role="tablist" aria-label="要做什么">
           <button type="button" role="tab" aria-selected={goal === "join"} className={goal === "join" ? "active" : ""} data-action="goal-join" onClick={() => setGoal("join")}>
             <span className="guide-goal-title">连到别的电脑上的中心</span>
-            <span className="guide-goal-hint">这台只开界面，agent 在中心那台跑</span>
+            <span className="guide-goal-hint">连上中心，并自动接入本机的 codex / claude 等 agent</span>
           </button>
           <button type="button" role="tab" aria-selected={goal === "host"} className={goal === "host" ? "active" : ""} data-action="goal-host" onClick={() => setGoal("host")}>
             <span className="guide-goal-title">让别的电脑连进来</span>
@@ -128,6 +128,45 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
                 重新连接
               </button>
             </div>
+            {bridge.setShareNode && (
+              <div className="setting-line">
+                <div>
+                  <div className="setting-label">把这台电脑作为执行节点</div>
+                  <div className="setting-hint">
+                    开启后，连上中心时会自动识别并接入本机已安装的 codex / claude 等 CLI，无需手动开终端运行节点。
+                    {state.mode === "remote" && state.nodeStatus === "unsupported" && (
+                      <> <strong>中心版本偏旧，请先将中心更新到最新版。</strong></>
+                    )}
+                    {state.mode === "remote" && state.nodeStatus === "missing" && (
+                      <> <strong>当前安装包未附带节点程序，请重新安装正式版。</strong></>
+                    )}
+                  </div>
+                </div>
+                <div className="row">
+                  {state.mode === "remote" && state.nodeStatus && (
+                    <span className={`chip small ${state.nodeStatus === "connected" ? "ok" : state.nodeStatus === "unsupported" || state.nodeStatus === "missing" || state.nodeStatus.startsWith("error") ? "danger" : state.nodeStatus === "connecting" ? "warn" : ""}`}>
+                      {state.nodeStatus === "connected"
+                        ? "已接入"
+                        : state.nodeStatus === "connecting"
+                          ? "接入中"
+                          : state.nodeStatus === "disabled"
+                            ? "已关闭"
+                            : state.nodeStatus === "unsupported"
+                              ? "需更新中心"
+                              : state.nodeStatus === "missing"
+                                ? "缺少组件"
+                                : "离线"}
+                    </span>
+                  )}
+                  <button
+                    disabled={busy}
+                    onClick={() => void act(() => bridge.setShareNode!(!(state.shareNode ?? true)))}
+                  >
+                    {(state.shareNode ?? true) ? "关闭" : "开启"}
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="setting-line">
               <div>
                 <div className="setting-label">忘记这台中心</div>
@@ -359,7 +398,7 @@ function CodePairForm({ bridge, state }: { bridge: Bridge; state: ConnectionStat
           <li>
             <div className="guide-step-title">给这台电脑起个名字，然后连接</div>
             <div className="conn-row">
-              <Field label="设备名（在中心的「设备」页里认它）">
+              <Field label="这台电脑的名字（会显示在侧边栏和中心的「设备」页）">
                 <input data-field="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} disabled={busy} />
               </Field>
             </div>

@@ -433,12 +433,30 @@ impl RemoteNodes {
         };
 
         let mut remote: Vec<RemoteNodeInfo> = connected.values().cloned().collect();
+        let known_slots: std::collections::HashSet<String> = {
+            let slots = self.slots.read().await;
+            slots.keys().cloned().collect()
+        };
+        let agent_nodes: std::collections::HashSet<String> = store
+            .list_agents()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.archived_at.is_none())
+            .filter_map(|a| a.node)
+            .map(|n| n.trim().to_ascii_lowercase())
+            .filter(|n| !n.is_empty() && n != "local")
+            .collect();
         if let Ok(devices) = store.list_devices().await {
             for dev in devices {
-                if dev.kind != DeviceKind::Node || dev.revoked_at.is_some() {
+                if dev.revoked_at.is_some() || connected.contains_key(&dev.id) {
                     continue;
                 }
-                if connected.contains_key(&dev.id) {
+                let is_node_device = dev.kind == DeviceKind::Node
+                    || known_slots.contains(&dev.id)
+                    || agent_nodes.contains(&dev.id.to_ascii_lowercase())
+                    || agent_nodes.contains(&dev.name.to_ascii_lowercase());
+                if !is_node_device {
                     continue;
                 }
                 remote.push(RemoteNodeInfo {

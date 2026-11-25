@@ -273,6 +273,7 @@ fn main() {
         remote::connection_pair,
         remote::connection_pair_code,
         remote::connection_use,
+        remote::connection_set_share_node,
         remote::connection_reconnect,
         remote::connection_forget,
         remote::connection_import_pairing,

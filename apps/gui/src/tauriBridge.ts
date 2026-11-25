@@ -124,6 +124,7 @@ export function installTauriBridge() {
       pair: (target, deviceName) => changeConnection("connection_pair", { target, deviceName, steps: steps() }, true),
       pairCode: (code, deviceName) => changeConnection("connection_pair_code", { code, deviceName, steps: steps() }, true),
       use: (mode) => changeConnection("connection_use", { mode }, true),
+      setShareNode: (enabled) => changeConnection("connection_set_share_node", { enabled }, false),
       reconnect: () => changeConnection("connection_reconnect", {}, false),
       forget: async () => changeConnection("connection_forget", {}, (await getConnection()).mode === "remote"),
       importPairing: (file, key) => changeConnection("connection_import_pairing", { file, key }, true),

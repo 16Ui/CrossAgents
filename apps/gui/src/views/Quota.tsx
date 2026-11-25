@@ -17,6 +17,7 @@ import { creditText, egressOf, level, planLabel, resetText, windowLabel, type Le
 import { prettyModel } from "../lib/models";
 import { cursorMode } from "../lib/reasoning";
 import { EgressPicker } from "../egressPicks";
+import { useConnectionState } from "../lib/useConnection";
 import { useArmed } from "../parts";
 
 /** Live figures are cached by the hub for a minute; re-read about as often. */
@@ -588,6 +589,8 @@ function TokenUsage({ id }: { id: string }) {
 }
 
 function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => void }) {
+  const connection = useConnectionState();
+  const isRemote = connection?.mode === "remote";
   const [provider, setProvider] = useState("");
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
@@ -653,6 +656,11 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
 
   return (
     <form className="card form" onSubmit={submit}>
+      {isRemote && (
+        <div className="notice">
+          当前处于远程模式：这里管理的是<strong>中心电脑</strong>上的账号（需要 admin 权限）。要使用当前这台电脑本地已登录的 Codex / Claude，连上中心后会自动作为执行节点接入，不需要在这里添加账号。
+        </div>
+      )}
       <div className="row" style={{ alignItems: "flex-start" }}>
         <Field label="服务">
           <select

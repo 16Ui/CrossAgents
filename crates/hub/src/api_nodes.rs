@@ -29,7 +29,7 @@ use crossagents_api_types::{
     NodeSearchFilesResponse, NodeWriteFileRequest, NodeWriteFileResponse, RemoteNodeInfo,
     ToolInfo,
 };
-use crossagents_core::{CoreError, Device, DeviceKind, DeviceOs};
+use crossagents_core::{CoreError, Device, DeviceKind, DeviceLevel, DeviceOs};
 use futures::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -101,7 +101,10 @@ async fn require_node_token(
         .authenticate_reporting(state.bus.store().as_ref(), token, os)
         .await;
     match authed {
-        Ok(Some((device, cancel))) if device.kind == DeviceKind::Node => {
+        Ok(Some((device, cancel)))
+            if device.kind == DeviceKind::Node
+                || (device.kind == DeviceKind::Client && device.level >= DeviceLevel::Write) =>
+        {
             request
                 .extensions_mut()
                 .insert(AuthedNode { device, cancel });
@@ -111,7 +114,7 @@ async fn require_node_token(
             StatusCode::FORBIDDEN,
             Json(ApiError::new(
                 ErrorCode::Forbidden,
-                "this endpoint requires a node device token (`crossagents device add <name> --kind node`)",
+                "this endpoint requires a node token or a write/admin client device token",
             )),
         )
             .into_response(),

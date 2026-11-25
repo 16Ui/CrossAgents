@@ -717,3 +717,194 @@ async fn remote_node_executes_agent_session_and_reports_plugins() {
     hub.shutdown();
     let _ = hub.wait().await;
 }
+
+#[tokio::test]
+async fn write_client_device_can_connect_as_node_and_read_client_is_forbidden() {
+    use crossagents_api_types::DeviceLevel;
+
+    let home = tempfile::tempdir().unwrap();
+    let cfg = HubConfig::new(Paths::new(home.path().to_path_buf()), 0);
+    let hub = crossagents_hub::start(cfg).await.unwrap();
+    let base = format!("http://{}", hub.addr);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    // A read-only client device must NOT be allowed to register as an execution node.
+    let read_dev: CreateDeviceResponse = http
+        .post(format!("{base}/v1/devices"))
+        .bearer_auth(&hub.token)
+        .json(&CreateDeviceRequest {
+            name: "mac-readonly".into(),
+            kind: Some(DeviceKind::Client),
+            level: Some(DeviceLevel::Read),
+            os: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let denied = http
+        .get(format!("{base}/v1/node/stream?os=macos&arch=aarch64"))
+        .bearer_auth(&read_dev.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status().as_u16(), 403);
+
+    // A normal paired desktop client (`kind: client, level: write`) can connect directly to
+    // `/v1/node/stream` so pairing the GUI once automatically brings its local CLIs online.
+    let client_dev: CreateDeviceResponse = http
+        .post(format!("{base}/v1/devices"))
+        .bearer_auth(&hub.token)
+        .json(&CreateDeviceRequest {
+            name: "Link-MacBook".into(),
+            kind: Some(DeviceKind::Client),
+            level: Some(DeviceLevel::Write),
+            os: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resp = http
+        .get(format!(
+            "{base}/v1/node/stream?os=macos&arch=aarch64&hostname=Link-MacBook.local&shell=zsh&version=0.3.8"
+        ))
+        .bearer_auth(&client_dev.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let mut seen_online = false;
+    for _ in 0..30 {
+        let list: ListNodesResponse = http
+            .get(format!("{base}/v1/nodes"))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if list
+            .nodes
+            .iter()
+            .any(|n| n.id == client_dev.device.id && n.name == "Link-MacBook" && n.online)
+        {
+            seen_online = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seen_online, "write client device should appear online in GET /v1/nodes");
+
+    // Dropping the stream marks the client node offline while keeping it listed.
+    drop(resp);
+    let mut seen_offline = false;
+    for _ in 0..40 {
+        let list: ListNodesResponse = http
+            .get(format!("{base}/v1/nodes"))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if list
+            .nodes
+            .iter()
+            .any(|n| n.id == client_dev.device.id && !n.online)
+        {
+            seen_offline = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(seen_offline, "disconnected client node should remain listed as offline");
+
+    hub.shutdown();
+    let _ = hub.wait().await;
+}
+
+#[tokio::test]
+async fn user_profile_accepts_raw_base64_and_data_url_avatars() {
+    use crossagents_api_types::UserProfile;
+
+    let home = tempfile::tempdir().unwrap();
+    let cfg = HubConfig::new(Paths::new(home.path().to_path_buf()), 0);
+    let hub = crossagents_hub::start(cfg).await.unwrap();
+    let base = format!("http://{}", hub.addr);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    // Minimal valid 1x1 PNG header + bytes.
+    const PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    // Legacy GUI clients send raw base64 without the `data:image/...;base64,` prefix.
+    let saved: UserProfile = http
+        .post(format!("{base}/v1/profile"))
+        .bearer_auth(&hub.token)
+        .json(&UserProfile {
+            name: "Link".into(),
+            avatar: Some(PNG_B64.into()),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved.name, "Link");
+    assert_eq!(
+        saved.avatar.as_deref(),
+        Some(format!("data:image/png;base64,{PNG_B64}").as_str())
+    );
+
+    // Full data URLs (including PNG fallback from macOS WKWebView) also normalize cleanly.
+    let saved2: UserProfile = http
+        .post(format!("{base}/v1/profile"))
+        .bearer_auth(&hub.token)
+        .json(&UserProfile {
+            name: "Link".into(),
+            avatar: Some(format!("data:image/png;base64,{PNG_B64}")),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        saved2.avatar.as_deref(),
+        Some(format!("data:image/png;base64,{PNG_B64}").as_str())
+    );
+
+    // Non-image / SVG payloads must still be rejected.
+    let bad = http
+        .post(format!("{base}/v1/profile"))
+        .bearer_auth(&hub.token)
+        .json(&UserProfile {
+            name: "Link".into(),
+            avatar: Some("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=".into()),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status().as_u16(), 400);
+
+    hub.shutdown();
+    let _ = hub.wait().await;
+}

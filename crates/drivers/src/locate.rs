@@ -407,8 +407,75 @@ fn registry_path() -> Option<Vec<PathBuf>> {
     }
     #[cfg(not(windows))]
     {
-        None
+        type Cached = Option<(Instant, Vec<PathBuf>)>;
+        static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+        const UNIX_PATH_TTL: Duration = Duration::from_secs(30);
+        let mut cache = CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((at, dirs)) = cache.as_ref()
+            && at.elapsed() < UNIX_PATH_TTL
+        {
+            return (!dirs.is_empty()).then(|| dirs.clone());
+        }
+        let dirs = unix_extra_path_dirs();
+        *cache = Some((Instant::now(), dirs.clone()));
+        (!dirs.is_empty()).then_some(dirs)
     }
+}
+
+/// Common CLI bin directories on macOS/Linux that GUI-launched processes (`launchd` / systemd)
+/// often omit from `PATH` (Homebrew, nvm, fnm, volta, bun, npm global, cargo, pip/uv).
+#[cfg(not(windows))]
+fn unix_extra_path_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push_if_dir = |dir: PathBuf| {
+        if dir.is_dir() && !out.iter().any(|existing| existing == &dir) {
+            out.push(dir);
+        }
+    };
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ] {
+        push_if_dir(PathBuf::from(fixed));
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for rel in [
+            ".local/bin",
+            ".cargo/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".pnpm",
+            "Library/pnpm",
+            ".asdf/shims",
+            ".mise/shims",
+            ".opencode/bin",
+        ] {
+            push_if_dir(home.join(rel));
+        }
+        for (root, suffix) in [
+            (home.join(".nvm/versions/node"), "bin"),
+            (home.join(".fnm/node-versions"), "installation/bin"),
+        ] {
+            if let Ok(entries) = std::fs::read_dir(&root) {
+                let mut versions: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path().join(suffix))
+                    .filter(|p| p.is_dir())
+                    .collect();
+                versions.sort();
+                versions.reverse();
+                for dir in versions {
+                    push_if_dir(dir);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `Path` under `key` as `reg query` prints it.
