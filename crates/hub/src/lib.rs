@@ -53,6 +53,7 @@ pub mod transcript;
 pub mod usage;
 pub mod usage_series;
 pub mod version_gate;
+pub mod web_push;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -431,6 +432,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let hooks_task = extension_hooks.start(shutdown.clone());
     let services_task = extension_services.start(shutdown.clone());
     let agent_tokens = tokens.clone();
+    let web_push = Arc::new(web_push::WebPushService::new(&paths.home));
+    web_push.clone().watch(bus.clone(), shutdown.clone());
     let state = Arc::new(api::AppState {
         devices: Default::default(),
         extensions: extensions.clone(),
@@ -456,6 +459,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         terminals: terminals.clone(),
         link: Arc::new(link::LinkService::new(&paths.home)),
         remote_nodes,
+        web_push,
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     state.link.resume(&state, addr).await;

@@ -273,7 +273,7 @@ fn digest(secret: &str) -> String {
 
 /// The proxy the hub reaches the relay through: its own environment's, else the system's
 /// (the same one it hands the CLIs, `crossagents_drivers::process::system_proxy_env`).
-fn hub_proxy() -> Option<String> {
+pub(crate) fn hub_proxy() -> Option<String> {
     for key in [
         "HTTPS_PROXY",
         "https_proxy",

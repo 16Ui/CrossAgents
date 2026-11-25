@@ -27,6 +27,7 @@ dirs.workspace = true
 dunce.workspace = true
 futures.workspace = true
 regex = "1.13"
+reqwest = { workspace = true, features = ["rustls"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -37,9 +38,9 @@ tracing.workspace = true
 uuid.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
+web-push-native = "0.5.0"
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile.workspace = true
 
 # A stand-in extension tool for tests/extensions_runner.rs; `cargo test` builds it.

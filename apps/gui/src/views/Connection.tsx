@@ -803,7 +803,7 @@ function HostGuide() {
                     还剩 <strong>{left}</strong> 过期，只能用一次。
                   </div>
                   <div className="setting-hint">
-                    <strong>手机端（iOS）</strong>：打开 CrossAgents App，点「扫码配对」扫描左侧二维码。
+                    <strong>手机端（iPhone 免签 PWA / iOS App）</strong>：在 iPhone Safari 打开你的 CrossAgents 移动版 PWA 并「添加到主屏幕」，或在 iOS App 中点「扫码配对」扫描左侧二维码。
                   </div>
                   <div className="setting-hint">
                     <strong>电脑端</strong>：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的设备。

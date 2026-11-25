@@ -111,6 +111,8 @@ pub struct AppState {
     pub link: Arc<crate::link::LinkService>,
     /// Connected remote execution nodes (`crossagents node run`).
     pub remote_nodes: Arc<crate::remote_nodes::RemoteNodes>,
+    /// Free Web Push (VAPID) notifications for Home-Screen mobile PWAs.
+    pub web_push: Arc<crate::web_push::WebPushService>,
 }
 
 impl AppState {
@@ -314,6 +316,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_nodes::control_router())
         .merge(crate::browser::router())
         .merge(crate::api_bytes::router())
+        .merge(crate::web_push::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
     let me = Router::new()
