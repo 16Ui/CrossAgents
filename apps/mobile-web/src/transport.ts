@@ -26,6 +26,7 @@ export class TransportError extends Error {
 
 export interface HubTransport {
   readonly mode: "iroh" | "direct";
+  readonly connectedRelay?: string;
   request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<HttpReply>;
   subscribeEvents(
     since: number | undefined,
@@ -34,6 +35,133 @@ export interface HubTransport {
   ): Promise<EventHandle>;
   isClosed(): boolean;
   close(): Promise<void>;
+}
+
+export interface RelayDiagItem {
+  url: string;
+  host: string;
+  httpOk: boolean;
+  httpMs: number;
+  httpDetail: string;
+  wsOk: boolean;
+  wsMs: number;
+  wsDetail: string;
+}
+
+const DEFAULT_N0_RELAYS = [
+  "https://usw1-1.relay.n0.iroh.link/",
+  "https://aps1-1.relay.n0.iroh.link/",
+  "https://euc1-1.relay.n0.iroh.link/",
+];
+
+function sanitizeRelayUrlJs(raw: string): string {
+  try {
+    const u = new URL(raw.trim());
+    if (u.hostname.endsWith(".")) {
+      u.hostname = u.hostname.replace(/\.+$/, "");
+    }
+    if (!u.pathname.endsWith("/")) {
+      u.pathname = `${u.pathname}/`;
+    }
+    return u.toString();
+  } catch {
+    return raw.trim();
+  }
+}
+
+export async function runRelayDiagnostics(preferredRelay?: string | null): Promise<RelayDiagItem[]> {
+  const urls: string[] = [];
+  if (preferredRelay && preferredRelay.trim()) {
+    urls.push(sanitizeRelayUrlJs(preferredRelay));
+  }
+  for (const fallback of DEFAULT_N0_RELAYS) {
+    if (!urls.includes(fallback)) urls.push(fallback);
+  }
+
+  async function probeOne(relayUrl: string): Promise<RelayDiagItem> {
+    let host = relayUrl;
+    try {
+      host = new URL(relayUrl).host;
+    } catch {
+      // ignore
+    }
+
+    // 1. HTTPS /ping probe
+    let httpOk = false;
+    let httpMs = 0;
+    let httpDetail = "";
+    const httpStart = performance.now();
+    try {
+      const ctrl = new AbortController();
+      const timer = window.setTimeout(() => ctrl.abort(), 6000);
+      const res = await fetch(new URL("ping", relayUrl).toString(), { signal: ctrl.signal });
+      window.clearTimeout(timer);
+      httpMs = Math.round(performance.now() - httpStart);
+      httpOk = res.ok;
+      httpDetail = `HTTP ${res.status}`;
+    } catch (err) {
+      httpMs = Math.round(performance.now() - httpStart);
+      httpDetail = err instanceof Error ? err.message : String(err);
+    }
+
+    // 2. WebSocket wss://.../relay probe with iroh subprotocols
+    const wsStart = performance.now();
+    const wsRes = await new Promise<{ ok: boolean; detail: string }>((resolve) => {
+      let settled = false;
+      const done = (ok: boolean, detail: string) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve({ ok, detail });
+      };
+      let ws: WebSocket;
+      try {
+        const wsUrl = new URL("relay", relayUrl);
+        wsUrl.protocol = wsUrl.protocol === "http:" ? "ws:" : "wss:";
+        ws = new WebSocket(wsUrl.toString(), ["iroh-relay-v2", "iroh-relay-v1"]);
+      } catch (err) {
+        done(false, err instanceof Error ? err.message : String(err));
+        return;
+      }
+      const timer = window.setTimeout(() => {
+        try {
+          ws.close();
+        } catch {
+          // ignore
+        }
+        done(false, "WebSocket 6s 超时");
+      }, 6000);
+      ws.onopen = () => {
+        const proto = ws.protocol || "(无子协议)";
+        try {
+          ws.close(1000, "diag");
+        } catch {
+          // ignore
+        }
+        done(true, proto);
+      };
+      ws.onerror = () => {
+        // Wait briefly for onclose to report close code if available.
+      };
+      ws.onclose = (ev) => {
+        done(false, `关闭 code=${ev.code}${ev.reason ? ` (${ev.reason})` : ""}`);
+      };
+    });
+    const wsMs = Math.round(performance.now() - wsStart);
+
+    return {
+      url: relayUrl,
+      host,
+      httpOk,
+      httpMs,
+      httpDetail,
+      wsOk: wsRes.ok,
+      wsMs,
+      wsDetail: wsRes.detail,
+    };
+  }
+
+  return Promise.all(urls.map(probeOne));
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +177,7 @@ interface WasmLinkModule {
 }
 
 interface WasmLinkSessionInstance {
+  connected_relay(): string;
   request(method: string, path: string, body?: string): Promise<string>;
   subscribe_events(
     since: number | undefined,
@@ -129,6 +258,7 @@ export async function decodeInviteLocal(code: string): Promise<InvitePreview> {
         host: json.h || "CrossAgents 中心",
         expires: json.x,
         has_relay: Boolean(json.r),
+        relay: json.r ? sanitizeRelayUrlJs(json.r) : null,
         custom_relay: Boolean(json.c),
         lan_addrs: json.a?.length ?? 0,
       };
@@ -179,10 +309,12 @@ export async function redeemInviteWasm(code: string, deviceName: string): Promis
 
 export class IrohWasmTransport implements HubTransport {
   readonly mode = "iroh" as const;
+  readonly connectedRelay: string;
   private session: WasmLinkSessionInstance;
 
   private constructor(session: WasmLinkSessionInstance) {
     this.session = session;
+    this.connectedRelay = session.connected_relay();
   }
 
   static async connect(record: PairingRecord): Promise<IrohWasmTransport> {

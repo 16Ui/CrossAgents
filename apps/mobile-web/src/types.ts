@@ -264,6 +264,7 @@ export interface InvitePreview {
   host?: string;
   expires?: number;
   has_relay?: boolean;
+  relay?: string | null;
   custom_relay?: boolean;
   lan_addrs?: number;
 }

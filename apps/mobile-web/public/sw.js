@@ -3,7 +3,7 @@
 // 2. Receives free Web Push (VAPID) notifications from the CrossAgents Hub and shows a
 //    privacy-safe native iOS lock-screen alert.
 
-const CACHE_NAME = "crossagents-mobile-v1";
+const CACHE_NAME = "crossagents-mobile-v2";
 const SHELL_URLS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {

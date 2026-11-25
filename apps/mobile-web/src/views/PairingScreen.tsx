@@ -1,9 +1,18 @@
 import { useEffect, useState } from "react";
-import { Clipboard, Globe, QrCode, Share, ShieldCheck } from "lucide-react";
+import { Activity, Clipboard, Globe, QrCode, Share, ShieldCheck } from "lucide-react";
 import { isIOS, isStandalonePwa } from "../push";
-import { decodeInviteLocal, redeemInviteWasm } from "../transport";
+import { decodeInviteLocal, redeemInviteWasm, runRelayDiagnostics, type RelayDiagItem } from "../transport";
 import type { InvitePreview, PairingRecord } from "../types";
 import { QrScannerModal } from "../components/QrScannerModal";
+
+function relayHostLabel(url?: string | null): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
 
 export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) => void }) {
   const [mode, setMode] = useState<"iroh" | "direct">("iroh");
@@ -18,6 +27,8 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [diagBusy, setDiagBusy] = useState(false);
+  const [diagItems, setDiagItems] = useState<RelayDiagItem[] | null>(null);
 
   const needsHomeScreen = isIOS() && !isStandalonePwa();
 
@@ -184,7 +195,13 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                     {preview.ok
                       ? expired
                         ? `中心 ${preview.host} 的配对码已过期，请重新生成`
-                        : `目标中心：${preview.host} · ${preview.has_relay ? "端到端加密中继可用" : "码内缺少中继地址（浏览器需开启中继）"}`
+                        : `目标中心：${preview.host} · ${
+                            preview.relay
+                              ? `中继 ${relayHostLabel(preview.relay)}`
+                              : preview.has_relay
+                                ? "端到端加密中继可用"
+                                : "自动选择加密中继"
+                          }`
                       : preview.error}
                   </span>
                 </div>
@@ -202,7 +219,10 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
               </div>
 
               {error && (
-                <div className="chip danger" style={{ borderRadius: 10, padding: "9px 11px", whiteSpace: "normal" }}>
+                <div
+                  className="chip danger"
+                  style={{ borderRadius: 10, padding: "9px 11px", whiteSpace: "normal", lineHeight: 1.5, wordBreak: "break-word" }}
+                >
                   {error}
                 </div>
               )}
@@ -215,6 +235,55 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
               >
                 {busy ? "正在通过 iroh 建立加密配对…" : "配对并连接"}
               </button>
+
+              <button
+                type="button"
+                className="secondary-btn"
+                style={{ justifyContent: "center", fontSize: 12.5, padding: "8px 12px" }}
+                disabled={diagBusy}
+                onClick={async () => {
+                  setDiagBusy(true);
+                  try {
+                    const res = await runRelayDiagnostics(preview?.relay);
+                    setDiagItems(res);
+                  } finally {
+                    setDiagBusy(false);
+                  }
+                }}
+              >
+                <Activity size={14} />
+                {diagBusy ? "正在测试中继连通性…" : "测试中继连通性"}
+              </button>
+
+              {diagItems && (
+                <div
+                  style={{
+                    borderRadius: 10,
+                    padding: "9px 11px",
+                    background: "var(--surface-2)",
+                    fontSize: 11.5,
+                    lineHeight: 1.55,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ fontWeight: 600, color: "var(--text-2)" }}>浏览器中继连通性诊断</div>
+                  {diagItems.map((item) => (
+                    <div key={item.url} className="mono" style={{ wordBreak: "break-all" }}>
+                      <div>
+                        <strong>{item.host}</strong>
+                      </div>
+                      <div style={{ color: item.httpOk ? "var(--ok)" : "var(--danger)" }}>
+                        HTTPS /ping: {item.httpOk ? "OK" : "失败"} ({item.httpMs}ms) {item.httpDetail}
+                      </div>
+                      <div style={{ color: item.wsOk ? "var(--ok)" : "var(--danger)" }}>
+                        WSS /relay: {item.wsOk ? "OK" : "失败"} ({item.wsMs}ms) {item.wsDetail}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         ) : (

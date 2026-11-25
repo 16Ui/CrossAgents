@@ -317,6 +317,12 @@ export function App() {
         setTransport(t);
         setConnection({ kind: "connected", mode: t.mode });
 
+        if (record.mode === "iroh" && t.connectedRelay && t.connectedRelay !== record.relay) {
+          const updated: PairingRecord = { ...record, relay: t.connectedRelay };
+          savePairing(updated);
+          pairingRef.current = updated;
+        }
+
         await bootstrap(t);
         if (epoch !== connectEpochRef.current) return;
 
