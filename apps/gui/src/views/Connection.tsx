@@ -19,6 +19,7 @@ import { useArmed } from "../parts";
 import { when } from "../lib/time";
 import type { TailscaleStatus } from "../bridge";
 import { OsIcon } from "../osIcon";
+import { PairingQr } from "../PairingQr";
 import { peerAddress, sortPeers, tailscaleNote } from "../lib/tailscale";
 
 type Bridge = NonNullable<CrossAgentsBridge["connection"]>;
@@ -780,28 +781,37 @@ function HostGuide() {
             </div>
           </li>
           <li className={invite && !expired ? "now" : ""}>
-            <div className="guide-step-title">在另一台电脑上粘贴</div>
+            <div className="guide-step-title">在另一台电脑粘贴，或用手机扫码</div>
             {invite && !expired ? (
-              <>
-                <div className={`code-box ${showCode ? "open" : ""}`} data-role="invite">
-                  {showCode ? (
-                    <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
-                  ) : (
-                    <code className="mono code-line" title={invite.code} aria-label="配对码">
-                      {invite.code}
-                    </code>
-                  )}
-                  <CopyButton className="copy" text={invite.code} label="复制" title="复制配对码" />
-                  <button type="button" className="ghost small" data-action="code-toggle" onClick={() => setShowCode((v) => !v)}>
-                    {showCode ? "收起" : "显示全部"}
-                  </button>
+              <div className="pairing-invite-layout">
+                <PairingQr code={invite.code} />
+                <div className="pairing-invite-body">
+                  <div className={`code-box ${showCode ? "open" : ""}`} data-role="invite">
+                    {showCode ? (
+                      <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
+                    ) : (
+                      <code className="mono code-line" title={invite.code} aria-label="配对码">
+                        {invite.code}
+                      </code>
+                    )}
+                    <CopyButton className="copy" text={invite.code} label="复制" title="复制配对码" />
+                    <button type="button" className="ghost small" data-action="code-toggle" onClick={() => setShowCode((v) => !v)}>
+                      {showCode ? "收起" : "显示全部"}
+                    </button>
+                  </div>
+                  <div className="setting-hint">
+                    还剩 <strong>{left}</strong> 过期，只能用一次。
+                  </div>
+                  <div className="setting-hint">
+                    <strong>手机端（iOS）</strong>：打开 CrossAgents App，点「扫码配对」扫描左侧二维码。
+                  </div>
+                  <div className="setting-hint">
+                    <strong>电脑端</strong>：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的设备。
+                  </div>
                 </div>
-                <div className="setting-hint">
-                  还剩 <strong>{left}</strong> 过期，只能用一次。在那台电脑上：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的电脑。
-                </div>
-              </>
+              </div>
             ) : (
-              <div className="setting-hint">{expired ? "刚才的配对码已经过期，重新生成一个。" : "生成配对码后，在这里复制。"}</div>
+              <div className="setting-hint">{expired ? "刚才的配对码已经过期，重新生成一个。" : "生成配对码后，在这里扫码或复制。"}</div>
             )}
           </li>
         </ol>

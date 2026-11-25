@@ -2418,6 +2418,20 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .code-box > button, .code-box .copy { flex: none; white-space: nowrap; height: 30px; padding: 0 12px; font-size: 12.5px; }
 .code-preview.ok { color: var(--ok-text, var(--text-2)); }
 .code-preview.bad { color: var(--danger-text); }
+.pairing-invite-layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 4px; }
+.pairing-invite-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
+.pairing-qr-card {
+  flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 10px; border-radius: calc(var(--radius) + 2px);
+  background: #ffffff; border: 1px solid var(--border-strong);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+.pairing-qr-img { display: block; border-radius: 4px; image-rendering: pixelated; }
+.pairing-qr-placeholder {
+  display: grid; place-items: center; font-size: 12px; color: #6b7280;
+  background: #f9fafb; border-radius: 4px;
+}
+.pairing-qr-caption { font-size: 11.5px; font-weight: 500; color: #374151; }
 
 /* The sidebar's one-line "本机 / 远程 host" mark, above the hub connection line */
 .conn-where { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); padding: 2px 4px 0; border-radius: var(--radius); min-width: 0; text-decoration: none; }

@@ -35,6 +35,8 @@ pub enum DeviceOs {
     Windows,
     Macos,
     Linux,
+    Ios,
+    Android,
     Other,
 }
 impl DeviceOs {
@@ -46,6 +48,8 @@ impl DeviceOs {
             Self::Windows => "windows",
             Self::Macos => "macos",
             Self::Linux => "linux",
+            Self::Ios => "ios",
+            Self::Android => "android",
             Self::Other => "other",
         }
     }
@@ -57,8 +61,10 @@ impl DeviceOs {
         }
         Some(match value.to_ascii_lowercase().as_str() {
             "windows" => Self::Windows,
-            "macos" => Self::Macos,
+            "macos" | "darwin" => Self::Macos,
             "linux" => Self::Linux,
+            "ios" | "iphoneos" => Self::Ios,
+            "android" => Self::Android,
             _ => Self::Other,
         })
     }
@@ -68,6 +74,8 @@ impl DeviceOs {
             "windows" => Self::Windows,
             "macos" => Self::Macos,
             "linux" => Self::Linux,
+            "ios" => Self::Ios,
+            "android" => Self::Android,
             _ => Self::Other,
         }
     }
@@ -104,10 +112,13 @@ mod tests {
         assert_eq!(DeviceOs::parse_reported("windows"), Some(DeviceOs::Windows));
         assert_eq!(DeviceOs::parse_reported(" MacOS "), Some(DeviceOs::Macos));
         assert_eq!(DeviceOs::parse_reported("linux"), Some(DeviceOs::Linux));
+        assert_eq!(DeviceOs::parse_reported("ios"), Some(DeviceOs::Ios));
         assert_eq!(DeviceOs::parse_reported("freebsd"), Some(DeviceOs::Other));
         assert_eq!(DeviceOs::parse_reported("  "), None);
         assert_eq!(DeviceOs::from_std("macos"), DeviceOs::Macos);
-        assert_eq!(DeviceOs::from_std("android"), DeviceOs::Other);
+        assert_eq!(DeviceOs::from_std("ios"), DeviceOs::Ios);
+        assert_eq!(DeviceOs::from_std("android"), DeviceOs::Android);
+        assert_eq!(DeviceOs::from_std("freebsd"), DeviceOs::Other);
         assert_eq!(serde_json::to_value(DeviceOs::Macos).unwrap(), "macos");
     }
 }

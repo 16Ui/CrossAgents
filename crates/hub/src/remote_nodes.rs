@@ -468,6 +468,8 @@ impl RemoteNodes {
                             crossagents_core::DeviceOs::Windows => "windows",
                             crossagents_core::DeviceOs::Macos => "macos",
                             crossagents_core::DeviceOs::Linux => "linux",
+                            crossagents_core::DeviceOs::Ios => "ios",
+                            crossagents_core::DeviceOs::Android => "android",
                             crossagents_core::DeviceOs::Other => "unknown",
                         })
                         .unwrap_or("unknown")

@@ -1,0 +1,21 @@
+[package]
+name = "crossagents-link-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C-ABI static library embedding crossagents-link (iroh hole-punching) into iOS / mobile apps"
+
+[lib]
+name = "crossagents_link_ffi"
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+crossagents-link.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[lints]
+workspace = true

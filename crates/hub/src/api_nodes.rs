@@ -138,6 +138,8 @@ fn parse_device_os(raw: &str) -> Option<DeviceOs> {
         "windows" => Some(DeviceOs::Windows),
         "macos" | "darwin" => Some(DeviceOs::Macos),
         "linux" => Some(DeviceOs::Linux),
+        "ios" => Some(DeviceOs::Ios),
+        "android" => Some(DeviceOs::Android),
         _ => None,
     }
 }

@@ -804,6 +804,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossagents-link-ffi"
+version = "0.3.9"
+dependencies = [
+ "crossagents-link",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "crossagents-mock-agent"
 version = "0.3.9"
 dependencies = [
