@@ -1130,15 +1130,43 @@ fn clamp_utf8(bytes: &[u8], max: usize) -> String {
 }
 
 fn node_hostname() -> String {
-    std::env::var(if cfg!(windows) {
+    if let Ok(v) = std::env::var(if cfg!(windows) {
         "COMPUTERNAME"
     } else {
         "HOSTNAME"
-    })
-    .ok()
-    .map(|v| v.trim().to_owned())
-    .filter(|v| !v.is_empty())
-    .unwrap_or_else(|| "node".into())
+    }) {
+        let trimmed = v.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_owned();
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("scutil")
+        .args(["--get", "LocalHostName"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    #[cfg(unix)]
+    if let Ok(out) = std::process::Command::new("hostname")
+        .arg("-s")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        && out.status.success()
+    {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    "node".into()
 }
 
 fn default_shell() -> String {

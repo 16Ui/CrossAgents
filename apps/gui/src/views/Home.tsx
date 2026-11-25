@@ -30,6 +30,7 @@ import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
 import { mentionsFor, useMention } from "../mention";
 import { QuestionCards } from "../questions";
+import { RemoteDirPicker } from "../RemoteDirPicker";
 import { CHATS, homeOf, isChat, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
 const DRAFT: draft.Where = { kind: "home" };
@@ -134,6 +135,7 @@ export function HomeView() {
   const remote = useConnectionState()?.mode === "remote";
   const manualOnly = remote || isRemoteNode;
   const [pathEntry, setPathEntry] = useState(false);
+  const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const cwd = folder ?? current?.path;
   const [mode, setModeState] = useState<Mode>(() => load<Mode>(MODE_KEY, "chat", (v) => v === "chat" || v === "run"));
@@ -613,6 +615,24 @@ export function HomeView() {
     } else setFolder(dir);
     setPathEntry(false);
   };
+  const pickRemoteDir = (dir: string) => {
+    setDirPickerOpen(false);
+    setPathEntry(false);
+    setManualPath("");
+    const known = list.find((w) => w.key === wsKey(dir));
+    if (known) {
+      setFolder(undefined);
+      selectWorkspace(known.key);
+    } else {
+      setFolder(dir);
+    }
+  };
+  const centreLabel = localNode?.hostname || "中心";
+  const browseTargetNode = isRemoteNode ? activeRemote.id : "local";
+  const browseTargetLabel = isRemoteNode ? activeRemote.name : centreLabel;
+  const browseTargetOs = isRemoteNode ? activeRemote.os : localNode?.os;
+  const browseInitialPath = folder ?? current?.path ?? (isRemoteNode ? activeRemote.default_cwd : "");
+
   const wsItems: MenuItem[] = [
     // A chat may live outside any project; a run always works in one.
     ...(mode === "chat"
@@ -649,8 +669,16 @@ export function HomeView() {
       ? [
           {
             kind: "item",
+            key: "browse",
+            label: `浏览 ${browseTargetLabel} 目录…`,
+            sub: `直接查看并选择 ${browseTargetLabel} 上的文件夹`,
+            icon: <Icon name="folder" size={14} />,
+            onPick: () => setDirPickerOpen(true),
+          } satisfies MenuItem,
+          {
+            kind: "item",
             key: "path",
-            label: isRemoteNode ? `输入 ${activeRemote.name} 上的路径…` : "输入中心上的路径…",
+            label: isRemoteNode ? `手动输入 ${activeRemote.name} 路径…` : "手动输入中心路径…",
             sub: isRemoteNode
               ? `这个路径在 ${activeRemote.name}（${activeRemote.os}）上`
               : "这个路径在中心那台机器上；建 agent 时 hub 会校验",
@@ -689,9 +717,9 @@ export function HomeView() {
     setSessionId(undefined);
     setImportPick(undefined);
     setPathEntry(false);
+    setDirPickerOpen(false);
     setManualPath("");
   };
-  const centreLabel = localNode?.hostname || "中心";
   const nodeItems: MenuItem[] =
     remoteNodes.length > 0
       ? [
@@ -1001,10 +1029,23 @@ export function HomeView() {
               <button type="button" className="primary small" onClick={useManualPath} disabled={!manualPath.trim()}>
                 用这个路径
               </button>
+              <button type="button" className="ghost small" onClick={() => setDirPickerOpen(true)}>
+                浏览目录
+              </button>
               <button type="button" className="ghost small" onClick={() => setPathEntry(false)}>
                 取消
               </button>
             </div>
+          )}
+          {dirPickerOpen && (
+            <RemoteDirPicker
+              node={browseTargetNode}
+              label={browseTargetLabel}
+              os={browseTargetOs}
+              initialPath={browseInitialPath}
+              onSelect={pickRemoteDir}
+              onClose={() => setDirPickerOpen(false)}
+            />
           )}
           {/* Two parts that keep their place in both modes: the chips a start is set up with
               wrap among themselves on the left, the actions stay pinned to the bottom right.

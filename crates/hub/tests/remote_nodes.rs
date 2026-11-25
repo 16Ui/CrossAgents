@@ -361,17 +361,32 @@ fn handle_mock_node_op(root: &std::path::Path, op: NodeRpcOp) -> NodeRpcReply {
                 error: None,
             }
         }
-        NodeRpcOp::Exec(req) => NodeRpcReply {
-            ok: true,
-            payload: Some(json!({
-                "exit_code": 0,
-                "stdout": format!("{}\n", req.command),
-                "stderr": "",
-                "timed_out": false,
-                "duration_ms": 5
-            })),
-            error: None,
-        },
+        NodeRpcOp::Exec(req) => {
+            if req.command.starts_with("git ") {
+                return NodeRpcReply {
+                    ok: true,
+                    payload: Some(json!({
+                        "exit_code": 128,
+                        "stdout": "",
+                        "stderr": "fatal: not a git repository\n",
+                        "timed_out": false,
+                        "duration_ms": 2
+                    })),
+                    error: None,
+                };
+            }
+            NodeRpcReply {
+                ok: true,
+                payload: Some(json!({
+                    "exit_code": 0,
+                    "stdout": format!("{}\n", req.command),
+                    "stderr": "",
+                    "timed_out": false,
+                    "duration_ms": 5
+                })),
+                error: None,
+            }
+        }
     }
 }
 
@@ -904,6 +919,348 @@ async fn user_profile_accepts_raw_base64_and_data_url_avatars() {
         .await
         .unwrap();
     assert_eq!(bad.status().as_u16(), 400);
+
+    hub.shutdown();
+    let _ = hub.wait().await;
+}
+
+#[tokio::test]
+async fn remote_agent_files_and_node_dirs_end_to_end() {
+    use crossagents_api_types::{
+        FileContentResponse, FileKind, FileSearchResponse, FileTreeResponse, NodeDirsResponse,
+        ResolvePathsRequest, ResolvePathsResponse,
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(work.path().join("src")).unwrap();
+    std::fs::write(work.path().join("README.md"), "# Hello Mac\n").unwrap();
+    std::fs::write(work.path().join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+    let cfg = HubConfig::new(Paths::new(home.path().to_path_buf()), 0);
+    let hub = crossagents_hub::start(cfg).await.unwrap();
+    let base = format!("http://{}", hub.addr);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    // 1. Browse local hub dirs (`GET /v1/nodes/local/dirs`).
+    let local_dirs: NodeDirsResponse = http
+        .get(format!(
+            "{base}/v1/nodes/local/dirs?path={}",
+            work.path().to_string_lossy()
+        ))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(local_dirs.node, "local");
+    assert!(local_dirs.dirs.iter().any(|d| d.name == "src"));
+
+    // 2. Connect a simulated remote node handling file RPCs against `work`.
+    let created: CreateDeviceResponse = http
+        .post(format!("{base}/v1/devices"))
+        .bearer_auth(&hub.token)
+        .json(&CreateDeviceRequest {
+            name: "mac-files".into(),
+            kind: Some(DeviceKind::Node),
+            level: None,
+            os: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let node_token = created.token;
+    let node_id = created.device.id;
+    let work_str = work.path().to_string_lossy().replace('\\', "/");
+    let resp = http
+        .get(format!(
+            "{base}/v1/node/stream?os=macos&arch=aarch64&hostname=mac-files.local&shell=zsh&cwd={work_str}&version=0.3.9"
+        ))
+        .bearer_auth(&node_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let node_task = {
+        let http = http.clone();
+        let base = base.clone();
+        let token = node_token.clone();
+        let root = work.path().to_path_buf();
+        tokio::spawn(async move {
+            let mut stream = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut event = String::new();
+            while let Some(Ok(bytes)) = stream.next().await {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                while let Some(pos) = buf.find('\n') {
+                    let line = buf[..pos].trim_end_matches('\r').to_owned();
+                    buf.drain(..=pos);
+                    if line.is_empty() {
+                        event.clear();
+                        continue;
+                    }
+                    if let Some(ev) = line.strip_prefix("event:") {
+                        event = ev.trim().to_owned();
+                    } else if let Some(data) = line.strip_prefix("data:")
+                        && event == "call"
+                        && let Ok(call) = serde_json::from_str::<NodeRpcCall>(data.trim())
+                    {
+                        let reply = handle_mock_node_op(&root, call.op);
+                        let _ = http
+                            .post(format!("{base}/v1/node/results/{}", call.call_id))
+                            .bearer_auth(&token)
+                            .json(&reply)
+                            .send()
+                            .await;
+                    }
+                }
+            }
+        })
+    };
+
+    for _ in 0..30 {
+        let list: ListNodesResponse = http
+            .get(format!("{base}/v1/nodes"))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if list.nodes.iter().any(|n| n.id == node_id && n.online) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // 3. Browse remote node dirs (`GET /v1/nodes/{node}/dirs`).
+    let remote_dirs: NodeDirsResponse = http
+        .get(format!("{base}/v1/nodes/{node_id}/dirs"))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(remote_dirs.node, "mac-files");
+    assert!(remote_dirs.dirs.iter().any(|d| d.name == "src"));
+
+    // 4. Create a remote agent and verify all read-only file endpoints route to the remote node.
+    let agent: Agent = http
+        .post(format!("{base}/v1/agents"))
+        .bearer_auth(&hub.token)
+        .json(&CreateAgentRequest {
+            name: Some("mac-browser".into()),
+            plugin: "codex".into(),
+            driver: None,
+            model: None,
+            role: None,
+            cwd: work_str.clone(),
+            node: Some(node_id.clone()),
+            worktree: None,
+            config: serde_json::json!({}),
+            profile: Default::default(),
+            topic: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let tree: FileTreeResponse = http
+        .get(format!("{base}/v1/agents/{}/files/tree", agent.id))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(tree.entries.iter().any(|e| e.path == "src" && e.kind == FileKind::Dir));
+    assert!(tree.entries.iter().any(|e| e.path == "README.md" && e.kind == FileKind::File));
+
+    let content: FileContentResponse = http
+        .get(format!(
+            "{base}/v1/agents/{}/files/content?path=src/main.rs",
+            agent.id
+        ))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!content.binary);
+    assert_eq!(content.text.as_deref(), Some("fn main() {}"));
+
+    let search: FileSearchResponse = http
+        .get(format!("{base}/v1/agents/{}/files/search?q=main", agent.id))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(search.paths.iter().any(|p| p == "src/main.rs"));
+
+    let resolved: ResolvePathsResponse = http
+        .post(format!("{base}/v1/agents/{}/files/resolve", agent.id))
+        .bearer_auth(&hub.token)
+        .json(&ResolvePathsRequest {
+            paths: vec!["src/main.rs".into(), "nope.txt".into()],
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resolved.entries[0].path.as_deref(), Some("src/main.rs"));
+    assert_eq!(resolved.entries[0].kind, Some(FileKind::File));
+    assert_eq!(resolved.entries[1].path, None);
+
+    // Path traversal must be refused.
+    let bad_tree = http
+        .get(format!("{base}/v1/agents/{}/files/tree?path=../escape", agent.id))
+        .bearer_auth(&hub.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_tree.status().as_u16(), 400);
+
+    node_task.abort();
+    hub.shutdown();
+    let _ = hub.wait().await;
+}
+
+#[tokio::test]
+async fn device_level_promotion_takes_effect_immediately_without_reconnect() {
+    use crossagents_api_types::{Device, DeviceLevel, SetDeviceLevelRequest};
+
+    let home = tempfile::tempdir().unwrap();
+    let cfg = HubConfig::new(Paths::new(home.path().to_path_buf()), 0);
+    let hub = crossagents_hub::start(cfg).await.unwrap();
+    let base = format!("http://{}", hub.addr);
+    let http = reqwest::Client::builder().no_proxy().build().unwrap();
+
+    // 1. Issue a write-level client device (same as default pairing code).
+    let created: CreateDeviceResponse = http
+        .post(format!("{base}/v1/devices"))
+        .bearer_auth(&hub.token)
+        .json(&CreateDeviceRequest {
+            name: "travel-mac".into(),
+            kind: Some(DeviceKind::Client),
+            level: Some(DeviceLevel::Write),
+            os: None,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = created.token;
+    let id = created.device.id;
+
+    // 2. While write-level, admin routes like GET /v1/terminals and level-change are 403.
+    let denied_term = http
+        .get(format!("{base}/v1/terminals"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_term.status().as_u16(), 403);
+    let denied_self_promote = http
+        .post(format!("{base}/v1/devices/{id}/level"))
+        .bearer_auth(&token)
+        .json(&SetDeviceLevelRequest {
+            level: DeviceLevel::Admin,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_self_promote.status().as_u16(), 403);
+
+    // 3. Hub admin promotes the device to `admin`.
+    let promoted: Device = http
+        .post(format!("{base}/v1/devices/{id}/level"))
+        .bearer_auth(&hub.token)
+        .json(&SetDeviceLevelRequest {
+            level: DeviceLevel::Admin,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(promoted.level, DeviceLevel::Admin);
+
+    // 4. The SAME token immediately accesses admin routes without waiting for cache TTL.
+    let allowed_term = http
+        .get(format!("{base}/v1/terminals"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed_term.status().as_u16(), 200);
+
+    // 5. Demoting back to read immediately blocks write/admin routes.
+    let demoted: Device = http
+        .post(format!("{base}/v1/devices/{id}/level"))
+        .bearer_auth(&hub.token)
+        .json(&SetDeviceLevelRequest {
+            level: DeviceLevel::Read,
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(demoted.level, DeviceLevel::Read);
+    let denied_after = http
+        .get(format!("{base}/v1/terminals"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_after.status().as_u16(), 403);
 
     hub.shutdown();
     let _ = hub.wait().await;

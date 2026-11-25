@@ -51,6 +51,13 @@ pub struct ListDevicesResponse {
     pub devices: Vec<Device>,
 }
 
+/// `POST /v1/devices/{id}/level` (admin): promote or demote an active device's permission level.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetDeviceLevelRequest {
+    pub level: DeviceLevel,
+}
+
 /// `GET /v1/link`: the hub's built-in hole-punching entrance (docs/MULTI-NODE.md §14「内置打洞」).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -104,13 +111,26 @@ pub struct SetLinkRequest {
     pub relay: Option<String>,
 }
 
+/// `POST /v1/link/invites` (admin): optional parameters for a one-time pairing code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateLinkInviteRequest {
+    /// Device level granted when this pairing code is redeemed (defaults to `write`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub level: Option<DeviceLevel>,
+}
+
 /// `POST /v1/link/invites` (admin): a one-time pairing code. Whoever has it can pair one
-/// client device (write level) until it expires; it is shown only in this response.
+/// client device until it expires; it is shown only in this response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LinkInvite {
     pub code: String,
     pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level: Option<DeviceLevel>,
 }
 
 pub const API_VERSION: &str = "v2";
@@ -3641,6 +3661,29 @@ pub struct NodeFileEntry {
 pub struct NodeListFilesResponse {
     pub path: String,
     pub entries: Vec<NodeFileEntry>,
+    pub truncated: bool,
+}
+
+/// One subdirectory returned by `GET /v1/nodes/{node}/dirs`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeDirEntry {
+    pub name: String,
+    pub path: String,
+}
+
+/// `GET /v1/nodes/{node}/dirs` (read): browse folders on either the hub machine (`local`) or a
+/// connected remote execution node, so any GUI can pick a workspace folder without typing paths.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeDirsResponse {
+    pub node: String,
+    pub os: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<String>,
+    pub dirs: Vec<NodeDirEntry>,
     pub truncated: bool,
 }
 

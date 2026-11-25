@@ -5,6 +5,7 @@
 // switch reloads the window.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { DeviceLevel } from "@bindings/DeviceLevel";
 import type { LinkInvite } from "@bindings/LinkInvite";
 import type { LinkStatus } from "@bindings/LinkStatus";
 import type { ConnectionState, CrossAgentsBridge, PairStep, RemoteTarget } from "../bridge";
@@ -592,6 +593,7 @@ function HostSection({ state }: { state: ConnectionState }) {
 function HostGuide() {
   const [status, setStatus] = useState<LinkStatus>();
   const [invite, setInvite] = useState<LinkInvite>();
+  const [inviteLevel, setInviteLevel] = useState<DeviceLevel>("write");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [relay, setRelay] = useState("");
@@ -651,7 +653,7 @@ function HostGuide() {
     );
   const makeCode = () =>
     run(
-      () => api.createLinkInvite(),
+      () => api.createLinkInvite(inviteLevel),
       (made) => {
         setInvite(made);
         setShowCode(false);
@@ -749,6 +751,28 @@ function HostGuide() {
                 </div>
               </div>
               <div className="row guide-actions">
+                <div className="segmented small" role="group" aria-label="配对设备权限">
+                  <button
+                    type="button"
+                    className={inviteLevel === "write" ? "active" : ""}
+                    aria-pressed={inviteLevel === "write"}
+                    disabled={busy}
+                    onClick={() => setInviteLevel("write")}
+                    title="日常使用：可发起会话与控制 agent"
+                  >
+                    读写
+                  </button>
+                  <button
+                    type="button"
+                    className={inviteLevel === "admin" ? "active" : ""}
+                    aria-pressed={inviteLevel === "admin"}
+                    disabled={busy}
+                    onClick={() => setInviteLevel("admin")}
+                    title="自己的主力设备：出差时也能管中心账号、开终端、审批扩展"
+                  >
+                    管理（主力设备）
+                  </button>
+                </div>
                 <button className={running && (!invite || expired) ? "primary" : ""} type="button" data-action="link-invite" disabled={busy || !running} onClick={() => void makeCode()}>
                   {invite ? "再生成一个" : "生成配对码"}
                 </button>
@@ -782,7 +806,7 @@ function HostGuide() {
           </li>
         </ol>
       </div>
-      <div className="notice">连进来的电脑会出现在「设备」页（write 读写级别），在那里可以吊销。点「关闭」后谁都连不进来，没用掉的配对码也作废。</div>
+      <div className="notice">连进来的电脑会出现在「设备」页，在那里可以随时切换权限级别（如把已连的 Mac 升为「管理」）或吊销。点「关闭」后谁都连不进来，没用掉的配对码也作废。</div>
     </section>
   );
 }

@@ -59,6 +59,7 @@ pub fn required(method: &Method, pattern: &str) -> Level {
         (method.as_str(), pattern),
         ("POST", "/v1/devices")
             | ("DELETE", "/v1/devices/{id}")
+            | ("POST", "/v1/devices/{id}/level")
             // Opens the hub to the outside, and a pairing code is a credential.
             | ("POST", "/v1/link")
             | ("POST", "/v1/link/invites")

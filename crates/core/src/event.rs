@@ -128,6 +128,12 @@ pub enum EventKind {
     DeviceCreated { device: crate::Device },
     #[serde(rename = "device.revoked")]
     DeviceRevoked { device: crate::Device },
+    /// A device's permission level or metadata was updated.
+    #[serde(rename = "device.updated")]
+    DeviceUpdated { device: crate::Device },
+    /// The user's shared chat profile (name / avatar) changed on the hub.
+    #[serde(rename = "profile.updated")]
+    ProfileUpdated,
     /// A remote execution node connected, updated its registration, or disconnected.
     #[serde(rename = "node.changed")]
     NodeChanged { id: String },
@@ -839,6 +845,8 @@ impl EventKind {
         match self {
             Self::DeviceCreated { .. } => "device.created",
             Self::DeviceRevoked { .. } => "device.revoked",
+            Self::DeviceUpdated { .. } => "device.updated",
+            Self::ProfileUpdated => "profile.updated",
             Self::NodeChanged { .. } => "node.changed",
             Self::HubStarted { .. } => "hub.started",
             Self::HubStopping => "hub.stopping",
@@ -953,6 +961,8 @@ impl EventKind {
         match self {
             Self::DeviceCreated { .. }
             | Self::DeviceRevoked { .. }
+            | Self::DeviceUpdated { .. }
+            | Self::ProfileUpdated
             | Self::NodeChanged { .. }
             | Self::HubStarted { .. }
             | Self::HubStopping

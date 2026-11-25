@@ -37,8 +37,8 @@ struct Config {
 pub struct LinkService {
     home: PathBuf,
     inner: Mutex<Inner>,
-    /// sha256(secret) → when it expires.
-    invites: Mutex<HashMap<String, DateTime<Utc>>>,
+    /// sha256(secret) → (when it expires, granted device level).
+    invites: Mutex<HashMap<String, (DateTime<Utc>, DeviceLevel)>>,
 }
 
 #[derive(Default)]
@@ -171,7 +171,7 @@ impl LinkService {
         let pending = {
             let mut invites = self.invites.lock().await;
             let now = Utc::now();
-            invites.retain(|_, expires| *expires > now);
+            invites.retain(|_, (expires, _)| *expires > now);
             invites.len() as u32
         };
         let inner = self.inner.lock().await;
@@ -205,7 +205,7 @@ impl LinkService {
     }
 
     /// A new one-time pairing code. Refused while the entrance is not running.
-    pub async fn invite(&self, host: String) -> anyhow::Result<LinkInvite> {
+    pub async fn invite(&self, host: String, level: DeviceLevel) -> anyhow::Result<LinkInvite> {
         let endpoint = {
             let inner = self.inner.lock().await;
             let Some(running) = &inner.running else {
@@ -227,18 +227,18 @@ impl LinkService {
         {
             let mut invites = self.invites.lock().await;
             let now = Utc::now();
-            invites.retain(|_, expires| *expires > now);
+            invites.retain(|_, (expires, _)| *expires > now);
             while invites.len() >= MAX_INVITES {
                 let oldest = invites
                     .iter()
-                    .min_by_key(|(_, expires)| **expires)
+                    .min_by_key(|(_, (expires, _))| *expires)
                     .map(|(k, _)| k.clone());
                 match oldest {
                     Some(key) => invites.remove(&key),
                     None => break,
                 };
             }
-            invites.insert(digest(&secret), expires_at);
+            invites.insert(digest(&secret), (expires_at, level));
         }
         let code = Invite {
             endpoint,
@@ -250,15 +250,19 @@ impl LinkService {
             expires: expires_at.timestamp(),
         }
         .encode();
-        Ok(LinkInvite { code, expires_at })
+        Ok(LinkInvite {
+            code,
+            expires_at,
+            level: Some(level),
+        })
     }
 
-    /// Takes a pairing code's secret: true once, while it has not expired.
-    async fn take(&self, secret: &str) -> bool {
+    /// Takes a pairing code's secret: returns its granted level once, while it has not expired.
+    async fn take(&self, secret: &str) -> Option<DeviceLevel> {
         let mut invites = self.invites.lock().await;
         match invites.remove(&digest(secret)) {
-            Some(expires) => expires > Utc::now(),
-            None => false,
+            Some((expires, level)) if expires > Utc::now() => Some(level),
+            _ => None,
         }
     }
 }
@@ -349,17 +353,17 @@ impl Gate for HubGate {
         os: Option<&str>,
     ) -> Result<serde_json::Value, Refusal> {
         let state = self.state()?;
-        if !state.link.take(secret).await {
+        let Some(level) = state.link.take(secret).await else {
             return Err(Refusal::new(
                 "expired",
                 "这个配对码已经用过、过期，或中心的 hub 重启过：在中心上重新生成一个",
             ));
-        }
+        };
         let created = crate::api::issue_device(
             &state,
             name,
             DeviceKind::Client,
-            DeviceLevel::Write,
+            level,
             os.and_then(DeviceOs::parse_reported),
         )
         .await
@@ -387,19 +391,19 @@ mod tests {
     async fn codes_are_taken_once_and_expire() {
         let dir = tempfile::tempdir().unwrap();
         let link = LinkService::new(dir.path());
-        assert!(link.invite("x".into()).await.is_err(), "not running");
+        assert!(link.invite("x".into(), DeviceLevel::Write).await.is_err(), "not running");
         link.invites
             .lock()
             .await
-            .insert(digest("live"), Utc::now() + Duration::minutes(1));
+            .insert(digest("live"), (Utc::now() + Duration::minutes(1), DeviceLevel::Admin));
         link.invites
             .lock()
             .await
-            .insert(digest("old"), Utc::now() - Duration::minutes(1));
-        assert!(link.take("live").await);
-        assert!(!link.take("live").await, "a code works once");
-        assert!(!link.take("old").await, "an expired code does not work");
-        assert!(!link.take("never").await);
+            .insert(digest("old"), (Utc::now() - Duration::minutes(1), DeviceLevel::Write));
+        assert_eq!(link.take("live").await, Some(DeviceLevel::Admin));
+        assert_eq!(link.take("live").await, None, "a code works once");
+        assert_eq!(link.take("old").await, None, "an expired code does not work");
+        assert_eq!(link.take("never").await, None);
         assert_eq!(link.status().await.state, LinkState::Off);
     }
 }

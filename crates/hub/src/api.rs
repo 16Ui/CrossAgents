@@ -123,6 +123,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
         .route("/v1/devices", get(list_devices).post(create_device))
         .route("/v1/devices/{id}", delete(revoke_device))
+        .route("/v1/devices/{id}/level", post(set_device_level))
         .route("/v1/link", get(link_status).post(set_link))
         .route("/v1/link/invites", post(create_link_invite))
         .route("/v1/info", get(info))
@@ -2023,6 +2024,7 @@ async fn set_user_profile(
             e.to_string(),
         )
     })?;
+    let _ = state.bus.publish(EventKind::ProfileUpdated).await;
     Ok(Json(req))
 }
 
@@ -3196,6 +3198,9 @@ async fn agent_files_tree(
     Query(q): Query<FilesQuery>,
 ) -> ApiResult<Json<FileTreeResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_tree(&state, &agent, q.path(), q.all).await;
+    }
     files_tree(&state, FilesScope::Agent(&agent), q).await
 }
 
@@ -3224,6 +3229,9 @@ async fn agent_files_content(
     Query(q): Query<FilesQuery>,
 ) -> ApiResult<Json<FileContentResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_content(&state, &agent, q.path()).await;
+    }
     files_content(&state, FilesScope::Agent(&agent), q).await
 }
 
@@ -3281,6 +3289,9 @@ async fn agent_files_status(
     Path(key): Path<String>,
 ) -> ApiResult<Json<FileStatusResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_status(&state, &agent).await;
+    }
     files_status(&state, FilesScope::Agent(&agent)).await
 }
 
@@ -3307,6 +3318,9 @@ async fn agent_files_search(
     Query(q): Query<FileSearchQuery>,
 ) -> ApiResult<Json<FileSearchResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_search(&state, &agent, &q.q, q.all).await;
+    }
     files_search(&state, FilesScope::Agent(&agent), q).await
 }
 
@@ -3335,6 +3349,9 @@ async fn agent_files_resolve(
     Json(req): Json<ResolvePathsRequest>,
 ) -> ApiResult<Json<ResolvePathsResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if crate::runtime::is_remote_agent(&agent) {
+        return crate::api_nodes::remote_agent_files_resolve(&state, &agent, req).await;
+    }
     files_resolve(&state, FilesScope::Agent(&agent), req).await
 }
 
@@ -4273,16 +4290,58 @@ async fn set_link(
 
 async fn create_link_invite(
     State(state): State<Arc<AppState>>,
+    body: Option<Json<crossagents_api_types::CreateLinkInviteRequest>>,
 ) -> ApiResult<Json<crossagents_api_types::LinkInvite>> {
-    let invite = state.link.invite(hostname()).await.map_err(|err| {
-        AppError::new(
-            StatusCode::CONFLICT,
-            ErrorCode::Conflict,
-            format!("{err:#}"),
-        )
-    })?;
-    tracing::info!(expires = %invite.expires_at, "link: pairing code made");
+    let level = body
+        .and_then(|Json(req)| req.level)
+        .unwrap_or(crossagents_core::DeviceLevel::Write);
+    let invite = state
+        .link
+        .invite(hostname(), level)
+        .await
+        .map_err(|err| {
+            AppError::new(
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                format!("{err:#}"),
+            )
+        })?;
+    tracing::info!(expires = %invite.expires_at, level = ?level, "link: pairing code made");
     Ok(Json(invite))
+}
+
+async fn set_device_level(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<crossagents_api_types::SetDeviceLevelRequest>,
+) -> ApiResult<Json<crossagents_core::Device>> {
+    let device = state
+        .devices
+        .set_level(state.store().as_ref(), &id, req.level)
+        .await?;
+    if req.level < crossagents_core::DeviceLevel::Admin {
+        let terminals = state.terminals.clone();
+        let device_id = id.clone();
+        tokio::task::spawn_blocking(move || terminals.close_device(&device_id))
+            .await
+            .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
+    }
+    tracing::info!(
+        device = %device.name,
+        level = ?device.level,
+        kind = ?device.kind,
+        "device level updated"
+    );
+    if let Err(error) = state
+        .bus
+        .publish(EventKind::DeviceUpdated {
+            device: device.clone(),
+        })
+        .await
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device updated event");
+    }
+    Ok(Json(device))
 }
 async fn revoke_device(
     State(state): State<Arc<AppState>>,

@@ -7,28 +7,29 @@
 import { useEffect, useState } from "react";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { Device } from "@bindings/Device";
+import type { DeviceLevel } from "@bindings/DeviceLevel";
 import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
-import { useHubData } from "../hub";
+import { onHubEvent, useHubData } from "../hub";
 import { normalizeNodeOs, useNodes } from "../nodes";
 import { isOnline, isRevoked, isThisWindow, KIND_LABELS, LEVEL_LABELS, OS_UNKNOWN_HINT, sortDevices } from "../lib/devices";
 import { OsIcon, osName } from "../osIcon";
 import { useConnectionState } from "../lib/useConnection";
-import { useOperation } from "../lib/features";
+import { clearRefusals, useOperation } from "../lib/features";
 import { full, when } from "../lib/time";
 import { useArmed } from "../parts";
 
 export function DevicesPage() {
-  // `device.created` / `device.revoked` arrive for what another window (or the CLI) did, so the
-  // list follows them without a reload.
+  // `device.created` / `device.updated` / `device.revoked` arrive for what another window (or
+  // the CLI) did, so the list follows them without a reload.
   const devices = useHubData(
     () => api.listDevices().then((r) => r.devices),
     [],
-    (e) => e.type === "device.created" || e.type === "device.revoked",
+    (e) => e.type === "device.created" || e.type === "device.updated" || e.type === "device.revoked",
   );
-  // A 403 is kept by features.ts per operation (api.ts notes it): revoking needs admin, while
-  // the list above only needs read. So this greys the buttons, never the entry.
+  // A 403 is kept by features.ts per operation (api.ts notes it): revoking or changing level
+  // needs admin, while the list above only needs read. So this greys the controls, never the entry.
   const revoke = useOperation("devices.revoke");
   const refused = revoke.refused ? revoke.reason : undefined;
   const [error, setError] = useState<string>();
@@ -40,7 +41,26 @@ export function DevicesPage() {
     api.info().then(setHub, () => {});
   }, []);
   const thisDevice = useConnectionState()?.remote?.deviceId;
+  useEffect(() => {
+    if (!thisDevice) return;
+    return onHubEvent((e) => {
+      if (e.type === "device.updated" && (e as { device?: { id?: string } }).device?.id === thisDevice) {
+        clearRefusals();
+      }
+    });
+  }, [thisDevice]);
   const now = Date.now();
+
+  async function setDeviceLevel(device: Device, level: DeviceLevel) {
+    if (level === device.level) return;
+    setError(undefined);
+    try {
+      await api.setDeviceLevel(device.id, level);
+      devices.reload();
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 403)) setError(errorText(err));
+    }
+  }
 
   async function revokeDevice(device: Device) {
     setError(undefined);
@@ -56,7 +76,7 @@ export function DevicesPage() {
   return (
     <>
       <p className="settings-lead">
-        这些是 hub 签发过的凭据。客户端按设备的级别访问 API，节点只走节点通道；吊销后它的下一次请求会被拒绝，记录留在这里。
+        这些是 hub 签发过的凭据。客户端按设备的级别访问 API：出差时如需在另一台自己的主力电脑上管理中心账号、开终端或审批扩展，可在中心把该设备升级为<strong>管理（admin）</strong>。
       </p>
       <div className="setting-card">
         <div className="setting-line device-row hub-row" data-role="hub">
@@ -89,7 +109,7 @@ export function DevicesPage() {
       <ErrorBox error={devices.error ?? error} />
       {refused && (
         <div className="notice">
-          吊销设备需要「管理」（admin）级别，这个凭据不够，按钮已置灰；列表照常能看。hub 说：{refused}
+          调整设备权限或吊销设备需要「管理」（admin）级别，这个凭据不够，操作已置灰；列表照常能看。在中心电脑的「设备」页把当前设备升级为「管理」后即可操作。hub 说：{refused}
         </div>
       )}
       {devices.data === undefined ? null : !list.length ? (
@@ -106,7 +126,15 @@ export function DevicesPage() {
       ) : (
         <div className="setting-card">
           {list.map((device) => (
-            <DeviceRow key={device.id} device={device} refused={refused} onRevoke={revokeDevice} now={now} thisWindow={isThisWindow(device, thisDevice)} />
+            <DeviceRow
+              key={device.id}
+              device={device}
+              refused={refused}
+              onLevel={setDeviceLevel}
+              onRevoke={revokeDevice}
+              now={now}
+              thisWindow={isThisWindow(device, thisDevice)}
+            />
           ))}
         </div>
       )}
@@ -149,9 +177,32 @@ function RemoteNodeRow({ node }: { node: RemoteNodeInfo }) {
 }
 
 /** One device: what it is, what it may do, when it was made and last seen; revoked ones faint. */
-function DeviceRow({ device, refused, onRevoke, now, thisWindow }: { device: Device; refused?: string; onRevoke: (device: Device) => void; now: number; thisWindow: boolean }) {
+function DeviceRow({
+  device,
+  refused,
+  onLevel,
+  onRevoke,
+  now,
+  thisWindow,
+}: {
+  device: Device;
+  refused?: string;
+  onLevel: (device: Device, level: DeviceLevel) => Promise<void>;
+  onRevoke: (device: Device) => void;
+  now: number;
+  thisWindow: boolean;
+}) {
   const remove = useArmed();
+  const [savingLevel, setSavingLevel] = useState(false);
   const revoked = isRevoked(device);
+  const changeLevel = async (next: DeviceLevel) => {
+    setSavingLevel(true);
+    try {
+      await onLevel(device, next);
+    } finally {
+      setSavingLevel(false);
+    }
+  };
   return (
     <div className={`setting-line device-row ${revoked ? "revoked" : ""}`}>
       <div className="device-name">
@@ -162,7 +213,7 @@ function DeviceRow({ device, refused, onRevoke, now, thisWindow }: { device: Dev
           {device.name}
           {thisWindow && <span className="chip small accent">这个窗口</span>}
           <span className="chip small">{KIND_LABELS[device.kind]}</span>
-          <span className="chip small">{LEVEL_LABELS[device.level]}</span>
+          <span className={`chip small ${device.level === "admin" ? "accent" : ""}`}>{LEVEL_LABELS[device.level]}</span>
           {revoked && <span className="chip small danger">已吊销</span>}
         </div>
         {!device.os && <div className="setting-hint">{OS_UNKNOWN_HINT}</div>}
@@ -187,16 +238,32 @@ function DeviceRow({ device, refused, onRevoke, now, thisWindow }: { device: Dev
         </div>
       </div>
       {!revoked && (
-        <button
-          type="button"
-          data-action="revoke"
-          className={`ghost small danger ${remove.armed ? "armed" : ""}`}
-          disabled={!!refused}
-          title={refused ?? "这台设备的凭据立即失效；记录留着"}
-          onClick={() => remove.click(() => onRevoke(device))}
-        >
-          {remove.armed ? "再点一次吊销" : "吊销"}
-        </button>
+        <div className="row device-actions">
+          {device.kind === "client" && (
+            <select
+              className="device-level-select"
+              aria-label={`调整 ${device.name} 权限级别`}
+              value={device.level}
+              disabled={!!refused || savingLevel}
+              title={refused ?? "切换权限级别（管理级别可远程管账号、开终端、审批扩展）"}
+              onChange={(e) => void changeLevel(e.target.value as DeviceLevel)}
+            >
+              <option value="read">只读（read）</option>
+              <option value="write">读写（write）</option>
+              <option value="admin">管理（admin）</option>
+            </select>
+          )}
+          <button
+            type="button"
+            data-action="revoke"
+            className={`ghost small danger ${remove.armed ? "armed" : ""}`}
+            disabled={!!refused}
+            title={refused ?? "这台设备的凭据立即失效；记录留着"}
+            onClick={() => remove.click(() => onRevoke(device))}
+          >
+            {remove.armed ? "再点一次吊销" : "吊销"}
+          </button>
+        </div>
       )}
     </div>
   );

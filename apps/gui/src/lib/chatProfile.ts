@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api } from "../api";
+import { onHubEvent } from "../hub";
 import { reconcileChatProfile, type ChatProfile, type StoredChatProfile } from "./chatProfileSync";
 
 export { reconcileChatProfile, type ChatProfile, type StoredChatProfile };
@@ -100,6 +101,9 @@ export function startChatProfileSync() {
     }
   };
   void sync(true);
+  onHubEvent((event) => {
+    if (event.type === "profile.updated") void sync(true);
+  });
   window.crossagents?.onStatus((status) => {
     if (status === "connected") void sync(true);
   });

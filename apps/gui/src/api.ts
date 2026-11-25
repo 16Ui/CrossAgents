@@ -45,7 +45,9 @@ import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { Device } from "@bindings/Device";
+import type { DeviceLevel } from "@bindings/DeviceLevel";
 import type { ListDevicesResponse } from "@bindings/ListDevicesResponse";
+import type { NodeDirsResponse } from "@bindings/NodeDirsResponse";
 import type { LinkInvite } from "@bindings/LinkInvite";
 import type { LinkStatus } from "@bindings/LinkStatus";
 import type { SetLinkRequest } from "@bindings/SetLinkRequest";
@@ -568,8 +570,14 @@ export const api = {
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   /** Online execution nodes (built-in local hub + connected remote `crossagents node run` daemons). */
   listNodes: () => request<import("@bindings/ListNodesResponse").ListNodesResponse>("GET", "/v1/nodes"),
+  /** Browse subdirectories on `"local"` (the hub machine) or an online remote node. */
+  nodeDirs: (node: string, path = "") =>
+    request<NodeDirsResponse>("GET", `/v1/nodes/${enc(node)}/dirs${path ? `?path=${enc(path)}` : ""}`),
   /** Every device the hub has issued, revoked ones included; no tokens or hashes (docs/API-AUTH.md §2.2). */
   listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),
+  /** Changes an active device's permission level (`read`, `write`, `admin`); requires `admin`. */
+  setDeviceLevel: (id: string, level: DeviceLevel) =>
+    request<Device>("POST", `/v1/devices/${enc(id)}/level`, { level }),
   /** Revokes a device's credential; idempotent, answers the device as it now stands (`admin`). */
   revokeDevice: (id: string) => request<Device>("DELETE", `/v1/devices/${enc(id)}`),
   /** The built-in hole-punching entrance: on or off, its id and relay (docs/MULTI-NODE.md §14). */
@@ -577,7 +585,8 @@ export const api = {
   /** Turns it on or off (`admin`). */
   setLink: (req: SetLinkRequest) => request<LinkStatus>("POST", "/v1/link", req),
   /** A one-time pairing code, shown only in this answer (`admin`). */
-  createLinkInvite: () => request<LinkInvite>("POST", "/v1/link/invites", {}),
+  createLinkInvite: (level?: DeviceLevel) =>
+    request<LinkInvite>("POST", "/v1/link/invites", level ? { level } : {}),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
   importCandidates: () => request<ImportAccountsResponse>("GET", "/v1/accounts/import"),
   importAccount: (req: ImportAccountRequest) => request<Account>("POST", "/v1/accounts/import", req),

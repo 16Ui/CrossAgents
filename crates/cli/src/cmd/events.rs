@@ -87,9 +87,12 @@ fn format_event(event: &Event) -> String {
 /// One line describing the event, without its type.
 pub fn summary(kind: &EventKind) -> String {
     match kind {
-        EventKind::DeviceCreated { device } | EventKind::DeviceRevoked { device } => {
+        EventKind::DeviceCreated { device }
+        | EventKind::DeviceUpdated { device }
+        | EventKind::DeviceRevoked { device } => {
             device.name.clone()
         }
+        EventKind::ProfileUpdated => "profile updated".into(),
         EventKind::NodeChanged { id } => format!("node {id}"),
         EventKind::HubStarted { version } => format!("version {version}"),
         EventKind::HubStopping => String::new(),

@@ -2209,6 +2209,35 @@ impl Store for SqliteStore {
             .map_err(storage)?;
         Ok(())
     }
+    async fn set_device_level(
+        &self,
+        id: &str,
+        level: crossagents_core::DeviceLevel,
+    ) -> Result<crossagents_core::Device, CoreError> {
+        let row = sqlx::query(
+            "UPDATE devices SET level = ? WHERE id = ? AND revoked_at IS NULL RETURNING *",
+        )
+        .bind(level.word())
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        if let Some(row) = row {
+            return device_row(row);
+        }
+        let existing = sqlx::query("SELECT * FROM devices WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        if existing.is_some() {
+            return Err(CoreError::Conflict(format!("device {id} is revoked")));
+        }
+        Err(CoreError::NotFound {
+            kind: "device",
+            id: id.into(),
+        })
+    }
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError> {
         let result = sqlx::query(
             "INSERT INTO accounts (id, provider, created_at, data) VALUES (?, ?, ?, ?)",
