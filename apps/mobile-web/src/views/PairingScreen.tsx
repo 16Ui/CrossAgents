@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Activity, Clipboard, Globe, QrCode, Share, ShieldCheck } from "lucide-react";
+import { BrandMark } from "../brands";
 import { isIOS, isStandalonePwa } from "../push";
 import { decodeInviteLocal, redeemInviteWasm, runRelayDiagnostics, type RelayDiagItem } from "../transport";
 import type { InvitePreview, PairingRecord } from "../types";
@@ -21,7 +22,6 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [scanning, setScanning] = useState(false);
 
-  // Direct HTTPS fallback (e.g. Tailscale Funnel / custom domain)
   const [directUrl, setDirectUrl] = useState("");
   const [directToken, setDirectToken] = useState("");
 
@@ -94,39 +94,53 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
 
   return (
     <div className="app-shell">
-      <div className="page-scroll" style={{ paddingTop: "calc(var(--safe-top) + 22px)" }}>
-        <div style={{ textAlign: "center", marginBottom: 22 }}>
+      <div className="page-scroll" style={{ paddingTop: "calc(var(--safe-top) + 26px)" }}>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            marginBottom: 22,
+          }}
+        >
           <img
             src="./icon-192.png"
             alt="CrossAgents"
             style={{
-              width: 68,
-              height: 68,
-              borderRadius: 18,
-              boxShadow: "0 8px 24px rgba(79, 70, 229, 0.28)",
+              width: 64,
+              height: 64,
+              borderRadius: 16,
+              border: "1px solid var(--border)",
             }}
           />
-          <h1 style={{ margin: "12px 0 4px", fontSize: 26, fontWeight: 800 }}>CrossAgents</h1>
-          <p style={{ margin: 0, fontSize: 13.5, color: "var(--text-2)" }}>
-            浏览器 WASM iroh 端到端加密直连 · 两端零 VPN · 永不过期
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 7, marginTop: 12 }}>
+            <BrandMark size={20} />
+            <h1 style={{ margin: 0, fontSize: 23, fontWeight: 700, letterSpacing: "-0.02em" }}>CrossAgents</h1>
+          </div>
+          <p style={{ margin: "5px 0 0", fontSize: 13, color: "var(--muted)" }}>
+            端到端加密远程控制你的多机 Agent 团队 · 零 VPN
           </p>
         </div>
 
         {needsHomeScreen && (
-          <div className="card" style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}>
+          <div
+            className="card"
+            style={{ borderColor: "color-mix(in srgb, var(--accent) 40%, var(--border))", background: "var(--accent-bg)" }}
+          >
             <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-              <Share size={18} style={{ color: "var(--accent)", flex: "none", marginTop: 2 }} />
-              <div style={{ fontSize: 13, lineHeight: 1.5 }}>
-                <strong>建议先「添加到主屏幕」再扫码配对</strong>
+              <Share size={17} style={{ color: "var(--accent-text)", flex: "none", marginTop: 2 }} />
+              <div style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                <strong style={{ color: "var(--text)" }}>建议先「添加到主屏幕」再配对</strong>
                 <div style={{ color: "var(--text-2)", marginTop: 2 }}>
-                  点击 Safari 底部「分享」→「添加到主屏幕」，然后从桌面图标打开，可获得全屏 App 体验并解锁<strong>免费 iOS 锁屏审批推送</strong>。
+                  点 Safari 底部「分享」→「添加到主屏幕」，从主屏图标打开可获全屏体验并开启免费 iOS 锁屏推送。
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        <div className="segmented">
+        <div className="segmented" style={{ marginBottom: 12 }}>
           <button type="button" className={mode === "iroh" ? "active" : ""} onClick={() => setMode("iroh")}>
             扫码 / 配对码（推荐）
           </button>
@@ -137,23 +151,23 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
 
         {mode === "iroh" ? (
           <>
-            <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <button type="button" className="primary-btn" disabled={busy} onClick={() => setScanning(true)}>
-                <QrCode size={19} />
+                <QrCode size={18} />
                 扫描电脑端配对二维码
               </button>
-              <div style={{ fontSize: 12, color: "var(--text-2)", textAlign: "center", lineHeight: 1.5 }}>
-                在中心电脑打开 CrossAgents → 设置 →「连接」→「让别的电脑连进来」→「生成配对码」
+              <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", lineHeight: 1.5 }}>
+                中心电脑打开 CrossAgents → 设置 →「连接」→「生成配对码」
               </div>
             </div>
 
-            <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div className="card" style={{ display: "flex", flexDirection: "column", gap: 11 }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span style={{ fontSize: 13.5, fontWeight: 600 }}>或粘贴一次性配对码</span>
                 <button
                   type="button"
                   className="secondary-btn"
-                  style={{ padding: "5px 10px", fontSize: 12 }}
+                  style={{ padding: "4px 10px", fontSize: 12 }}
                   disabled={busy}
                   onClick={async () => {
                     try {
@@ -167,7 +181,7 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                     }
                   }}
                 >
-                  <Clipboard size={13} />
+                  <Clipboard size={12} />
                   粘贴
                 </button>
               </div>
@@ -182,15 +196,15 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                   setError(undefined);
                 }}
                 disabled={busy}
-                style={{ fontSize: 12.5 }}
+                style={{ fontSize: 12 }}
               />
 
               {preview && (
                 <div
                   className={`chip ${preview.ok && !expired ? "ok" : "danger"}`}
-                  style={{ borderRadius: 10, padding: "8px 10px", display: "flex", alignItems: "center", gap: 6 }}
+                  style={{ borderRadius: 9, padding: "7px 10px", whiteSpace: "normal", lineHeight: 1.45 }}
                 >
-                  <ShieldCheck size={15} />
+                  <ShieldCheck size={14} style={{ flex: "none" }} />
                   <span>
                     {preview.ok
                       ? expired
@@ -208,7 +222,7 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
               )}
 
               <div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>这台手机的设备名</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 5 }}>这台手机的设备名</div>
                 <input
                   className="field-input"
                   value={deviceName}
@@ -218,49 +232,37 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                 />
               </div>
 
-              {error && (
-                <div
-                  className="chip danger"
-                  style={{ borderRadius: 10, padding: "9px 11px", whiteSpace: "normal", lineHeight: 1.5, wordBreak: "break-word" }}
-                >
-                  {error}
-                </div>
-              )}
+              {error && <div className="error-box">{error}</div>}
 
-              <button
-                type="button"
-                className="primary-btn"
-                disabled={!canPairIroh}
-                onClick={() => void pairByCode()}
-              >
-                {busy ? "正在通过 iroh 建立加密配对…" : "配对并连接"}
+              <button type="button" className="primary-btn" disabled={!canPairIroh} onClick={() => void pairByCode()}>
+                {busy ? "正在建立加密配对…" : "配对并连接"}
               </button>
 
               <button
                 type="button"
-                className="secondary-btn"
-                style={{ justifyContent: "center", fontSize: 12.5, padding: "8px 12px" }}
+                className="ghost-btn"
+                style={{ width: "100%" }}
                 disabled={diagBusy}
                 onClick={async () => {
                   setDiagBusy(true);
                   try {
-                    const res = await runRelayDiagnostics(preview?.relay);
-                    setDiagItems(res);
+                    setDiagItems(await runRelayDiagnostics(preview?.relay));
                   } finally {
                     setDiagBusy(false);
                   }
                 }}
               >
-                <Activity size={14} />
+                <Activity size={13} />
                 {diagBusy ? "正在测试中继连通性…" : "测试中继连通性"}
               </button>
 
               {diagItems && (
                 <div
                   style={{
-                    borderRadius: 10,
-                    padding: "9px 11px",
-                    background: "var(--surface-2)",
+                    borderRadius: 9,
+                    padding: "9px 10px",
+                    background: "var(--surface-sunk)",
+                    border: "1px solid var(--border)",
                     fontSize: 11.5,
                     lineHeight: 1.55,
                     display: "flex",
@@ -268,17 +270,12 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                     gap: 6,
                   }}
                 >
-                  <div style={{ fontWeight: 600, color: "var(--text-2)" }}>浏览器中继连通性诊断</div>
                   {diagItems.map((item) => (
                     <div key={item.url} className="mono" style={{ wordBreak: "break-all" }}>
-                      <div>
-                        <strong>{item.host}</strong>
-                      </div>
-                      <div style={{ color: item.httpOk ? "var(--ok)" : "var(--danger)" }}>
-                        HTTPS /ping: {item.httpOk ? "OK" : "失败"} ({item.httpMs}ms) {item.httpDetail}
-                      </div>
-                      <div style={{ color: item.wsOk ? "var(--ok)" : "var(--danger)" }}>
-                        WSS /relay: {item.wsOk ? "OK" : "失败"} ({item.wsMs}ms) {item.wsDetail}
+                      <div style={{ fontWeight: 600 }}>{item.host}</div>
+                      <div style={{ color: item.wsOk ? "var(--ok-text)" : "var(--danger-text)" }}>
+                        HTTPS {item.httpOk ? `${item.httpMs}ms` : item.httpDetail} · WSS{" "}
+                        {item.wsOk ? `${item.wsMs}ms (${item.wsDetail})` : item.wsDetail}
                       </div>
                     </div>
                   ))}
@@ -287,12 +284,12 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
             </div>
           </>
         ) : (
-          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ fontSize: 13, color: "var(--text-2)", lineHeight: 1.5 }}>
+          <div className="card" style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
               如果你配置了 Tailscale Funnel 或自建反代 HTTPS 域名，可以在此直接填写地址与设备 Token。
             </div>
             <div>
-              <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>中心 HTTPS 地址</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 5 }}>中心 HTTPS 地址</div>
               <input
                 className="field-input mono"
                 placeholder="https://desktop.tailnet.ts.net"
@@ -302,7 +299,7 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
               />
             </div>
             <div>
-              <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>设备 Token</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 5 }}>设备 Token</div>
               <input
                 className="field-input mono"
                 type="password"
@@ -312,13 +309,9 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
                 style={{ fontSize: 13.5 }}
               />
             </div>
-            {error && (
-              <div className="chip danger" style={{ borderRadius: 10, padding: "9px 11px", whiteSpace: "normal" }}>
-                {error}
-              </div>
-            )}
+            {error && <div className="error-box">{error}</div>}
             <button type="button" className="primary-btn" onClick={pairDirect}>
-              <Globe size={17} />
+              <Globe size={16} />
               连接中心
             </button>
           </div>

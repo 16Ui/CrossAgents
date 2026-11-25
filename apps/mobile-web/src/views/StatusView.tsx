@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { Bell, BellOff, Laptop, Monitor, RefreshCw, Send, Server, ShieldAlert, Unlink } from "lucide-react";
+import { Activity, Bell, BellOff, RefreshCw, Send, ShieldAlert, Unlink } from "lucide-react";
+import {
+  OsIcon,
+  planLabel,
+  quotaLevel,
+  resetText,
+  VendorMark,
+  vendorName,
+  windowLabel,
+} from "../brands";
 import {
   disableWebPush,
   enableWebPush,
@@ -7,9 +16,19 @@ import {
   getPushSupport,
   sendTestPush,
 } from "../push";
-import { nodeDisplayName, resetCountdown } from "../store";
-import type { HubTransport } from "../transport";
+import { nodeDisplayName } from "../store";
+import { FONTS, MODES, PAPERS, setTheme, useTheme } from "../theme";
+import { runRelayDiagnostics, type HubTransport, type RelayDiagItem } from "../transport";
 import type { ConnectionState, HubInfo, PairingRecord, QuotaResponse, RateWindow, RemoteNodeInfo } from "../types";
+
+function relayHostLabel(url?: string | null): string {
+  if (!url) return "";
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
 
 export function StatusView({
   pairing,
@@ -32,10 +51,14 @@ export function StatusView({
   onRefresh: () => void;
   onForget: () => void;
 }) {
+  const theme = useTheme();
   const [pushEndpoint, setPushEndpoint] = useState<string | null>(null);
   const [pushBusy, setPushBusy] = useState(false);
   const [pushNote, setPushNote] = useState<string>();
   const [confirmForget, setConfirmForget] = useState(false);
+  const [meterMode, setMeterMode] = useState<"remain" | "used">("remain");
+  const [diagBusy, setDiagBusy] = useState(false);
+  const [diagItems, setDiagItems] = useState<RelayDiagItem[] | null>(null);
 
   const pushSupport = getPushSupport();
 
@@ -70,7 +93,11 @@ export function StatusView({
     setPushNote(undefined);
     try {
       const res = await sendTestPush(transport, pushEndpoint);
-      setPushNote(res.sent > 0 ? "测试推送已发出，请留意锁屏/顶部横幅通知。" : "推送未能送达，请确认中心网络可访问推送服务。");
+      setPushNote(
+        res.sent > 0
+          ? "测试推送已发出，请留意锁屏/顶部横幅通知。"
+          : "推送未能送达，请确认中心网络可访问 Apple 推送服务。",
+      );
     } catch (err) {
       setPushNote(err instanceof Error ? err.message : String(err));
     } finally {
@@ -80,32 +107,33 @@ export function StatusView({
 
   const connChip =
     connection.kind === "connected"
-      ? { label: connection.mode === "iroh" ? "iroh E2EE 已连接" : "HTTPS 直连", cls: "ok" }
+      ? { label: connection.mode === "iroh" ? "iroh E2EE" : "HTTPS 直连", cls: "ok" }
       : connection.kind === "connecting"
         ? { label: "连接中…", cls: "accent" }
         : connection.kind === "revoked"
           ? { label: "已吊销", cls: "danger" }
-          : { label: connection.kind === "relay_unreachable" ? "中继不可达" : "中心离线", cls: "warn" };
+          : { label: connection.kind === "relay_unreachable" ? "中继不可达" : "离线", cls: "warn" };
 
   return (
     <>
       <div className="nav-bar">
         <div className="nav-title-wrap">
           <h1 className="nav-title">概览</h1>
+          <div className="nav-subtitle">推送、外观、节点与订阅额度</div>
         </div>
         <button type="button" className="icon-btn" onClick={onRefresh} title="刷新">
-          <RefreshCw size={17} />
+          <RefreshCw size={16} />
         </button>
       </div>
 
       <div className="page-scroll">
-        {/* Free iOS Lock-Screen Push Notification Card */}
-        <div className="section-label">锁屏审批推送（免费 Web Push）</div>
+        {/* Lock-Screen Web Push */}
+        <div className="section-label">锁屏审批推送</div>
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
             <div>
-              <div style={{ fontSize: 15, fontWeight: 700 }}>待办锁屏提醒</div>
-              <div style={{ fontSize: 12.5, color: "var(--text-2)", marginTop: 2 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 600 }}>免费 iOS 锁屏提醒</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
                 锁屏仅提示「有一项待处理」，不泄露命令或仓库隐私
               </div>
             </div>
@@ -113,7 +141,7 @@ export function StatusView({
           </div>
 
           {!pushSupport.supported ? (
-            <div className="chip accent" style={{ borderRadius: 10, padding: "8px 10px", whiteSpace: "normal", lineHeight: 1.45 }}>
+            <div className="chip accent" style={{ borderRadius: 8, padding: "8px 10px", whiteSpace: "normal", lineHeight: 1.45 }}>
               {pushSupport.reason}
             </div>
           ) : (
@@ -125,7 +153,7 @@ export function StatusView({
                 disabled={pushBusy || !transport || connection.kind !== "connected"}
                 onClick={() => void togglePush()}
               >
-                {pushEndpoint ? <BellOff size={15} /> : <Bell size={16} />}
+                {pushEndpoint ? <BellOff size={14} /> : <Bell size={15} />}
                 {pushBusy ? "处理中…" : pushEndpoint ? "关闭推送" : "开启免费锁屏推送"}
               </button>
               {pushEndpoint && (
@@ -135,7 +163,7 @@ export function StatusView({
                   disabled={pushBusy || !transport || connection.kind !== "connected"}
                   onClick={() => void testPush()}
                 >
-                  <Send size={14} />
+                  <Send size={13} />
                   发一条测试通知
                 </button>
               )}
@@ -143,32 +171,118 @@ export function StatusView({
           )}
 
           {pushNote && (
-            <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.45 }}>{pushNote}</div>
+            <div style={{ fontSize: 12.5, color: "var(--text-2)", lineHeight: 1.5 }}>{pushNote}</div>
           )}
         </div>
 
-        {/* Connection Card */}
-        <div className="section-label">当前中心连接</div>
+        {/* Appearance (1:1 aligned with Desktop Settings → 外观) */}
+        <div className="section-label">外观与主题</div>
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="theme-grid">
+            {PAPERS.map((p) => {
+              const active = theme.paper === p.key;
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  className={`theme-swatch-btn ${active ? "active" : ""}`}
+                  onClick={() => setTheme({ paper: p.key })}
+                >
+                  <span className="theme-swatch-dot" style={{ background: p.bg }}>
+                    <span className="theme-swatch-accent" style={{ background: p.accent }} />
+                  </span>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{p.label}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {p.hint}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>明暗模式</div>
+            <div className="segmented">
+              {MODES.map((m) => (
+                <button
+                  key={m.key}
+                  type="button"
+                  className={theme.mode === m.key ? "active" : ""}
+                  onClick={() => setTheme({ mode: m.key })}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>对话正文字体</div>
+            <div className="segmented">
+              {FONTS.map((f) => (
+                <button
+                  key={f.key}
+                  type="button"
+                  className={theme.font === f.key ? "active" : ""}
+                  onClick={() => setTheme({ font: f.key })}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Connection */}
+        <div className="section-label">当前中心连接</div>
+        <div className="card" style={{ display: "flex", flexDirection: "column", gap: 11 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Monitor size={22} style={{ color: "var(--accent)", flex: "none" }} />
+            <div className="account-vendor-frame">
+              <OsIcon os={hubInfo?.machine?.os ?? "windows"} size={17} />
+            </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 15.5, fontWeight: 700 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 600 }}>
                 {hubInfo?.machine?.hostname || pairing.host}
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-2)" }}>
-                设备：{pairing.deviceName}
+              <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                {pairing.deviceName}
                 {pairing.level ? ` · ${pairing.level}` : ""}
-                {hubInfo?.version ? ` · Hub v${hubInfo.version}` : ""}
+                {hubInfo?.version ? ` · v${hubInfo.version}` : ""}
               </div>
+              {pairing.relay && (
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                  中继：{relayHostLabel(pairing.relay)}
+                </div>
+              )}
             </div>
-            <span className={`chip ${connChip.cls}`}>{connChip.label}</span>
+            <span className={`chip ${connChip.cls}`}>
+              <span className={`dot ${connChip.cls}`} />
+              {connChip.label}
+            </span>
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
             <button type="button" className="secondary-btn" style={{ flex: 1 }} onClick={onReconnect}>
               <RefreshCw size={14} />
-              重新连接
+              重连
+            </button>
+            <button
+              type="button"
+              className="secondary-btn"
+              disabled={diagBusy}
+              onClick={async () => {
+                setDiagBusy(true);
+                try {
+                  setDiagItems(await runRelayDiagnostics(pairing.relay));
+                } finally {
+                  setDiagBusy(false);
+                }
+              }}
+            >
+              <Activity size={14} />
+              {diagBusy ? "测速中" : "测速"}
             </button>
             <button
               type="button"
@@ -179,9 +293,35 @@ export function StatusView({
               }}
             >
               <Unlink size={14} />
-              {confirmForget ? "再点一次忘记" : "忘记中心"}
+              {confirmForget ? "确认忘记" : "忘记"}
             </button>
           </div>
+
+          {diagItems && (
+            <div
+              style={{
+                borderRadius: 9,
+                padding: "9px 10px",
+                background: "var(--surface-sunk)",
+                border: "1px solid var(--border)",
+                fontSize: 11.5,
+                lineHeight: 1.55,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }}
+            >
+              {diagItems.map((item) => (
+                <div key={item.url} className="mono" style={{ wordBreak: "break-all" }}>
+                  <div style={{ fontWeight: 600 }}>{item.host}</div>
+                  <div style={{ color: item.wsOk ? "var(--ok-text)" : "var(--danger-text)" }}>
+                    HTTPS {item.httpOk ? `${item.httpMs}ms` : item.httpDetail} · WSS{" "}
+                    {item.wsOk ? `${item.wsMs}ms (${item.wsDetail})` : item.wsDetail}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Nodes */}
@@ -189,39 +329,39 @@ export function StatusView({
           在线机器与节点 ({nodes.filter((n) => n.online).length}/{nodes.length})
         </div>
         {nodes.length === 0 ? (
-          <div className="card" style={{ fontSize: 13, color: "var(--text-2)" }}>
+          <div className="card" style={{ fontSize: 13, color: "var(--muted)" }}>
             暂无节点数据
           </div>
         ) : (
           nodes.map((node) => {
             const installed = node.plugins.filter((p) => p.installed);
             return (
-              <div key={node.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div key={node.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 9 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  {node.os === "macos" ? (
-                    <Laptop size={19} />
-                  ) : node.os === "linux" ? (
-                    <Server size={19} />
-                  ) : (
-                    <Monitor size={19} />
-                  )}
+                  <div className="account-vendor-frame">
+                    <OsIcon os={node.os} size={17} />
+                  </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14.5, fontWeight: 700 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>
                       {nodeDisplayName(node.id, nodes, hubInfo, pairing.host)}
                     </div>
-                    <div className="mono" style={{ fontSize: 11.5, color: "var(--text-2)" }}>
+                    <div className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>
                       {node.os}/{node.arch}
                       {node.version ? ` · v${node.version}` : ""}
                     </div>
                   </div>
-                  <span className={`chip ${node.online ? "ok" : ""}`}>{node.online ? "在线" : "离线"}</span>
+                  <span className={`chip ${node.online ? "ok" : ""}`}>
+                    <span className={`dot ${node.online ? "ok" : "off"}`} />
+                    {node.online ? "在线" : "离线"}
+                  </span>
                 </div>
                 {installed.length > 0 && (
                   <div className="pill-wrap">
                     {installed.map((p) => (
-                      <span key={p.name} className="chip mono">
-                        {p.name}
-                        {p.version ? ` ${p.version}` : ""}
+                      <span key={p.name} className="chip">
+                        <VendorMark plugin={p.name} size={12} />
+                        <span>{vendorName(p.name)}</span>
+                        {p.version && <span className="muted mono">{p.version}</span>}
                       </span>
                     ))}
                   </div>
@@ -231,72 +371,122 @@ export function StatusView({
           })
         )}
 
-        {/* Subscription Quota */}
-        <div className="section-label">订阅配额与用量</div>
+        {/* Quota (aligned 1:1 with Desktop `Quota.tsx`) */}
+        <div className="section-label" style={{ justifyContent: "space-between" }}>
+          <span>订阅与额度 {quota?.accounts.length ? `(${quota.accounts.length})` : ""}</span>
+          {quota && quota.accounts.length > 0 && (
+            <div className="segmented" style={{ width: "auto" }}>
+              <button
+                type="button"
+                style={{ padding: "2px 9px", fontSize: 11.5 }}
+                className={meterMode === "remain" ? "active" : ""}
+                onClick={() => setMeterMode("remain")}
+              >
+                剩余
+              </button>
+              <button
+                type="button"
+                style={{ padding: "2px 9px", fontSize: 11.5 }}
+                className={meterMode === "used" ? "active" : ""}
+                onClick={() => setMeterMode("used")}
+              >
+                已用
+              </button>
+            </div>
+          )}
+        </div>
         {!quota || quota.accounts.length === 0 ? (
-          <div className="card" style={{ fontSize: 13, color: "var(--text-2)" }}>
+          <div className="card" style={{ fontSize: 13, color: "var(--muted)" }}>
             暂无订阅配额数据
           </div>
         ) : (
           quota.accounts.map((item) => {
-            const windows: { group?: string | null; w: RateWindow }[] =
+            const windows: { group?: string | null; w: RateWindow; reached: boolean }[] =
               item.status.limits.length > 0
-                ? item.status.limits.flatMap((g) => g.windows.map((w) => ({ group: g.name || g.model, w })))
-                : item.status.rate_limits.map((w) => ({ group: null, w }));
+                ? item.status.limits.flatMap((g) =>
+                    g.windows.map((w) => ({ group: g.name || g.model, w, reached: g.reached })),
+                  )
+                : item.status.rate_limits.map((w) => ({ group: null, w, reached: item.status.limit_reached }));
+            const plan = planLabel(item.status.plan);
 
             return (
-              <div key={item.account.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                  <strong style={{ fontSize: 14.5 }}>{item.account.label || item.account.id}</strong>
-                  <span className="chip mono">{item.account.provider}</span>
-                  {item.status.plan && <span className="chip accent">{item.status.plan}</span>}
-                  <span style={{ flex: 1 }} />
-                  {item.status.limit_reached && <span className="chip danger">已达上限</span>}
-                  {!item.status.logged_in && <span className="chip warn">未登录</span>}
+              <div key={item.account.id} className="card" style={{ display: "flex", flexDirection: "column", gap: 11 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div className="account-vendor-frame">
+                    <VendorMark plugin={item.account.provider} size={18} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.account.label || item.account.id}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                      {vendorName(item.account.provider)}
+                      {plan ? ` · ${plan}` : ""}
+                      {item.status.email ? ` · ${item.status.email}` : ""}
+                    </div>
+                  </div>
+                  {item.status.limit_reached ? (
+                    <span className="chip danger">已达限额</span>
+                  ) : !item.status.logged_in ? (
+                    <span className="chip warn">未登录</span>
+                  ) : null}
                 </div>
 
-                {item.status.email && (
-                  <div style={{ fontSize: 12, color: "var(--text-2)", marginTop: -4 }}>{item.status.email}</div>
-                )}
-
                 {item.at_risk && (
-                  <div className="chip danger" style={{ borderRadius: 8, padding: "6px 9px", whiteSpace: "normal" }}>
-                    <ShieldAlert size={14} /> {item.at_risk}
+                  <div className="error-box" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <ShieldAlert size={14} style={{ flex: "none" }} />
+                    <span>{item.at_risk}</span>
                   </div>
                 )}
 
                 {windows.length === 0 ? (
-                  <div style={{ fontSize: 12.5, color: "var(--text-2)" }}>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                     {item.status.credits?.has_credits
                       ? item.status.credits.unlimited
                         ? "无限额度"
-                        : `余额：${item.status.credits.balance ?? "-"}`
-                      : item.status.note || "暂无窗口配额数据"}
+                        : `余额：${item.status.credits.balance ?? "—"}`
+                      : item.status.note || "暂无额度窗口数据"}
                   </div>
                 ) : (
-                  windows.map((entry, idx) => {
-                    const used = Math.max(0, Math.min(100, entry.w.used_percent));
-                    const remain = Math.max(0, Math.round(100 - used));
-                    const color = used >= 90 ? "var(--danger)" : used >= 70 ? "var(--warn)" : "var(--ok)";
-                    const reset = resetCountdown(entry.w.resets_at);
-                    const title = [entry.group, entry.w.name].filter(Boolean).join(" · ");
-                    return (
-                      <div key={idx} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
-                          <span style={{ color: "var(--text-2)" }}>{title}</span>
-                          <span style={{ fontWeight: 700, color }}>
-                            {entry.w.remaining !== undefined && entry.w.total
-                              ? `余 ${Math.round(entry.w.remaining)} / ${Math.round(entry.w.total)}`
-                              : `剩余 ${remain}%`}
-                          </span>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {windows.map((entry, idx) => {
+                      const used = Math.max(0, Math.min(100, Math.round(entry.w.used_percent)));
+                      const val = meterMode === "used" ? used : 100 - used;
+                      const tone = quotaLevel(used, entry.reached && used >= 100);
+                      const baseLabel = windowLabel(entry.w).replace(/限额$/, "") || windowLabel(entry.w);
+                      const title = entry.group && entry.group !== baseLabel ? `${entry.group} · ${baseLabel}` : baseLabel;
+                      const reset = resetText(entry.w.resets_at);
+                      const pool =
+                        entry.w.total != null && entry.w.remaining != null
+                          ? `${Math.round(meterMode === "used" ? entry.w.total - entry.w.remaining : entry.w.remaining)} / ${Math.round(entry.w.total)}`
+                          : `${val}%`;
+                      return (
+                        <div key={idx} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                            <span style={{ color: "var(--text-2)" }}>{title}</span>
+                            <span
+                              style={{
+                                fontWeight: 600,
+                                fontVariantNumeric: "tabular-nums",
+                                color:
+                                  tone === "danger"
+                                    ? "var(--danger-text)"
+                                    : tone === "warn"
+                                      ? "var(--warn-text)"
+                                      : "var(--text-2)",
+                              }}
+                            >
+                              {meterMode === "used" ? "已用" : "剩余"} {pool}
+                            </span>
+                          </div>
+                          <div className={`quota-bar ${tone}`}>
+                            <span style={{ width: `${val}%` }} />
+                          </div>
+                          {reset && <div style={{ fontSize: 11, color: "var(--muted)" }}>{reset}</div>}
                         </div>
-                        <div className="progress-track">
-                          <div className="progress-fill" style={{ width: `${used}%`, background: color }} />
-                        </div>
-                        {reset && <div style={{ fontSize: 11, color: "var(--text-3)" }}>{reset}</div>}
-                      </div>
-                    );
-                  })
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             );

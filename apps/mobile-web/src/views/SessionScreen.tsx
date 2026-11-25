@@ -2,17 +2,26 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowUp,
-  Brain,
-  CheckCircle2,
-  Cpu,
+  Check,
+  Copy,
   Hand,
   ImagePlus,
-  Loader2,
   Square,
   X,
-  XCircle,
 } from "lucide-react";
-import { MarkdownView } from "../components/MarkdownView";
+import {
+  AgentAvatar,
+  agentTone,
+  effortLabel,
+  FamilyMark,
+  groupModels,
+  ModelMark,
+  OsIcon,
+  prettyModel,
+  UserAvatar,
+  vendorName,
+} from "../brands";
+import { DiffView, MarkdownView } from "../components/MarkdownView";
 import {
   availableEfforts,
   compressImageForUpload,
@@ -30,6 +39,7 @@ import type {
   RemoteNodeInfo,
   Transcript,
   TranscriptItem,
+  UserProfile,
 } from "../types";
 
 interface PendingPhoto {
@@ -44,6 +54,8 @@ export function SessionScreen({
   transcript,
   nodes,
   hubInfo,
+  profile,
+  avatarUrls,
   fallbackHost,
   pendingQuestions,
   transport,
@@ -56,6 +68,8 @@ export function SessionScreen({
   transcript?: Transcript;
   nodes: RemoteNodeInfo[];
   hubInfo?: HubInfo;
+  profile?: UserProfile;
+  avatarUrls: Record<string, string>;
   fallbackHost?: string;
   pendingQuestions: HumanItem[];
   transport: HubTransport | null;
@@ -72,16 +86,32 @@ export function SessionScreen({
   const [zoomUrl, setZoomUrl] = useState<string>();
   const [modelModalOpen, setModelModalOpen] = useState(false);
 
-  // Idempotency key kept stable across retries for the same unsent message.
   const pendingMsgIdRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const activeAgent = transcript?.agent ?? agent;
+  const agentImgUrl = activeAgent?.profile?.avatar_image ? avatarUrls[activeAgent.profile.avatar_image] : undefined;
+  const nodeInfo = nodes.find((n) =>
+    !activeAgent?.node || activeAgent.node === "local"
+      ? n.local
+      : n.id === activeAgent.node || n.name === activeAgent.node || n.hostname === activeAgent.node,
+  );
+  const nodeOs = nodeInfo?.os ?? hubInfo?.machine?.os ?? "windows";
+
   const isRunning =
     (transcript?.delivery && transcript.delivery.state !== "idle") ||
     activeAgent?.status === "running" ||
     activeAgent?.status === "starting";
+
+  // Auto-grow composer textarea
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 132)}px`;
+  }, [draft]);
 
   useEffect(() => {
     if (!transport) return;
@@ -106,7 +136,7 @@ export function SessionScreen({
     };
   }, [agentId, transport]);
 
-  // Lazily fetch image attachments referenced in turns.
+  // Lazily fetch image attachments referenced in turns
   useEffect(() => {
     if (!transport || !transcript) return;
     const toFetch: string[] = [];
@@ -136,6 +166,10 @@ export function SessionScreen({
   const turnsCount = transcript?.turns.length ?? 0;
   const lastTurn = transcript?.turns[turnsCount - 1];
   const lastItemLen = lastTurn?.items.reduce((acc, it) => acc + (it.type === "output" ? it.text.length : 1), 0) ?? 0;
+  const activeTool = lastTurn?.items
+    .slice()
+    .reverse()
+    .find((it) => it.type === "tool_call" && it.status !== "completed" && it.status !== "failed");
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -211,38 +245,42 @@ export function SessionScreen({
   }
 
   const hasInput = Boolean(draft.trim() || photos.length > 0);
+  const activeEffort = typeof activeAgent?.config?.effort === "string" ? activeAgent.config.effort : "";
+  const activeModelText = activeAgent?.model ? prettyModel(activeAgent.model) : activeAgent ? vendorName(activeAgent.plugin) : "";
+  const tone = activeAgent ? agentTone(activeAgent.status) : null;
 
   return (
-    <div className="app-shell">
+    <div className="app-shell session-shell">
       <div className="nav-bar">
-        <button type="button" className="icon-btn" onClick={onBack}>
-          <ArrowLeft size={19} />
+        <button type="button" className="icon-btn" onClick={onBack} aria-label="返回">
+          <ArrowLeft size={18} />
         </button>
+        {activeAgent && <AgentAvatar agent={activeAgent} imageUrl={agentImgUrl} size={30} status />}
         <div className="nav-title-wrap">
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <h1 className="nav-title" style={{ fontSize: 16 }}>
+            <h1 className="nav-title" style={{ fontSize: 15.5 }}>
               {activeAgent?.name ?? "对话"}
             </h1>
-            {activeAgent && <span className={`dot ${activeAgent.status}`} />}
+            {tone && tone.color !== "off" && (
+              <span className={`chip tiny ${tone.color}`}>{tone.label}</span>
+            )}
           </div>
           <div className="nav-subtitle">
-            {nodeDisplayName(activeAgent?.node, nodes, hubInfo, fallbackHost)} ·{" "}
-            {activeAgent?.model || activeAgent?.plugin || ""}
+            <OsIcon os={nodeOs} size={11} />
+            <span>{nodeDisplayName(activeAgent?.node, nodes, hubInfo, fallbackHost)}</span>
+            {activeAgent && (
+              <>
+                <span style={{ opacity: 0.45 }}>·</span>
+                <ModelMark plugin={activeAgent.plugin} model={activeAgent.model} size={11} />
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{activeModelText}</span>
+              </>
+            )}
           </div>
         </div>
-        <button
-          type="button"
-          className="icon-btn"
-          title="切换模型"
-          disabled={!transport || !activeAgent}
-          onClick={() => setModelModalOpen(true)}
-        >
-          <Cpu size={17} />
-        </button>
       </div>
 
       {error && (
-        <div className="status-banner danger" style={{ paddingTop: 8 }}>
+        <div className="status-banner danger" style={{ paddingTop: 7 }}>
           <span className="status-banner-msg">{error}</span>
           <button type="button" className="status-banner-btn" onClick={() => setError(undefined)}>
             关闭
@@ -257,68 +295,91 @@ export function SessionScreen({
           </div>
         ) : !transcript || transcript.turns.length === 0 ? (
           <div className="empty-state">
+            {activeAgent && <AgentAvatar agent={activeAgent} imageUrl={agentImgUrl} size={48} />}
             <h3>{activeAgent?.name ?? "开始对话"}</h3>
-            <p>发送一条消息或手机截图即可开始。</p>
+            <p>在下方输入指令或发送截图即可开始。</p>
           </div>
         ) : (
           transcript.turns.map((turn) => {
             const isQueued = !turn.started_at && !turn.completed_at && !turn.withdrawn;
+            const plainReply = turn.items
+              .filter((it): it is Extract<TranscriptItem, { type: "output" }> => it.type === "output" && it.stream === "text")
+              .map((it) => it.text)
+              .join("\n\n");
+
             return (
-              <div key={turn.message_id} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div key={turn.message_id} className="turn-block">
                 {(turn.input || (turn.attachments && turn.attachments.length > 0)) && (
-                  <div className="turn-user-wrap">
-                    {turn.attachments && turn.attachments.length > 0 && (
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
-                        {turn.attachments.map((att) =>
-                          attachmentUrls[att.id] ? (
-                            <img
-                              key={att.id}
-                              src={attachmentUrls[att.id]}
-                              alt={att.name}
-                              onClick={() => setZoomUrl(attachmentUrls[att.id])}
-                              style={{
-                                width: 112,
-                                height: 112,
-                                objectFit: "cover",
-                                borderRadius: 12,
-                                cursor: "pointer",
-                              }}
-                            />
-                          ) : (
-                            <span key={att.id} className="chip">
-                              {att.name}
-                            </span>
-                          ),
-                        )}
-                      </div>
-                    )}
-                    {turn.input && (
-                      <div className={`turn-user-bubble ${turn.withdrawn ? "withdrawn" : ""}`}>{turn.input}</div>
-                    )}
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-3)" }}>
-                      {turn.withdrawn && <span>已撤回</span>}
-                      {isQueued && (
-                        <>
-                          <span style={{ color: "var(--warn)" }}>排队中</span>
-                          <button
-                            type="button"
-                            className="chip accent"
-                            onClick={() => void sendNow(turn.message_id)}
-                          >
-                            立即插队
-                          </button>
-                        </>
+                  <div className="person-turn">
+                    <div className="person-turn-col">
+                      {turn.attachments && turn.attachments.length > 0 && (
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          {turn.attachments.map((att) =>
+                            attachmentUrls[att.id] ? (
+                              <img
+                                key={att.id}
+                                src={attachmentUrls[att.id]}
+                                alt={att.name}
+                                onClick={() => setZoomUrl(attachmentUrls[att.id])}
+                                style={{
+                                  width: 112,
+                                  height: 112,
+                                  objectFit: "cover",
+                                  borderRadius: 10,
+                                  border: "1px solid var(--border)",
+                                  cursor: "pointer",
+                                }}
+                              />
+                            ) : (
+                              <span key={att.id} className="chip">
+                                {att.name}
+                              </span>
+                            ),
+                          )}
+                        </div>
                       )}
-                      <span>{relativeTime(turn.sent_at)}</span>
+                      {turn.input && (
+                        <div className={`bubble ${turn.withdrawn ? "withdrawn" : ""}`}>{turn.input}</div>
+                      )}
+                      <div className="bubble-meta">
+                        {turn.withdrawn && <span>已撤回</span>}
+                        {isQueued && (
+                          <>
+                            <span style={{ color: "var(--warn-text)" }}>排队中</span>
+                            <button
+                              type="button"
+                              className="chip accent tiny"
+                              onClick={() => void sendNow(turn.message_id)}
+                            >
+                              立即插队
+                            </button>
+                          </>
+                        )}
+                        <span>{relativeTime(turn.sent_at)}</span>
+                      </div>
                     </div>
+                    <UserAvatar image={profile?.avatar} size={26} />
                   </div>
                 )}
 
                 {turn.items.length > 0 && (
-                  <div className="turn-assistant-card">
-                    {turn.items.map((item, idx) => (
-                      <ItemView key={idx} item={item} />
-                    ))}
+                  <div className="assistant-turn">
+                    {activeAgent && (
+                      <div className="assistant-head">
+                        <AgentAvatar agent={activeAgent} imageUrl={agentImgUrl} size={20} />
+                        <span className="assistant-head-name">{activeAgent.name}</span>
+                        <span className="assistant-head-model">
+                          <ModelMark plugin={activeAgent.plugin} model={activeAgent.model} size={11} />
+                          <span>{activeModelText}</span>
+                        </span>
+                      </div>
+                    )}
+                    <div className="assistant-body">
+                      {turn.items.map((item, idx) => (
+                        <ItemView key={idx} item={item} />
+                      ))}
+                    </div>
+                    {plainReply && turn.completed_at && <CopyReplyRow text={plainReply} />}
                   </div>
                 )}
               </div>
@@ -326,16 +387,19 @@ export function SessionScreen({
           })
         )}
 
-        {transcript?.error && (
-          <div className="chip danger" style={{ borderRadius: 10, padding: "9px 11px", whiteSpace: "normal" }}>
-            {transcript.error}
-          </div>
-        )}
+        {transcript?.error && <div className="error-box">{transcript.error}</div>}
 
         {isRunning && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "var(--text-2)", padding: "0 4px" }}>
-            <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} />
-            <span>{transcript?.delivery.state === "starting" ? "Agent 正在启动…" : "Agent 正在思考并执行…"}</span>
+          <div className="working-live">
+            <div className="working-row">
+              <span className="working-spark" aria-hidden="true">
+                ✦
+              </span>
+              <span>{transcript?.delivery.state === "starting" ? "正在启动 Agent…" : "正在思考并执行…"}</span>
+            </div>
+            {activeTool && activeTool.type === "tool_call" && (
+              <div className="working-now">{activeTool.title}</div>
+            )}
           </div>
         )}
         <div ref={bottomRef} />
@@ -349,45 +413,28 @@ export function SessionScreen({
         />
       )}
 
-      <div className="composer-wrap">
-        {photos.length > 0 && (
-          <div className="composer-photos">
-            {photos.map((p) => (
-              <div key={p.id} className="composer-photo-item">
-                <img src={p.previewUrl} alt={p.upload.name} />
-                <button
-                  type="button"
-                  className="composer-photo-del"
-                  onClick={() => setPhotos((prev) => prev.filter((x) => x.id !== p.id))}
-                >
-                  <X size={12} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="composer-row">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => void onPickFiles(e.target.files)}
-          />
-          <button
-            type="button"
-            className="icon-btn"
-            disabled={photos.length >= 4 || sending || !transport}
-            onClick={() => fileInputRef.current?.click()}
-            title="选择图片"
-          >
-            <ImagePlus size={19} />
-          </button>
+      <div className="composer-dock">
+        <div className="composer-box">
+          {photos.length > 0 && (
+            <div className="composer-photos">
+              {photos.map((p) => (
+                <div key={p.id} className="composer-photo-item">
+                  <img src={p.previewUrl} alt={p.upload.name} />
+                  <button
+                    type="button"
+                    className="composer-photo-del"
+                    onClick={() => setPhotos((prev) => prev.filter((x) => x.id !== p.id))}
+                  >
+                    <X size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
 
           <textarea
-            className="composer-input"
+            ref={textareaRef}
+            className="composer-textarea"
             rows={1}
             placeholder={isRunning ? "继续补充或排队发送…" : `发消息给 ${activeAgent?.name ?? "Agent"}…`}
             value={draft}
@@ -403,27 +450,62 @@ export function SessionScreen({
             }}
           />
 
-          {isRunning && !hasInput ? (
+          <div className="composer-toolbar">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => void onPickFiles(e.target.files)}
+            />
             <button
               type="button"
-              className="icon-btn"
-              style={{ background: "var(--danger)", color: "#fff" }}
-              onClick={() => void cancelTurn()}
-              title="停止"
+              className="composer-tool-btn icon-only"
+              disabled={photos.length >= 4 || sending || !transport}
+              onClick={() => fileInputRef.current?.click()}
+              title="选择图片"
             >
-              <Square size={15} fill="currentColor" />
+              <ImagePlus size={15} />
             </button>
-          ) : (
-            <button
-              type="button"
-              className="icon-btn primary"
-              disabled={!hasInput || sending || !transport}
-              onClick={() => void send()}
-              title="发送"
-            >
-              <ArrowUp size={19} />
-            </button>
-          )}
+
+            {activeAgent && (
+              <button
+                type="button"
+                className="composer-tool-btn"
+                disabled={!transport}
+                onClick={() => setModelModalOpen(true)}
+                title="切换模型与推理力度"
+              >
+                <ModelMark plugin={activeAgent.plugin} model={activeAgent.model} size={13} />
+                <span className="composer-model-label">
+                  {activeModelText}
+                  {activeEffort ? ` · ${effortLabel(activeEffort)}` : ""}
+                </span>
+              </button>
+            )}
+
+            {isRunning && !hasInput ? (
+              <button
+                type="button"
+                className="composer-send-btn stop"
+                onClick={() => void cancelTurn()}
+                title="中断本轮"
+              >
+                <Square size={13} fill="currentColor" />
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="composer-send-btn"
+                disabled={!hasInput || sending || !transport}
+                onClick={() => void send()}
+                title="发送"
+              >
+                <ArrowUp size={17} strokeWidth={2.2} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -452,17 +534,34 @@ export function SessionScreen({
   );
 }
 
+function CopyReplyRow({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className="msg-copy-row">
+      <button
+        type="button"
+        className={`msg-copy-btn ${copied ? "copied" : ""}`}
+        onClick={() => {
+          navigator.clipboard?.writeText(text).catch(() => {});
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }}
+      >
+        {copied ? <Check size={12} /> : <Copy size={12} />}
+        <span>{copied ? "已复制" : "复制原文"}</span>
+      </button>
+    </div>
+  );
+}
+
 function ItemView({ item }: { item: TranscriptItem }) {
   switch (item.type) {
     case "output":
       if (item.stream === "thought") {
         return (
-          <details className="fold-card">
-            <summary>
-              <Brain size={14} style={{ color: "var(--text-2)" }} />
-              <span>思考过程（{item.text.length} 字）</span>
-            </summary>
-            <div className="fold-body">{item.text}</div>
+          <details className="thought">
+            <summary>思考过程（{item.text.length} 字）</summary>
+            <div className="thought-body">{item.text}</div>
           </details>
         );
       }
@@ -471,37 +570,42 @@ function ItemView({ item }: { item: TranscriptItem }) {
     case "tool_call": {
       const done = item.status === "completed";
       const failed = item.status === "failed";
+      const dotCls = done ? "ok" : failed ? "danger" : "accent pulse";
       const output = item.detail?.output || item.output || item.detail?.result;
+      const changes = item.detail?.changes ?? [];
+      const dur =
+        item.detail?.duration_ms != null
+          ? item.detail.duration_ms >= 1000
+            ? `${(item.detail.duration_ms / 1000).toFixed(1)}s`
+            : `${item.detail.duration_ms}ms`
+          : null;
+      const hasBody = Boolean(item.detail?.command || changes.length > 0 || output || item.detail?.error);
+
+      if (!hasBody) {
+        return (
+          <div className="tool-step">
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-2)" }}>
+              <span className={`dot ${dotCls}`} />
+              <span className="tool-title">{item.title}</span>
+              {dur && <span className="muted" style={{ fontSize: 11 }}>{dur}</span>}
+            </div>
+          </div>
+        );
+      }
+
       return (
-        <details className="fold-card">
+        <details className="tool-step">
           <summary>
-            {done ? (
-              <CheckCircle2 size={14} style={{ color: "var(--ok)", flex: "none" }} />
-            ) : failed ? (
-              <XCircle size={14} style={{ color: "var(--danger)", flex: "none" }} />
-            ) : (
-              <Loader2 size={14} style={{ color: "var(--accent)", flex: "none" }} />
-            )}
-            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {item.title}
-            </span>
-            <span className={`chip ${done ? "ok" : failed ? "danger" : "accent"}`}>
-              {done ? "完成" : failed ? "失败" : "运行中"}
-            </span>
+            <span className={`dot ${dotCls}`} />
+            <span className="tool-title">{item.title}</span>
+            {dur && <span className="muted" style={{ fontSize: 11 }}>{dur}</span>}
+            {failed && <span className="chip danger tiny">失败</span>}
           </summary>
-          <div className="fold-body mono" style={{ fontSize: 11.5 }}>
-            {item.detail?.command && <div style={{ marginBottom: 6, color: "var(--text)" }}>$ {item.detail.command}</div>}
-            {item.detail?.changes && item.detail.changes.length > 0 && (
-              <div style={{ marginBottom: 6 }}>
-                {item.detail.changes.map((c, i) => (
-                  <div key={i}>
-                    [{c.kind}] {c.path}
-                  </div>
-                ))}
-              </div>
-            )}
-            {output && <div>{output.slice(0, 2400)}</div>}
-            {item.detail?.error && <div style={{ color: "var(--danger)" }}>{item.detail.error}</div>}
+          <div className="tool-detail">
+            {item.detail?.command && <div className="tool-cmd">$ {item.detail.command}</div>}
+            {changes.length > 0 && <DiffView changes={changes} />}
+            {output && <pre className="tool-out mono">{output.slice(0, 3200)}</pre>}
+            {item.detail?.error && <div className="error-box">{item.detail.error}</div>}
           </div>
         </details>
       );
@@ -516,24 +620,20 @@ function ItemView({ item }: { item: TranscriptItem }) {
 
     case "steer":
       return (
-        <div className="chip accent" style={{ borderRadius: 10, padding: "7px 10px", whiteSpace: "normal" }}>
+        <div className="chip accent" style={{ borderRadius: 9, padding: "6px 10px", whiteSpace: "normal", alignSelf: "flex-start" }}>
           插话：{item.text}（{item.read ? "已读" : "待读"}）
         </div>
       );
 
     case "warning":
       return (
-        <div className="chip warn" style={{ borderRadius: 10, padding: "7px 10px", whiteSpace: "normal" }}>
+        <div className="chip warn" style={{ borderRadius: 9, padding: "7px 10px", whiteSpace: "normal" }}>
           {item.message}
         </div>
       );
 
     case "error":
-      return (
-        <div className="chip danger" style={{ borderRadius: 10, padding: "7px 10px", whiteSpace: "normal" }}>
-          {item.message}
-        </div>
-      );
+      return <div className="error-box">{item.message}</div>;
   }
 }
 
@@ -569,23 +669,30 @@ function InlineQuestionBanner({
     <div
       className="card"
       style={{
-        margin: "0 10px 6px",
-        borderColor: "var(--warn)",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.12)",
+        margin: "0 12px 4px",
+        borderColor: "color-mix(in srgb, var(--warn) 42%, var(--border))",
+        borderLeft: "3px solid var(--warn)",
+        boxShadow: "var(--shadow-float)",
         display: "flex",
         flexDirection: "column",
         gap: 8,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "var(--warn)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: "var(--warn-text)" }}>
         <Hand size={14} />
         <span>Agent 需要你的决定</span>
       </div>
-      <div style={{ fontSize: 13.5, lineHeight: 1.45 }}>{question.text}</div>
+      <MarkdownView text={question.text} className="compact" />
       {question.options.length > 0 && (
         <div className="pill-wrap">
-          {question.options.map((opt) => (
-            <button key={opt} type="button" className="option-pill" disabled={busy} onClick={() => void submit(opt)}>
+          {question.options.map((opt, idx) => (
+            <button
+              key={opt}
+              type="button"
+              className={`option-pill ${idx === 0 ? "first" : ""}`}
+              disabled={busy}
+              onClick={() => void submit(opt)}
+            >
               {opt}
             </button>
           ))}
@@ -603,6 +710,7 @@ function InlineQuestionBanner({
         <button
           type="button"
           className="secondary-btn"
+          style={{ padding: "7px 12px", fontSize: 13 }}
           disabled={busy || !reply.trim()}
           onClick={() => void submit(reply)}
         >
@@ -642,6 +750,7 @@ function ModelSwitcherModal({
   }, [agent.node, agent.plugin, transport]);
 
   const models = plugin ? (plugin.models.length ? plugin.models : plugin.all_models) : [];
+  const grouped = groupModels(models);
   const efforts = availableEfforts(plugin, model);
 
   async function save() {
@@ -663,38 +772,76 @@ function ModelSwitcherModal({
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet-panel" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-head">
-          <strong>切换模型（{agent.plugin}）</strong>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <ModelMark plugin={agent.plugin} model={model || agent.model} size={16} />
+            <strong>切换模型 · {vendorName(agent.plugin)}</strong>
+          </div>
           <button type="button" className="icon-btn" onClick={onClose}>
-            <X size={18} />
+            <X size={17} />
           </button>
         </div>
-        <div className="sheet-body" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>模型</div>
-            <select className="field-select" value={model} onChange={(e) => setModel(e.target.value)}>
-              <option value="">默认模型</option>
-              {models.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
+
+        <div className="sheet-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {efforts.length > 0 && (
             <div>
-              <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>推理力度</div>
-              <select className="field-select" value={effort} onChange={(e) => setEffort(e.target.value)}>
-                <option value="">默认</option>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>推理力度</div>
+              <div className="choice-grid">
+                <button
+                  type="button"
+                  className={`choice-pill ${effort === "" ? "active" : ""}`}
+                  onClick={() => setEffort("")}
+                >
+                  默认
+                </button>
                 {efforts.map((ef) => (
-                  <option key={ef} value={ef}>
-                    {ef}
-                  </option>
+                  <button
+                    key={ef}
+                    type="button"
+                    className={`choice-pill ${effort === ef ? "active" : ""}`}
+                    onClick={() => setEffort(ef)}
+                  >
+                    {effortLabel(ef)}
+                  </button>
                 ))}
-              </select>
+              </div>
             </div>
           )}
+
+          <div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>选择模型</div>
+            <button
+              type="button"
+              className={`model-opt-row ${model === "" ? "active" : ""}`}
+              onClick={() => setModel("")}
+            >
+              <span>默认模型</span>
+              {model === "" && <Check size={15} />}
+            </button>
+            {grouped.map((g) => (
+              <div key={g.key}>
+                <div className="model-group-head">
+                  <FamilyMark familyKey={g.key} size={13} />
+                  <span>{g.label}</span>
+                </div>
+                {g.models.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`model-opt-row ${model === m ? "active" : ""}`}
+                    onClick={() => setModel(m)}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {prettyModel(m)}
+                    </span>
+                    {model === m && <Check size={15} />}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+
           <button type="button" className="primary-btn" disabled={saving} onClick={() => void save()}>
-            {saving ? "保存中…" : "保存"}
+            {saving ? "保存中…" : "应用模型设置"}
           </button>
         </div>
       </div>

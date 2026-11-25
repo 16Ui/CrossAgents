@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ArrowUpLeft, ChevronRight, Folder, X } from "lucide-react";
+import { effortLabel, OsIcon, prettyModel, VendorMark, vendorName } from "../brands";
 import { availableEfforts, extractErrorMessage, nodeDisplayName } from "../store";
 import type { HubTransport } from "../transport";
 import type { Agent, HubInfo, NodeDirsResponse, PluginInfo, RemoteNodeInfo } from "../types";
@@ -54,8 +55,8 @@ export function NewChatModal({
         setPlugins(list);
         const first = list[0];
         setPluginName(first?.name ?? "");
-        const models = first ? (first.models.length ? first.models : first.all_models) : [];
-        setModel(models[0] ?? "");
+        const mList = first ? (first.models.length ? first.models : first.all_models) : [];
+        setModel(mList[0] ?? "");
         setEffort("");
       })
       .catch((err) => {
@@ -136,16 +137,12 @@ export function NewChatModal({
         <div className="sheet-head">
           <strong>{browsingDirs ? `浏览目录 · ${nodeDisplayName(nodeId, nodes, hubInfo, fallbackHost)}` : "新建对话"}</strong>
           <button type="button" className="icon-btn" onClick={() => (browsingDirs ? setBrowsingDirs(false) : onClose())}>
-            <X size={18} />
+            <X size={17} />
           </button>
         </div>
 
         <div className="sheet-body">
-          {error && (
-            <div className="chip danger" style={{ borderRadius: 10, padding: "8px 10px", marginBottom: 12, display: "block" }}>
-              {error}
-            </div>
-          )}
+          {error && <div className="error-box" style={{ marginBottom: 12 }}>{error}</div>}
 
           {browsingDirs ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -165,20 +162,20 @@ export function NewChatModal({
               <div className="agent-list">
                 {dirData?.parent && (
                   <button type="button" className="agent-row" onClick={() => void loadDir(dirData.parent!)}>
-                    <ArrowUpLeft size={16} />
+                    <ArrowUpLeft size={15} />
                     <span>返回上级目录</span>
                   </button>
                 )}
                 {dirLoading && !dirData ? (
-                  <div style={{ padding: 16, fontSize: 13, color: "var(--text-2)" }}>读取目录中…</div>
+                  <div style={{ padding: 14, fontSize: 13, color: "var(--muted)" }}>读取目录中…</div>
                 ) : dirData && dirData.dirs.length === 0 ? (
-                  <div style={{ padding: 16, fontSize: 13, color: "var(--text-2)" }}>该目录下没有子文件夹</div>
+                  <div style={{ padding: 14, fontSize: 13, color: "var(--muted)" }}>该目录下没有子文件夹</div>
                 ) : (
                   dirData?.dirs.map((d) => (
                     <button key={d.path} type="button" className="agent-row" onClick={() => void loadDir(d.path)}>
-                      <Folder size={16} style={{ color: "var(--accent)", flex: "none" }} />
+                      <Folder size={15} style={{ color: "var(--accent)", flex: "none" }} />
                       <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>{d.name}</span>
-                      <ChevronRight size={15} style={{ color: "var(--text-3)" }} />
+                      <ChevronRight size={14} style={{ color: "var(--muted)" }} />
                     </button>
                   ))
                 )}
@@ -194,7 +191,7 @@ export function NewChatModal({
                     setBrowsingDirs(false);
                   }}
                 >
-                  用默认对话目录
+                  用默认目录
                 </button>
                 <button
                   type="button"
@@ -210,107 +207,128 @@ export function NewChatModal({
               </div>
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
+              {/* Target Machine */}
               <div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>目标机器</div>
-                <select
-                  className="field-select"
-                  value={nodeId}
-                  onChange={(e) => {
-                    setNodeId(e.target.value);
-                    setCwd("");
-                  }}
-                >
-                  {onlineNodes.length === 0 ? (
-                    <option value="local">{nodeDisplayName("local", nodes, hubInfo, fallbackHost)}</option>
-                  ) : (
-                    onlineNodes.map((n) => (
-                      <option key={n.id} value={n.id}>
-                        {nodeDisplayName(n.id, nodes, hubInfo, fallbackHost)}
-                      </option>
-                    ))
-                  )}
-                </select>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>目标机器</div>
+                <div className="choice-grid">
+                  {(onlineNodes.length === 0
+                    ? [{ id: "local", os: hubInfo?.machine?.os ?? "windows" }]
+                    : onlineNodes
+                  ).map((n) => (
+                    <button
+                      key={n.id}
+                      type="button"
+                      className={`choice-pill ${nodeId === n.id ? "active" : ""}`}
+                      onClick={() => {
+                        setNodeId(n.id);
+                        setCwd("");
+                      }}
+                    >
+                      <OsIcon os={n.os} size={13} />
+                      <span>{nodeDisplayName(n.id, nodes, hubInfo, fallbackHost)}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
+              {/* Working Directory */}
               <div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>工作目录</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>工作目录</div>
                 <button
                   type="button"
                   className="field-input"
-                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left" }}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left", gap: 8 }}
                   onClick={() => {
                     setBrowsingDirs(true);
                     void loadDir(cwd);
                   }}
                 >
-                  <span className="mono" style={{ fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {cwd || "默认对话目录（点击浏览远程文件夹）"}
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                    <Folder size={14} style={{ color: "var(--muted)", flex: "none" }} />
+                    <span className="mono" style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {cwd || "默认对话目录（点击浏览）"}
+                    </span>
                   </span>
-                  <ChevronRight size={16} style={{ color: "var(--text-3)", flex: "none" }} />
+                  <ChevronRight size={15} style={{ color: "var(--muted)", flex: "none" }} />
                 </button>
               </div>
 
+              {/* CLI / Vendor */}
               <div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>CLI / 引擎</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>CLI / 引擎</div>
                 {loadingPlugins ? (
-                  <div style={{ fontSize: 13, color: "var(--text-2)" }}>正在读取目标机器的可用 CLI…</div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>读取可用 CLI 中…</div>
                 ) : (
-                  <select
-                    className="field-select"
-                    value={pluginName}
-                    onChange={(e) => {
-                      const next = e.target.value;
-                      setPluginName(next);
-                      const p = plugins.find((x) => x.name === next);
-                      const mList = p ? (p.models.length ? p.models : p.all_models) : [];
-                      setModel(mList[0] ?? "");
-                      setEffort("");
-                    }}
-                  >
+                  <div className="choice-grid">
                     {plugins.map((p) => (
-                      <option key={p.name} value={p.name}>
-                        {p.name}
-                      </option>
+                      <button
+                        key={p.name}
+                        type="button"
+                        className={`choice-pill ${pluginName === p.name ? "active" : ""}`}
+                        onClick={() => {
+                          setPluginName(p.name);
+                          const mList = p.models.length ? p.models : p.all_models;
+                          setModel(mList[0] ?? "");
+                          setEffort("");
+                        }}
+                      >
+                        <VendorMark plugin={p.name} size={14} />
+                        <span>{vendorName(p.name)}</span>
+                      </button>
                     ))}
-                  </select>
+                  </div>
                 )}
               </div>
 
+              {/* Model */}
               {models.length > 0 && (
                 <div>
-                  <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>模型</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>模型</div>
                   <select className="field-select" value={model} onChange={(e) => setModel(e.target.value)}>
                     <option value="">默认模型</option>
                     {models.map((m) => (
                       <option key={m} value={m}>
-                        {m}
+                        {prettyModel(m)}
                       </option>
                     ))}
                   </select>
                 </div>
               )}
 
+              {/* Reasoning Effort */}
               {efforts.length > 0 && (
                 <div>
-                  <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>推理力度</div>
-                  <select className="field-select" value={effort} onChange={(e) => setEffort(e.target.value)}>
-                    <option value="">默认</option>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>推理力度</div>
+                  <div className="choice-grid">
+                    <button
+                      type="button"
+                      className={`choice-pill ${effort === "" ? "active" : ""}`}
+                      onClick={() => setEffort("")}
+                    >
+                      默认
+                    </button>
                     {efforts.map((ef) => (
-                      <option key={ef} value={ef}>
-                        {ef}
-                      </option>
+                      <button
+                        key={ef}
+                        type="button"
+                        className={`choice-pill ${effort === ef ? "active" : ""}`}
+                        onClick={() => setEffort(ef)}
+                      >
+                        {effortLabel(ef)}
+                      </button>
                     ))}
-                  </select>
+                  </div>
                 </div>
               )}
 
+              {/* First Message */}
               <div>
-                <div style={{ fontSize: 12, color: "var(--text-2)", marginBottom: 5 }}>开场消息（可选）</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>开场消息（可选）</div>
                 <textarea
                   className="field-textarea"
                   rows={3}
-                  placeholder="可直接输入第一条指令，创建后自动发送…"
+                  placeholder="输入第一条指令，创建后自动发送…"
                   value={firstMessage}
                   onChange={(e) => setFirstMessage(e.target.value)}
                 />

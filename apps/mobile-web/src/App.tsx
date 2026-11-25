@@ -64,7 +64,6 @@ export function App() {
   const pairingRef = useRef<PairingRecord | null>(pairing);
   pairingRef.current = pairing;
 
-  // Register Service Worker & handle lock-screen notification deep links.
   useEffect(() => {
     void registerServiceWorker();
     const parseHash = () => {
@@ -371,7 +370,6 @@ export function App() {
     };
   }, [pairing]);
 
-  // Recover automatically when returning from iOS background / lock screen.
   useEffect(() => {
     const onWake = () => {
       if (document.visibilityState === "hidden") return;
@@ -421,6 +419,8 @@ export function App() {
         transcript={transcripts[openAgentId]}
         nodes={nodes}
         hubInfo={hubInfo}
+        profile={profile}
+        avatarUrls={avatarUrls}
         fallbackHost={pairing.host}
         pendingQuestions={openQuestions.filter((q) => q.from === openAgentId)}
         transport={transport}
@@ -495,6 +495,7 @@ export function App() {
           agents={agents}
           nodes={nodes}
           hubInfo={hubInfo}
+          avatarUrls={avatarUrls}
           fallbackHost={pairing.host}
           highlightId={highlightQuestionId}
           transport={transport}
@@ -508,14 +509,14 @@ export function App() {
 
       {tab === "status" && (
         <StatusView
-          pairing={pairing}
+          pairing={pairingRef.current ?? pairing}
           connection={connection}
           hubInfo={hubInfo}
           nodes={nodes}
           quota={quota}
           transport={transport}
-          onReconnect={() => void connect(pairing)}
-          onRefresh={() => (transport ? void bootstrap(transport) : void connect(pairing))}
+          onReconnect={() => void connect(pairingRef.current ?? pairing)}
+          onRefresh={() => (transport ? void bootstrap(transport) : void connect(pairingRef.current ?? pairing))}
           onForget={() => {
             clearPairing();
             setPairing(null);
@@ -531,20 +532,20 @@ export function App() {
       <nav className="tab-bar" aria-label="主导航">
         <button type="button" className={`tab-btn ${tab === "chats" ? "active" : ""}`} onClick={() => setTab("chats")}>
           <span className="tab-icon-wrap">
-            <MessageSquare size={22} />
+            <MessageSquare size={21} strokeWidth={tab === "chats" ? 2.1 : 1.7} />
           </span>
           <span>对话</span>
         </button>
         <button type="button" className={`tab-btn ${tab === "inbox" ? "active" : ""}`} onClick={() => setTab("inbox")}>
           <span className="tab-icon-wrap">
-            <Bell size={22} />
+            <Bell size={21} strokeWidth={tab === "inbox" ? 2.1 : 1.7} />
             {openQuestions.length > 0 && <span className="badge-pill">{openQuestions.length}</span>}
           </span>
           <span>待办</span>
         </button>
         <button type="button" className={`tab-btn ${tab === "status" ? "active" : ""}`} onClick={() => setTab("status")}>
           <span className="tab-icon-wrap">
-            <Gauge size={22} />
+            <Gauge size={21} strokeWidth={tab === "status" ? 2.1 : 1.7} />
           </span>
           <span>概览</span>
         </button>

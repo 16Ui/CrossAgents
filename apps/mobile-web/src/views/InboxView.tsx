@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CheckCircle2, RefreshCw } from "lucide-react";
+import { AgentAvatar, OsIcon } from "../brands";
 import { MarkdownView } from "../components/MarkdownView";
 import { extractErrorMessage, nodeDisplayName, relativeTime } from "../store";
 import type { HubTransport } from "../transport";
@@ -17,6 +18,7 @@ export function InboxView({
   agents,
   nodes,
   hubInfo,
+  avatarUrls,
   fallbackHost,
   highlightId,
   transport,
@@ -28,6 +30,7 @@ export function InboxView({
   agents: Agent[];
   nodes: RemoteNodeInfo[];
   hubInfo?: HubInfo;
+  avatarUrls: Record<string, string>;
   fallbackHost?: string;
   highlightId?: string;
   transport: HubTransport | null;
@@ -45,14 +48,17 @@ export function InboxView({
       <div className="nav-bar">
         <div className="nav-title-wrap">
           <h1 className="nav-title">待办</h1>
+          <div className="nav-subtitle">
+            {openItems.length > 0 ? `${openItems.length} 项等待你的决定` : "所有审批与提问已清零"}
+          </div>
         </div>
         <button type="button" className="icon-btn" onClick={onRefresh} title="刷新">
-          <RefreshCw size={17} />
+          <RefreshCw size={16} />
         </button>
       </div>
 
       <div className="page-scroll">
-        <div className="segmented">
+        <div className="segmented" style={{ marginBottom: 12 }}>
           <button type="button" className={tab === "open" ? "active" : ""} onClick={() => setTab("open")}>
             待处理 ({openItems.length})
           </button>
@@ -63,7 +69,7 @@ export function InboxView({
 
         {visible.length === 0 ? (
           <div className="empty-state">
-            <CheckCircle2 size={36} style={{ color: "var(--ok)" }} />
+            <CheckCircle2 size={34} style={{ color: "var(--ok)", strokeWidth: 1.6 }} />
             <h3>{tab === "open" ? "暂无待处理审批或提问" : "暂无历史记录"}</h3>
             <p>
               {tab === "open"
@@ -72,21 +78,26 @@ export function InboxView({
             </p>
           </div>
         ) : (
-          visible.map((item) => (
-            <QuestionCard
-              key={item.id}
-              item={item}
-              agent={agents.find((a) => a.id === item.from)}
-              nodes={nodes}
-              hubInfo={hubInfo}
-              fallbackHost={fallbackHost}
-              highlighted={highlightId === item.id}
-              transport={transport}
-              isConnected={isConnected}
-              onRefresh={onRefresh}
-              onUpdated={onUpdatedQuestion}
-            />
-          ))
+          visible.map((item) => {
+            const agent = agents.find((a) => a.id === item.from);
+            const imgUrl = agent?.profile?.avatar_image ? avatarUrls[agent.profile.avatar_image] : undefined;
+            return (
+              <QuestionCard
+                key={item.id}
+                item={item}
+                agent={agent}
+                avatarUrl={imgUrl}
+                nodes={nodes}
+                hubInfo={hubInfo}
+                fallbackHost={fallbackHost}
+                highlighted={highlightId === item.id}
+                transport={transport}
+                isConnected={isConnected}
+                onRefresh={onRefresh}
+                onUpdated={onUpdatedQuestion}
+              />
+            );
+          })
         )}
       </div>
     </>
@@ -96,6 +107,7 @@ export function InboxView({
 function QuestionCard({
   item,
   agent,
+  avatarUrl,
   nodes,
   hubInfo,
   fallbackHost,
@@ -107,6 +119,7 @@ function QuestionCard({
 }: {
   item: HumanItem;
   agent?: Agent;
+  avatarUrl?: string;
   nodes: RemoteNodeInfo[];
   hubInfo?: HubInfo;
   fallbackHost?: string;
@@ -120,13 +133,18 @@ function QuestionCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const badge = actionBadge(item);
+  const nodeInfo = nodes.find((n) =>
+    !agent?.node || agent.node === "local"
+      ? n.local
+      : n.id === agent.node || n.name === agent.node || n.hostname === agent.node,
+  );
+  const nodeOs = nodeInfo?.os ?? hubInfo?.machine?.os ?? "windows";
 
   async function answer(text: string) {
     if (!transport || busy || !text.trim()) return;
     setBusy(true);
     setError(undefined);
     try {
-      // Re-verify live Hub state first so stale lock-screen notifications never approve twice.
       const res = await transport.request("POST", `/v1/questions/${encodeURIComponent(item.id)}/answer`, {
         answer: text.trim(),
       });
@@ -170,13 +188,18 @@ function QuestionCard({
         flexDirection: "column",
         gap: 10,
         borderColor: highlighted ? "var(--accent)" : undefined,
+        borderLeft: item.status === "open" && item.action === "approval" ? "3px solid var(--danger)" : undefined,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+        {agent && <AgentAvatar agent={agent} imageUrl={avatarUrl} size={32} />}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14.5, fontWeight: 700 }}>{agent?.name ?? item.from}</div>
-          <div style={{ fontSize: 11.5, color: "var(--text-2)" }}>
-            {nodeDisplayName(agent?.node, nodes, hubInfo, fallbackHost)} · {relativeTime(item.created_at)}
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{agent?.name ?? item.from}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: "var(--muted)" }}>
+            <OsIcon os={nodeOs} size={11} />
+            <span>{nodeDisplayName(agent?.node, nodes, hubInfo, fallbackHost)}</span>
+            <span>·</span>
+            <span>{relativeTime(item.created_at)}</span>
           </div>
         </div>
         <span className={`chip ${badge.cls}`}>{badge.label}</span>
@@ -185,9 +208,11 @@ function QuestionCard({
       <MarkdownView text={item.text} />
 
       {item.detail && (
-        <details className="fold-card">
+        <details className="thought">
           <summary>查看详细内容</summary>
-          <div className="fold-body">{item.detail}</div>
+          <div className="thought-body" style={{ fontStyle: "normal" }}>
+            {item.detail}
+          </div>
         </details>
       )}
 
@@ -201,11 +226,11 @@ function QuestionCard({
 
           {item.options.length > 0 && (
             <div className="pill-wrap">
-              {item.options.map((opt) => (
+              {item.options.map((opt, idx) => (
                 <button
                   key={opt}
                   type="button"
-                  className="option-pill"
+                  className={`option-pill ${idx === 0 ? "first" : ""}`}
                   disabled={busy || !isConnected}
                   onClick={() => void answer(opt)}
                 >
@@ -236,12 +261,10 @@ function QuestionCard({
           </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
-            <span style={{ color: "var(--text-3)" }}>
-              {item.default ? `超时默认：${item.default}` : ""}
-            </span>
+            <span className="muted">{item.default ? `超时默认：${item.default}` : ""}</span>
             <button
               type="button"
-              style={{ color: "var(--danger)", fontWeight: 600 }}
+              style={{ color: "var(--danger-text)", fontWeight: 500 }}
               disabled={busy || !isConnected}
               onClick={() => void dismiss()}
             >
@@ -250,17 +273,23 @@ function QuestionCard({
           </div>
         </>
       ) : (
-        <div className="chip" style={{ borderRadius: 8, padding: "7px 10px", justifyContent: "space-between" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: 12,
+            color: "var(--text-2)",
+            background: "var(--surface-sunk)",
+            borderRadius: 8,
+            padding: "7px 10px",
+          }}
+        >
           <span>{item.answer ? `已回复：${item.answer}` : item.status === "dismissed" ? "已忽略" : `状态：${item.status}`}</span>
-          <span>{relativeTime(item.answered_at)}</span>
+          <span className="muted">{relativeTime(item.answered_at)}</span>
         </div>
       )}
 
-      {error && (
-        <div className="chip danger" style={{ borderRadius: 8, padding: "7px 10px", whiteSpace: "normal" }}>
-          {error}
-        </div>
-      )}
+      {error && <div className="error-box">{error}</div>}
     </div>
   );
 }
