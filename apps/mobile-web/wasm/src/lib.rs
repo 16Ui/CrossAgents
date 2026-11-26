@@ -50,6 +50,9 @@ mod wasm_api {
     /// Receive buffer size for pipelined tunnel HTTP/SSE reads (64 KiB reduces read syscalls on
     /// larger `/v1/agents` and `/v1/agents/{id}/transcript` JSON payloads).
     const TUNNEL_READ_BUF: usize = 64 * 1024;
+    /// Per-request timeout over iroh QUIC streams so a rate-limited or half-open relay stream
+    /// fails cleanly instead of hanging session loading forever.
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 
     #[wasm_bindgen(start)]
     pub fn init_wasm() {
@@ -556,15 +559,27 @@ mod wasm_api {
                 body.as_deref(),
                 None,
             );
-            let (mut send, mut recv) = self.open_pipelined_tunnel(&req_bytes).await?;
+            let exec = async {
+                let (mut send, mut recv) = self.open_pipelined_tunnel(&req_bytes).await?;
 
-            // Keep `send` open until the hub finishes writing the HTTP response: finishing the
-            // QUIC send stream early causes the hub's `copy_bidirectional` to half-close its
-            // loopback TCP socket, which hyper/axum treats as a client disconnect.
-            let response = read_http1_response(&mut recv)
-                .await
-                .map_err(|e| js_err("transport", &e))?;
-            let _ = send.finish();
+                // Keep `send` open until the hub finishes writing the HTTP response: finishing the
+                // QUIC send stream early causes the hub's `copy_bidirectional` to half-close its
+                // loopback TCP socket, which hyper/axum treats as a client disconnect.
+                let response = read_http1_response(&mut recv)
+                    .await
+                    .map_err(|e| js_err("transport", &e))?;
+                let _ = send.finish();
+                Ok::<_, JsValue>(response)
+            };
+            let response = match time::timeout(REQUEST_TIMEOUT, exec).await {
+                Ok(res) => res?,
+                Err(_) => {
+                    return Err(js_err(
+                        "transport",
+                        &format!("中继请求超时（{}s，{method} {path}）", REQUEST_TIMEOUT.as_secs()),
+                    ));
+                }
+            };
             if response.status == 401 {
                 return Err(js_err(
                     "unauthorized",

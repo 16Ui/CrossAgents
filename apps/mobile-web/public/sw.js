@@ -3,7 +3,7 @@
 // 2. Receives free Web Push (VAPID) notifications from the CrossAgents Hub and shows a
 //    privacy-safe native iOS lock-screen alert.
 
-const SHELL_CACHE = "crossagents-mobile-shell-v12";
+const SHELL_CACHE = "crossagents-mobile-shell-v13";
 // Content-hashed immutable assets (/assets/*.js, *.css, *.png, *.wasm) live in dedicated caches so
 // UI/JS-only updates never evict cached WASM binaries or in-progress resumable chunks.
 const ASSET_CACHE = "crossagents-mobile-assets-v1";

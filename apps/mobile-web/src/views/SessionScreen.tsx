@@ -7,6 +7,7 @@ import {
   Copy,
   Hand,
   ImagePlus,
+  RefreshCw,
   Square,
   X,
 } from "lucide-react";
@@ -65,6 +66,7 @@ export function SessionScreen({
   fallbackHost,
   pendingQuestions,
   transport,
+  refreshKey = 0,
   onBack,
   onLoadedTranscript,
   onAnsweredQuestion,
@@ -79,6 +81,7 @@ export function SessionScreen({
   fallbackHost?: string;
   pendingQuestions: HumanItem[];
   transport: HubTransport | null;
+  refreshKey?: number;
   onBack: () => void;
   onLoadedTranscript: (t: Transcript) => void;
   onAnsweredQuestion: (item: HumanItem) => void;
@@ -95,6 +98,7 @@ export function SessionScreen({
   const [clientWindow, setClientWindow] = useState(INITIAL_TURN_LIMIT);
   const [zoomUrl, setZoomUrl] = useState<string>();
   const [modelModalOpen, setModelModalOpen] = useState(false);
+  const [manualReload, setManualReload] = useState(0);
 
   const pendingMsgIdRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -155,7 +159,7 @@ export function SessionScreen({
     return () => {
       cancelled = true;
     };
-  }, [agentId, transport]);
+  }, [agentId, transport, refreshKey, manualReload]);
 
   // Visible slice: on new Hub (`has_more !== undefined`) server already sliced to latest turns;
   // on legacy Hub (full transcript returned), still window DOM to latest `clientWindow` turns!
@@ -400,13 +404,30 @@ export function SessionScreen({
             )}
           </div>
         </div>
+        <button
+          type="button"
+          className="icon-btn"
+          title="重新同步对话"
+          aria-label="重新同步对话"
+          disabled={loading || !transport}
+          onClick={() => setManualReload((n) => n + 1)}
+        >
+          <RefreshCw size={16} style={loading ? { animation: "spin 1s linear infinite" } : undefined} />
+        </button>
       </div>
 
       {error && (
         <div className="status-banner danger" style={{ paddingTop: 7 }}>
           <span className="status-banner-msg">{error}</span>
-          <button type="button" className="status-banner-btn" onClick={() => setError(undefined)}>
-            关闭
+          <button
+            type="button"
+            className="status-banner-btn"
+            onClick={() => {
+              setError(undefined);
+              setManualReload((n) => n + 1);
+            }}
+          >
+            重试
           </button>
         </div>
       )}

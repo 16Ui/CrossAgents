@@ -64,6 +64,7 @@ export function App() {
   const [highlightQuestionId, setHighlightQuestionId] = useState<string>();
   const [newChatPreset, setNewChatPreset] = useState<{ node?: string; cwd?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
 
   const transportRef = useRef<HubTransport | null>(null);
   const [transport, setTransport] = useState<HubTransport | null>(null);
@@ -131,34 +132,55 @@ export function App() {
   }, []);
 
   const fetchAvatars = useCallback((t: HubTransport, list: Agent[], includeArchived = false) => {
-    const ids = new Set<string>();
+    const queue: string[] = [];
     for (const a of list) {
       if (!includeArchived && a.archived_at) continue;
       const imgId = a.profile?.avatar_image;
       if (imgId && !avatarUrlsRef.current[imgId] && !inFlightAvatarsRef.current.has(imgId)) {
-        ids.add(imgId);
+        inFlightAvatarsRef.current.add(imgId);
+        queue.push(imgId);
       }
     }
-    for (const id of ids) {
-      inFlightAvatarsRef.current.add(id);
-      void t
-        .request("GET", `/v1/avatars/${encodeURIComponent(id)}`)
-        .then((res) => {
-          if (res.status < 400) {
-            const parsed = JSON.parse(res.body) as { mime: string; data: string };
-            const dataUrl = `data:${parsed.mime};base64,${parsed.data}`;
-            setAvatarUrls((prev) => {
-              const next = { ...prev, [id]: dataUrl };
-              avatarUrlsRef.current = next;
-              saveAvatarCache(next);
-              return next;
-            });
+    if (queue.length === 0) return;
+
+    // Limit concurrent avatar fetches to 2 (and yield briefly on relay) so avatars never trigger
+    // n0 relay rate-limiting or starve `/v1/agents/{id}/transcript` session loading.
+    const startWorkers = () => {
+      const workers = Math.min(2, queue.length);
+      for (let w = 0; w < workers; w++) {
+        void (async () => {
+          while (queue.length > 0 && transportRef.current === t && !t.isClosed()) {
+            const id = queue.shift()!;
+            try {
+              const res = await t.request("GET", `/v1/avatars/${encodeURIComponent(id)}`);
+              if (res.status < 400) {
+                const parsed = JSON.parse(res.body) as { mime: string; data: string };
+                const dataUrl = `data:${parsed.mime};base64,${parsed.data}`;
+                setAvatarUrls((prev) => {
+                  const next = { ...prev, [id]: dataUrl };
+                  avatarUrlsRef.current = next;
+                  saveAvatarCache(next);
+                  return next;
+                });
+              }
+            } catch {
+              // ignore individual avatar errors
+            } finally {
+              inFlightAvatarsRef.current.delete(id);
+            }
           }
-        })
-        .catch(() => {})
-        .finally(() => {
-          inFlightAvatarsRef.current.delete(id);
-        });
+          // Release remaining queued ids if transport was replaced before finishing.
+          while (queue.length > 0) {
+            inFlightAvatarsRef.current.delete(queue.shift()!);
+          }
+        })();
+      }
+    };
+
+    if (t.linkStatus?.kind === "p2p" || t.mode === "direct") {
+      startWorkers();
+    } else {
+      window.setTimeout(startWorkers, 700);
     }
   }, []);
 
@@ -185,13 +207,21 @@ export function App() {
         })
         .catch(() => {});
 
+      // Fetch ONLY open questions on bootstrap (~12 bytes vs ~111 KB gzip for full history) so
+      // relay links stay fast and never trigger n0 relay rate-limiting; full history loads when
+      // opening the Inbox tab.
       const questionsP = t
-        .request("GET", "/v1/questions?all=true")
+        .request("GET", "/v1/questions")
         .then((res) => {
           if (res.status < 400) {
-            const nextQuestions = (JSON.parse(res.body) as { items: HumanItem[] }).items ?? [];
-            snapStateRef.current.questions = nextQuestions;
-            setQuestions(nextQuestions);
+            const openItems = (JSON.parse(res.body) as { items: HumanItem[] }).items ?? [];
+            setQuestions((prev) => {
+              const openIds = new Set(openItems.map((q) => q.id));
+              const keptHistory = prev.filter((q) => q.status !== "open" && !openIds.has(q.id));
+              const nextQuestions = [...openItems, ...keptHistory];
+              snapStateRef.current.questions = nextQuestions;
+              return nextQuestions;
+            });
           }
         })
         .catch(() => {});
@@ -484,7 +514,14 @@ export function App() {
             const te = err instanceof TransportError ? err : new TransportError("hub_offline", String(err));
             if (te.code === "unauthorized") {
               setConnection({ kind: "revoked", message: te.message });
+              return;
             }
+            setConnection({ kind: "hub_offline", message: "实时事件流连接失败，正在重连…" });
+            reconnectTimerRef.current = window.setTimeout(() => {
+              if (pairingRef.current && epoch === connectEpochRef.current) {
+                void connect(pairingRef.current);
+              }
+            }, 3000);
           });
 
         await Promise.all([bootstrap(t), ssePromise]);
@@ -558,6 +595,8 @@ export function App() {
       void bootstrap(cur).then((ok) => {
         if (!ok && pairingRef.current && transportRef.current === cur) {
           void connect(pairingRef.current);
+        } else if (ok) {
+          setSessionRefreshKey((k) => k + 1);
         }
       });
     };
@@ -575,6 +614,24 @@ export function App() {
       window.removeEventListener("online", onOnline);
     };
   }, [bootstrap, connect]);
+
+  // Lazily fetch answered/dismissed question history only when opening the Inbox tab.
+  useEffect(() => {
+    if (tab !== "inbox" || !transport || transport.isClosed()) return;
+    let cancelled = false;
+    void transport
+      .request("GET", "/v1/questions?all=true")
+      .then((res) => {
+        if (cancelled || res.status >= 400) return;
+        const nextQuestions = (JSON.parse(res.body) as { items: HumanItem[] }).items ?? [];
+        snapStateRef.current.questions = nextQuestions;
+        setQuestions(nextQuestions);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [tab, transport]);
 
   if (!pairing) {
     return (
@@ -604,6 +661,7 @@ export function App() {
         fallbackHost={pairing.host}
         pendingQuestions={openQuestions.filter((q) => q.from === openAgentId)}
         transport={transport}
+        refreshKey={sessionRefreshKey}
         onBack={() => setOpenAgentId(null)}
         onLoadedTranscript={(t) => {
           setTranscripts((prev) => ({ ...prev, [t.agent.id]: t }));

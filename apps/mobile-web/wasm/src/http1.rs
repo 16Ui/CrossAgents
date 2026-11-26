@@ -334,9 +334,17 @@ where
                 _ = &mut cancel_rx => return Ok(()),
                 res = read_chunk_size(&mut reader) => res.map_err(|message| SseError { status: 0, message })?,
             };
-            let Some(size) = next_size else { break };
+            let Some(size) = next_size else {
+                return Err(SseError {
+                    status: 0,
+                    message: "事件流已断开".into(),
+                });
+            };
             if size == 0 {
-                break;
+                return Err(SseError {
+                    status: 0,
+                    message: "事件流已结束".into(),
+                });
             }
             let mut remaining = size;
             let mut scratch = [0u8; 4096];
@@ -369,14 +377,15 @@ where
                 res = reader.read(&mut scratch) => res.map_err(|e| SseError { status: 0, message: format!("事件流读取失败：{e}") })?,
             };
             if read == 0 {
-                break;
+                return Err(SseError {
+                    status: 0,
+                    message: "事件流已断开".into(),
+                });
             }
             pending.extend_from_slice(&scratch[..read]);
             flush_lines(&mut pending, &mut on_data);
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -437,9 +446,10 @@ mod tests {
         );
         let (_tx, rx) = oneshot::channel();
         let mut got = Vec::new();
-        stream_http1_sse(sse.as_bytes(), rx, |line| got.push(line))
+        let eof_err = stream_http1_sse(sse.as_bytes(), rx, |line| got.push(line))
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(eof_err.status, 0);
         assert_eq!(
             got,
             vec![

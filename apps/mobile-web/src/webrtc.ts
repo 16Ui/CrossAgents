@@ -8,7 +8,7 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.hot-chilli.net:3478" },
 ];
 
-const ICE_GATHER_HARD_TIMEOUT_MS = 2600;
+const ICE_GATHER_HARD_TIMEOUT_MS = 3600;
 const ICE_GATHER_SETTLE_MS = 650;
 const CHANNEL_OPEN_TIMEOUT_MS = 7000;
 const REQUEST_TIMEOUT_MS = 35_000;
@@ -302,12 +302,15 @@ export class WebRtcTransport implements HubTransport {
           return;
         }
         let settled = false;
-        const remoteTag = answer.remote_candidates?.length
-          ? `（远端：${answer.remote_candidates.join(", ")}）`
-          : "";
-        const sameNatHint = answer.same_nat
-          ? "同局域网 P2P 被本机防火墙/路由器拦截，已保持中继（请在 Windows 防火墙放行 crossagents.exe 或切 5G 试连）"
-          : `P2P 打洞超时，已保持中继${remoteTag}`;
+        const remoteList = answer.remote_candidates ?? [];
+        const onlyUnresolvedMdns =
+          remoteList.length > 0 && remoteList.every((c) => c.startsWith("mdns/"));
+        const remoteTag = remoteList.length ? `（远端：${remoteList.join(", ")}）` : "";
+        const sameNatHint = onlyUnresolvedMdns
+          ? "手机未获取到公网/IPv6 UDP 候选（若开着手机代理/VPN 会拦截 P2P 打洞，关闭后可恢复直连），已保持中继"
+          : answer.same_nat
+            ? "同局域网 P2P 被本机防火墙/路由器拦截，已保持中继（请在 Windows 防火墙放行 crossagents.exe 或切 5G 试连）"
+            : `P2P 打洞超时，已保持中继${remoteTag}`;
         const timer = window.setTimeout(() => {
           fail(new TransportError("transport", sameNatHint));
         }, CHANNEL_OPEN_TIMEOUT_MS);
