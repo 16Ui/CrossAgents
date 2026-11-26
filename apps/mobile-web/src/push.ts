@@ -51,7 +51,7 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer | null): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export const PWA_BUILD_LABEL = "v11";
+export const PWA_BUILD_LABEL = "v12";
 
 let swReloadWired = false;
 

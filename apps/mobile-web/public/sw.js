@@ -3,10 +3,11 @@
 // 2. Receives free Web Push (VAPID) notifications from the CrossAgents Hub and shows a
 //    privacy-safe native iOS lock-screen alert.
 
-const SHELL_CACHE = "crossagents-mobile-shell-v11";
-// Content-hashed immutable assets (/assets/*.js, *.css, *.png, *.wasm) live in a dedicated cache so
-// UI/JS-only updates never evict cached WASM binaries and force a slow re-download.
+const SHELL_CACHE = "crossagents-mobile-shell-v12";
+// Content-hashed immutable assets (/assets/*.js, *.css, *.png, *.wasm) live in dedicated caches so
+// UI/JS-only updates never evict cached WASM binaries or in-progress resumable chunks.
 const ASSET_CACHE = "crossagents-mobile-assets-v1";
+const CHUNK_CACHE = "crossagents-mobile-chunks-v1";
 const SHELL_URLS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 async function fetchWithRetry(req, attempts = 2) {
@@ -49,7 +50,7 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((k) => k !== SHELL_CACHE && k !== ASSET_CACHE)
+            .filter((k) => k !== SHELL_CACHE && k !== ASSET_CACHE && k !== CHUNK_CACHE)
             .map((k) => caches.delete(k)),
         ),
       )
@@ -67,7 +68,7 @@ self.addEventListener("fetch", (event) => {
   // iOS Safari aborts long SW fetches (~30s on throttled networks) and has `res.clone()` stream
   // tee issues on multi-MB WASM binaries ("FetchEvent.respondWith received an error: Load failed").
   // `transport.ts` fetches, retries, reports progress, and caches `.wasm` directly in ASSET_CACHE.
-  if (url.pathname.endsWith(".wasm")) return;
+  if (url.pathname.endsWith(".wasm") || url.pathname.endsWith(".wasm.json")) return;
 
   // Navigation requests: bypass HTTP disk cache (GitHub Pages sends max-age=600) so new
   // deployments appear immediately on reopen, falling back to SW cache only when offline.

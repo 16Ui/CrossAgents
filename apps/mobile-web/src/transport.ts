@@ -194,6 +194,16 @@ export async function runRelayDiagnostics(preferredRelay?: string | null): Promi
 //   and persists the completed bytes in CacheStorage (`crossagents-mobile-assets-v1`).
 
 const WASM_CACHE_NAME = "crossagents-mobile-assets-v1";
+const WASM_CHUNK_CACHE_NAME = "crossagents-mobile-chunks-v1";
+const CHUNK_STALL_TIMEOUT_MS = 12_000;
+const SINGLE_STALL_TIMEOUT_MS = 18_000;
+
+interface WasmChunkManifest {
+  file: string;
+  totalBytes: number;
+  chunkBytes: number;
+  chunks: Array<{ file: string; bytes: number }>;
+}
 
 interface WasmLinkModule {
   default: (moduleOrPath?: unknown) => Promise<unknown>;
@@ -230,6 +240,241 @@ function notifyWasmStage(detail: string) {
   }
 }
 
+/** Reads a `fetch()` response body while aborting automatically if no bytes arrive for `stallMs`. */
+async function fetchBytesWithStallWatchdog(
+  url: string,
+  cacheMode: RequestCache,
+  stallMs: number,
+  onProgress?: (received: number, exactTotal: number) => void,
+): Promise<Uint8Array> {
+  const ctrl = new AbortController();
+  let timer = window.setTimeout(() => ctrl.abort(new Error("下载超时停滞")), stallMs);
+  const bump = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => ctrl.abort(new Error("下载中途卡顿超时")), stallMs);
+  };
+
+  try {
+    const res = await fetch(url, { cache: cacheMode, signal: ctrl.signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    }
+    bump();
+
+    if (res.body && typeof res.body.getReader === "function") {
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      const contentEncoding = res.headers.get("content-encoding");
+      const clHeader = Number(res.headers.get("content-length") || "0");
+      const exactTotal = !contentEncoding && clHeader > 0 ? clHeader : 0;
+      let lastUi = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          bump();
+          chunks.push(value);
+          received += value.byteLength;
+          if (onProgress) {
+            const now = performance.now();
+            if (now - lastUi >= 250) {
+              lastUi = now;
+              onProgress(received, exactTotal);
+            }
+          }
+        }
+      }
+      const out = new Uint8Array(received);
+      let offset = 0;
+      for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return out;
+    }
+
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return buf;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function fetchChunkManifest(absWasmUrl: string): Promise<WasmChunkManifest | null> {
+  const manifestUrl = `${absWasmUrl}.json`;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(manifestUrl, {
+        cache: attempt === 1 ? "default" : "no-store",
+        signal: ctrl.signal,
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const parsed = (await res.json()) as WasmChunkManifest;
+      if (parsed && Array.isArray(parsed.chunks) && parsed.chunks.length > 0 && parsed.totalBytes > 100_000) {
+        return parsed;
+      }
+      return null;
+    } catch {
+      if (attempt < 2) await new Promise((r) => window.setTimeout(r, 500));
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+/**
+ * Resumable chunked WASM download:
+ * - Each ~256 KiB raw (~110 KiB gzipped) chunk finishes in a few seconds even on throttled links.
+ * - Completed chunks are persisted immediately in `WASM_CHUNK_CACHE_NAME` so TCP drops or app
+ *   reopens resume from the exact completed percentage instead of restarting from 0%.
+ */
+async function fetchWasmChunked(
+  absWasmUrl: string,
+  manifest: WasmChunkManifest,
+): Promise<Uint8Array> {
+  const totalChunks = manifest.chunks.length;
+  const results: Array<Uint8Array | null> = new Array(totalChunks).fill(null);
+  const chunkUrls = manifest.chunks.map((c) => new URL(c.file, absWasmUrl).toString());
+
+  let chunkCache: Cache | null = null;
+  if ("caches" in window) {
+    try {
+      chunkCache = await caches.open(WASM_CHUNK_CACHE_NAME);
+      // Prune chunks belonging to superseded WASM builds so storage stays lean.
+      const validSet = new Set(chunkUrls);
+      const existingKeys = await chunkCache.keys();
+      await Promise.all(
+        existingKeys.filter((k) => !validSet.has(k.url)).map((k) => chunkCache!.delete(k)),
+      );
+    } catch {
+      chunkCache = null;
+    }
+  }
+
+  let completedCount = 0;
+  let completedBytes = 0;
+
+  // 1. Restore any already-downloaded chunks from CacheStorage (true resumable progress).
+  if (chunkCache) {
+    for (let i = 0; i < totalChunks; i++) {
+      try {
+        const hit = await chunkCache.match(chunkUrls[i]);
+        if (hit && hit.ok) {
+          const buf = new Uint8Array(await hit.arrayBuffer());
+          if (buf.byteLength === manifest.chunks[i].bytes) {
+            results[i] = buf;
+            completedCount++;
+            completedBytes += buf.byteLength;
+          }
+        }
+      } catch {
+        // ignore bad cache entry
+      }
+    }
+  }
+
+  const reportProgress = (note?: string) => {
+    const pct = Math.min(99, Math.round((completedBytes / manifest.totalBytes) * 100));
+    notifyWasmStage(
+      note
+        ? `正在下载加密内核 ${pct}%（${completedCount}/${totalChunks}，${note}）…`
+        : `正在下载加密内核 ${pct}%（${completedCount}/${totalChunks}）…`,
+    );
+  };
+
+  if (completedCount < totalChunks) {
+    reportProgress(completedCount > 0 ? "断点续传" : undefined);
+  }
+
+  // 2. Download missing chunks with 2 parallel workers, 5 retries per chunk, 12s stall timeout.
+  const queue: number[] = [];
+  for (let i = 0; i < totalChunks; i++) {
+    if (!results[i]) queue.push(i);
+  }
+
+  const maxChunkAttempts = 5;
+  let fatalErr: unknown = null;
+
+  async function worker() {
+    while (queue.length > 0 && !fatalErr) {
+      const idx = queue.shift()!;
+      const expectedBytes = manifest.chunks[idx].bytes;
+      const url = chunkUrls[idx];
+      let chunkDone = false;
+      let lastErr: unknown;
+
+      for (let attempt = 1; attempt <= maxChunkAttempts && !fatalErr; attempt++) {
+        try {
+          if (attempt > 1) {
+            reportProgress(`重试第 ${idx + 1} 块 ${attempt}/${maxChunkAttempts}`);
+          }
+          const bytes = await fetchBytesWithStallWatchdog(
+            url,
+            attempt === 1 ? "default" : "no-store",
+            CHUNK_STALL_TIMEOUT_MS,
+          );
+          if (bytes.byteLength !== expectedBytes) {
+            throw new Error(`分块 ${idx + 1} 大小不符 (${bytes.byteLength}/${expectedBytes})`);
+          }
+          results[idx] = bytes;
+          completedCount++;
+          completedBytes += bytes.byteLength;
+          reportProgress();
+
+          if (chunkCache) {
+            try {
+              await chunkCache.put(
+                url,
+                new Response(bytes.slice().buffer, {
+                  status: 200,
+                  headers: { "Content-Type": "application/wasm" },
+                }),
+              );
+            } catch {
+              // ignore storage errors
+            }
+          }
+          chunkDone = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < maxChunkAttempts) {
+            await new Promise((r) => window.setTimeout(r, 600 * attempt));
+          }
+        }
+      }
+
+      if (!chunkDone) {
+        fatalErr = lastErr ?? new Error(`分块 ${idx + 1} 下载失败`);
+      }
+    }
+  }
+
+  const workerCount = Math.min(2, queue.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  if (fatalErr) throw fatalErr;
+
+  const full = new Uint8Array(manifest.totalBytes);
+  let offset = 0;
+  for (let i = 0; i < totalChunks; i++) {
+    const part = results[i];
+    if (!part) throw new Error(`分块 ${i + 1} 缺失`);
+    full.set(part, offset);
+    offset += part.byteLength;
+  }
+
+  // Clean up temporary chunk cache once assembled successfully.
+  if ("caches" in window) {
+    void caches.delete(WASM_CHUNK_CACHE_NAME).catch(() => {});
+  }
+  return full;
+}
+
 async function fetchWasmBytesDirect(): Promise<Uint8Array> {
   const absUrl = new URL(wasmAssetUrl, window.location.href).toString();
 
@@ -249,95 +494,75 @@ async function fetchWasmBytesDirect(): Promise<Uint8Array> {
     }
   }
 
-  // 2. Download directly in page context with live progress & automatic retries.
-  let lastErr: unknown;
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      notifyWasmStage(
-        attempt === 1
-          ? "正在下载加密内核（首次更新后将本地缓存）…"
-          : `正在重试下载加密内核（第 ${attempt}/${maxAttempts} 次）…`,
-      );
-      const res = await fetch(absUrl, {
-        cache: attempt === 1 ? "default" : "no-store",
-      });
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText}`);
-      }
-
-      let bytes: Uint8Array;
-      if (res.body && typeof res.body.getReader === "function") {
-        const reader = res.body.getReader();
-        const chunks: Uint8Array[] = [];
-        let received = 0;
-        const contentEncoding = res.headers.get("content-encoding");
-        const clHeader = Number(res.headers.get("content-length") || "0");
-        const exactTotal = !contentEncoding && clHeader > 0 ? clHeader : 0;
-        let lastUi = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value && value.byteLength > 0) {
-            chunks.push(value);
-            received += value.byteLength;
-            const now = performance.now();
-            if (now - lastUi >= 250) {
-              lastUi = now;
-              if (exactTotal > 0 && received <= exactTotal) {
-                const pct = Math.min(99, Math.round((received / exactTotal) * 100));
-                notifyWasmStage(`正在下载加密内核 ${pct}%…`);
-              } else {
-                notifyWasmStage(`正在下载加密内核（已收 ${(received / 1024 / 1024).toFixed(1)} MB）…`);
-              }
+  // 2. Prefer resumable 256 KiB (~110 KiB gzip) chunks so unstable mobile/GitHub Pages links
+  //    never lose progress on mid-stream TCP drops.
+  notifyWasmStage("正在准备下载加密内核…");
+  let bytes: Uint8Array | null = null;
+  const manifest = await fetchChunkManifest(absUrl);
+  if (manifest) {
+    bytes = await fetchWasmChunked(absUrl, manifest);
+  } else {
+    // Fallback for local `vite dev` (no split-wasm manifest): direct download with stall watchdog.
+    let lastErr: unknown;
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        notifyWasmStage(
+          attempt === 1
+            ? "正在下载加密内核（首次更新后将本地缓存）…"
+            : `正在重试下载加密内核（第 ${attempt}/${maxAttempts} 次）…`,
+        );
+        const downloaded = await fetchBytesWithStallWatchdog(
+          absUrl,
+          attempt === 1 ? "default" : "no-store",
+          SINGLE_STALL_TIMEOUT_MS,
+          (received, exactTotal) => {
+            if (exactTotal > 0 && received <= exactTotal) {
+              const pct = Math.min(99, Math.round((received / exactTotal) * 100));
+              notifyWasmStage(`正在下载加密内核 ${pct}%…`);
+            } else {
+              notifyWasmStage(`正在下载加密内核（已收 ${(received / 1024 / 1024).toFixed(1)} MB）…`);
             }
-          }
+          },
+        );
+        if (downloaded.byteLength < 100_000) {
+          throw new Error(`加密内核文件不完整（仅 ${downloaded.byteLength} 字节）`);
         }
-        bytes = new Uint8Array(received);
-        let offset = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.byteLength;
+        bytes = downloaded;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          await new Promise((r) => window.setTimeout(r, 800 * attempt));
         }
-      } else {
-        bytes = new Uint8Array(await res.arrayBuffer());
-      }
-
-      if (bytes.byteLength < 100_000) {
-        throw new Error(`加密内核文件不完整（仅 ${bytes.byteLength} 字节）`);
-      }
-
-      // 3. Persist completed bytes in CacheStorage and prune superseded `.wasm` files.
-      if ("caches" in window) {
-        try {
-          const cache = await caches.open(WASM_CACHE_NAME);
-          const keys = await cache.keys();
-          await Promise.all(
-            keys
-              .filter((k) => k.url.endsWith(".wasm") && k.url !== absUrl)
-              .map((k) => cache.delete(k)),
-          );
-          await cache.put(
-            absUrl,
-            new Response(bytes.slice().buffer, {
-              status: 200,
-              headers: { "Content-Type": "application/wasm" },
-            }),
-          );
-        } catch {
-          // ignore storage quota errors; in-memory instantiation still works
-        }
-      }
-
-      return bytes;
-    } catch (err) {
-      lastErr = err;
-      if (attempt < maxAttempts) {
-        await new Promise((r) => window.setTimeout(r, 800 * attempt));
       }
     }
+    if (!bytes) throw lastErr;
   }
-  throw lastErr;
+
+  // 3. Persist completed assembled bytes in CacheStorage and prune superseded `.wasm` files.
+  if ("caches" in window) {
+    try {
+      const cache = await caches.open(WASM_CACHE_NAME);
+      const keys = await cache.keys();
+      await Promise.all(
+        keys
+          .filter((k) => k.url.endsWith(".wasm") && k.url !== absUrl)
+          .map((k) => cache.delete(k)),
+      );
+      await cache.put(
+        absUrl,
+        new Response(bytes.slice().buffer, {
+          status: 200,
+          headers: { "Content-Type": "application/wasm" },
+        }),
+      );
+    } catch {
+      // ignore storage quota errors; in-memory instantiation still works
+    }
+  }
+
+  return bytes;
 }
 
 async function loadWasm(onStage?: (detail: string) => void): Promise<WasmLinkModule> {
@@ -359,7 +584,7 @@ async function loadWasm(onStage?: (detail: string) => void): Promise<WasmLinkMod
         const msg = err instanceof Error ? err.message : String(err);
         throw new TransportError(
           "relay_unreachable",
-          `加密内核下载失败（GitHub Pages 网络中断或过慢，可稍等重试或临时开代理缓存一次）：${msg}`,
+          `加密内核下载中断（已保留已完成分块，点「重连」即可断点续传）：${msg}`,
         );
       });
     }

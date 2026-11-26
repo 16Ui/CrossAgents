@@ -296,6 +296,16 @@ a {
   white-space: nowrap;
 }
 
+.status-banner.warn .status-banner-msg,
+.status-banner.danger .status-banner-msg {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  line-height: 1.38;
+  word-break: break-word;
+}
+
 .status-banner-btn {
   padding: 3px 10px;
   border-radius: 999px;
