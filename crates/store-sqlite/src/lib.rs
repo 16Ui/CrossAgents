@@ -5,6 +5,7 @@ pub use sqlx;
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,7 +18,9 @@ use crossagents_core::{
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+};
 use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
@@ -53,6 +56,8 @@ impl SqliteStore {
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(15))
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -425,6 +430,20 @@ impl Store for SqliteStore {
         account: &str,
         model: &str,
     ) -> Result<(), CoreError> {
+        // Avoid acquiring SQLite's exclusive write lock on every model refresh when no row exists
+        // (the common case when accounts report dozens of healthy models).
+        let exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM unavailable_models WHERE plugin = ? AND account = ? AND model = ? LIMIT 1",
+        )
+        .bind(plugin)
+        .bind(account)
+        .bind(model)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        if exists.is_none() {
+            return Ok(());
+        }
         sqlx::query(
             "DELETE FROM unavailable_models WHERE plugin = ? AND account = ? AND model = ?",
         )

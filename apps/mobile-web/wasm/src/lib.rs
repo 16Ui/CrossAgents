@@ -31,6 +31,10 @@ mod wasm_api {
     /// relay WebSocket finishes BEFORE the QUIC handshake timer begins.
     const ONLINE_WAIT_PRIMARY: Duration = Duration::from_millis(5_500);
     const ONLINE_WAIT_FALLBACK: Duration = Duration::from_millis(4_500);
+    /// Happy-Eyeballs head start given to the last-known relay before racing the remaining public
+    /// n0 relays in parallel (prevents an 18s serial stall whenever the hub switches home relays
+    /// while the phone is locked).
+    const PRIMARY_HEAD_START: Duration = Duration::from_millis(3_000);
     /// Maximum time allowed for the QUIC handshake on a single relay (after `online()`).
     /// Bounds stale-relay detection so fallback across n0 relays completes promptly instead of
     /// waiting out QUIC's full 30s idle timeout.
@@ -233,53 +237,77 @@ mod wasm_api {
             });
         };
 
-        // Fast path: try the hub's advertised relay directly with a single WebSocket.
-        let first_err = match dial_one_relay(endpoint_id, first.clone(), ONLINE_WAIT_PRIMARY, None)
-            .await
-        {
-            Ok(connected) => return Ok(connected),
-            Err(err) => err,
-        };
+        // Happy Eyeballs across n0 relays: start the hub's last-known relay immediately, and if
+        // it hasn't connected within `PRIMARY_HEAD_START` (e.g. hub switched `usw1-1 <-> euc1-1`
+        // while the phone screen was locked), start racing the remaining relays in parallel while
+        // keeping the primary attempt alive. First relay to finish wins and cancels all losers.
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let mut race = FuturesUnordered::new();
+        race.push(dial_one_relay(
+            endpoint_id,
+            first.clone(),
+            ONLINE_WAIT_PRIMARY,
+            Some(cancel_rx.clone()),
+        ));
 
-        let mut failures = vec![first_err];
+        let mut launched_rest = custom_relay || rest.is_empty();
+        let mut failures = Vec::new();
 
-        // Fallback for public n0 relays: the hub may have switched its home relay (e.g. usw1-1 <->
-        // euc1-1 <-> aps1-1) after generating the pairing code or while idle. Race the remaining
-        // n0 relays in parallel (distinct hostnames, so Safari won't throttle per-host sockets),
-        // and cancel/close losers as soon as one succeeds.
-        if !custom_relay && !rest.is_empty() {
-            let (cancel_tx, cancel_rx) = watch::channel(false);
-            let mut race = FuturesUnordered::new();
-            for relay in rest {
-                let rx = cancel_rx.clone();
-                let relay = relay.clone();
-                race.push(async move {
-                    dial_one_relay(endpoint_id, relay, ONLINE_WAIT_FALLBACK, Some(rx)).await
-                });
-            }
+        while !race.is_empty() {
+            let next_res = if !launched_rest {
+                tokio::select! {
+                    biased;
+                    res = race.next() => Some(res),
+                    _ = time::sleep(PRIMARY_HEAD_START) => None,
+                }
+            } else {
+                Some(race.next().await)
+            };
 
-            while let Some(res) = race.next().await {
-                match res {
-                    Ok(connected) => {
-                        let _ = cancel_tx.send(true);
-                        // Drain & close losing relay endpoints asynchronously so the user isn't
-                        // delayed waiting for unreachable relays to finish shutting down.
-                        wasm_bindgen_futures::spawn_local(async move {
-                            while let Some(other) = race.next().await {
-                                if let Ok((ep, conn, _)) = other {
-                                    conn.close(0u32.into(), b"fallback-loser");
-                                    let _ = time::timeout(Duration::from_secs(3), ep.close()).await;
-                                }
-                            }
-                        });
-                        return Ok(connected);
+            match next_res {
+                None => {
+                    // Primary relay is taking longer than expected: fan out to backup relays now.
+                    launched_rest = true;
+                    for relay in rest {
+                        race.push(dial_one_relay(
+                            endpoint_id,
+                            relay.clone(),
+                            ONLINE_WAIT_FALLBACK,
+                            Some(cancel_rx.clone()),
+                        ));
                     }
-                    Err(err) => {
-                        if err.connect_error != "cancelled" {
-                            failures.push(err);
+                }
+                Some(Some(Ok(connected))) => {
+                    let _ = cancel_tx.send(true);
+                    // Drain & close losing relay endpoints asynchronously so the user isn't
+                    // delayed waiting for unreachable relays to finish shutting down.
+                    wasm_bindgen_futures::spawn_local(async move {
+                        while let Some(other) = race.next().await {
+                            if let Ok((ep, conn, _)) = other {
+                                conn.close(0u32.into(), b"fallback-loser");
+                                let _ = time::timeout(Duration::from_secs(3), ep.close()).await;
+                            }
+                        }
+                    });
+                    return Ok(connected);
+                }
+                Some(Some(Err(err))) => {
+                    if err.connect_error != "cancelled" {
+                        failures.push(err);
+                    }
+                    if !launched_rest {
+                        launched_rest = true;
+                        for relay in rest {
+                            race.push(dial_one_relay(
+                                endpoint_id,
+                                relay.clone(),
+                                ONLINE_WAIT_FALLBACK,
+                                Some(cancel_rx.clone()),
+                            ));
                         }
                     }
                 }
+                Some(None) => break,
             }
         }
 

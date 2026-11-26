@@ -513,29 +513,62 @@ export function App() {
   }, [pairing]);
 
   useEffect(() => {
-    const onWake = () => {
-      if (document.visibilityState === "hidden") return;
+    let hiddenAt = 0;
+    let wakeChecking = false;
+
+    const onWake = async (forceProbe: boolean) => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
       void registerServiceWorker();
       const rec = pairingRef.current;
-      if (!rec) return;
+      if (!rec || wakeChecking) return;
       const cur = transportRef.current;
       if (!cur || cur.isClosed()) {
         void connect(rec);
-      } else {
-        // Sync directly without a serial pre-flight `/v1/info` probe; reconnect only if stale.
-        if (cur.linkStatus && cur.linkStatus.kind !== "p2p") {
-          void cur.retryP2p?.();
-        }
-        void bootstrap(cur).then((ok) => {
-          if (!ok && pairingRef.current) void connect(pairingRef.current);
-        });
+        return;
       }
+      const sleptMs = hiddenAt > 0 ? Date.now() - hiddenAt : 0;
+      hiddenAt = 0;
+
+      // After >3s in background/lock-screen (or network change), probe the socket with tight
+      // timeouts first so a dead iOS-reclaimed socket triggers immediate reconnect instead of
+      // hanging `bootstrap()` for 35s.
+      if ((forceProbe || sleptMs >= 3000) && cur.wakeCheck) {
+        wakeChecking = true;
+        try {
+          const state = await cur.wakeCheck();
+          if (transportRef.current !== cur) return;
+          if (state === "dead") {
+            if (pairingRef.current) void connect(pairingRef.current);
+            return;
+          }
+        } finally {
+          wakeChecking = false;
+        }
+      } else if (cur.linkStatus && cur.linkStatus.kind !== "p2p") {
+        void cur.retryP2p?.();
+      }
+
+      void bootstrap(cur).then((ok) => {
+        if (!ok && pairingRef.current && transportRef.current === cur) {
+          void connect(pairingRef.current);
+        }
+      });
     };
-    document.addEventListener("visibilitychange", onWake);
-    window.addEventListener("online", onWake);
+
+    const onVis = () => {
+      void onWake(false);
+    };
+    const onOnline = () => {
+      void onWake(true);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("online", onOnline);
     return () => {
-      document.removeEventListener("visibilitychange", onWake);
-      window.removeEventListener("online", onWake);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("online", onOnline);
     };
   }, [bootstrap, connect]);
 

@@ -42,7 +42,10 @@ export interface HubTransport {
   readonly linkStatus?: LinkStatus;
   onLinkStatusChange?(cb: (status: LinkStatus) => void): () => void;
   retryP2p?(): Promise<void>;
-  pingP2p?(): Promise<number | null>;
+  pingP2p?(timeoutMs?: number): Promise<number | null>;
+  /** Fast post-background/screen-unlock liveness probe so dead iOS sockets fail in <1-3.5s
+   *  instead of stalling requests for 35s. */
+  wakeCheck?(): Promise<"alive" | "dead">;
   request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<HttpReply>;
   subscribeEvents(
     since: number | undefined,
@@ -577,11 +580,11 @@ export class HybridTransport implements HubTransport {
     await this.upgradeToP2p();
   }
 
-  async pingP2p(): Promise<number | null> {
+  async pingP2p(timeoutMs = 3000): Promise<number | null> {
     const rtc = this.webrtc;
     if (!rtc || rtc.isClosed()) return null;
     try {
-      const rttMs = await rtc.ping(3000);
+      const rttMs = await rtc.ping(timeoutMs);
       rtc.info = { ...rtc.info, rttMs };
       this.setLinkStatus({
         kind: "p2p",
@@ -590,8 +593,36 @@ export class HybridTransport implements HubTransport {
       });
       return rttMs;
     } catch {
-      this.handleP2pDropped("P2P 测速超时，已切回中继");
+      this.handleP2pDropped("P2P 心跳超时，已切回中继");
       return null;
+    }
+  }
+
+  async wakeCheck(): Promise<"alive" | "dead"> {
+    if (this.closed) return "dead";
+    // 1. If P2P looked open before iOS froze JS, probe it with an aggressive 900ms ping first so
+    //    we never stall `bootstrap()` for 35s on a zombie DataChannel.
+    if (this.webrtc && !this.webrtc.isClosed()) {
+      const rtt = await this.pingP2p(900);
+      if (rtt !== null) return "alive";
+    }
+    // 2. P2P was dead or inactive: check whether the underlying iroh QUIC/WS session survived.
+    if (this.primary.isClosed()) return "dead";
+    try {
+      const reply = await Promise.race([
+        this.primary.request("GET", "/v1/info"),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error("wake probe timeout")), 3500),
+        ),
+      ]);
+      if (reply.status < 500) {
+        // iroh survived! Re-establish P2P in background right away.
+        void this.retryP2p();
+        return "alive";
+      }
+      return "dead";
+    } catch {
+      return "dead";
     }
   }
 
