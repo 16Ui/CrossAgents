@@ -4,10 +4,14 @@ import { registerServiceWorker } from "./push";
 import {
   applyTranscriptEvent,
   clearPairing,
+  loadAvatarCache,
   loadPairing,
   loadSnapshot,
+  loadTranscriptCache,
+  saveAvatarCache,
   savePairing,
   saveSnapshot,
+  saveTranscriptCacheEntry,
 } from "./store";
 import { connectTransport, TransportError, type EventHandle, type HubTransport } from "./transport";
 import type {
@@ -46,13 +50,13 @@ export function App() {
   const [quota, setQuota] = useState<QuotaResponse | undefined>(initialSnap.current?.quota);
   const [profile, setProfile] = useState<UserProfile | undefined>(initialSnap.current?.profile);
 
-  const [transcripts, setTranscripts] = useState<Record<string, Transcript>>({});
-  const [avatarUrls, setAvatarUrls] = useState<Record<string, string>>({});
+  const [transcripts, setTranscripts] = useState<Record<string, Transcript>>(() => loadTranscriptCache());
+  const [avatarUrls, setAvatarUrls] = useState<Record<string, string>>(() => loadAvatarCache());
 
   const [tab, setTab] = useState<Tab>("chats");
   const [openAgentId, setOpenAgentId] = useState<string | null>(null);
   const [highlightQuestionId, setHighlightQuestionId] = useState<string>();
-  const [showingNewChat, setShowingNewChat] = useState(false);
+  const [newChatPreset, setNewChatPreset] = useState<{ node?: string; cwd?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const transportRef = useRef<HubTransport | null>(null);
@@ -63,6 +67,32 @@ export function App() {
   const connectEpochRef = useRef(0);
   const pairingRef = useRef<PairingRecord | null>(pairing);
   pairingRef.current = pairing;
+
+  const avatarUrlsRef = useRef<Record<string, string>>(avatarUrls);
+  avatarUrlsRef.current = avatarUrls;
+  const inFlightAvatarsRef = useRef<Set<string>>(new Set());
+
+  const snapStateRef = useRef<{
+    hubInfo?: HubInfo;
+    agents: Agent[];
+    questions: HumanItem[];
+    nodes: RemoteNodeInfo[];
+    quota?: QuotaResponse;
+    profile?: UserProfile;
+  }>({
+    hubInfo: initialSnap.current?.hubInfo,
+    agents: initialSnap.current?.agents ?? [],
+    questions: initialSnap.current?.questions ?? [],
+    nodes: initialSnap.current?.nodes ?? [],
+    quota: initialSnap.current?.quota,
+    profile: initialSnap.current?.profile,
+  });
+
+  const flushSnapshot = useCallback(() => {
+    const savedAt = new Date().toISOString();
+    setSnapshotSavedAt(savedAt);
+    saveSnapshot({ savedAt, ...snapStateRef.current });
+  }, []);
 
   useEffect(() => {
     void registerServiceWorker();
@@ -92,89 +122,129 @@ export function App() {
     };
   }, []);
 
-  const persistSnapshot = useCallback(
-    (next: {
-      hubInfo?: HubInfo;
-      agents: Agent[];
-      questions: HumanItem[];
-      nodes: RemoteNodeInfo[];
-      quota?: QuotaResponse;
-      profile?: UserProfile;
-    }) => {
-      const savedAt = new Date().toISOString();
-      setSnapshotSavedAt(savedAt);
-      saveSnapshot({ savedAt, ...next });
-    },
-    [],
-  );
-
-  const fetchAvatars = useCallback((t: HubTransport, list: Agent[]) => {
+  const fetchAvatars = useCallback((t: HubTransport, list: Agent[], includeArchived = false) => {
     const ids = new Set<string>();
     for (const a of list) {
-      if (a.profile?.avatar_image) ids.add(a.profile.avatar_image);
+      if (!includeArchived && a.archived_at) continue;
+      const imgId = a.profile?.avatar_image;
+      if (imgId && !avatarUrlsRef.current[imgId] && !inFlightAvatarsRef.current.has(imgId)) {
+        ids.add(imgId);
+      }
     }
     for (const id of ids) {
-      setAvatarUrls((prev) => {
-        if (prev[id]) return prev;
-        void t
-          .request("GET", `/v1/avatars/${encodeURIComponent(id)}`)
-          .then((res) => {
-            if (res.status < 400) {
-              const parsed = JSON.parse(res.body) as { mime: string; data: string };
-              setAvatarUrls((p) => ({ ...p, [id]: `data:${parsed.mime};base64,${parsed.data}` }));
-            }
-          })
-          .catch(() => {});
-        return prev;
-      });
+      inFlightAvatarsRef.current.add(id);
+      void t
+        .request("GET", `/v1/avatars/${encodeURIComponent(id)}`)
+        .then((res) => {
+          if (res.status < 400) {
+            const parsed = JSON.parse(res.body) as { mime: string; data: string };
+            const dataUrl = `data:${parsed.mime};base64,${parsed.data}`;
+            setAvatarUrls((prev) => {
+              const next = { ...prev, [id]: dataUrl };
+              avatarUrlsRef.current = next;
+              saveAvatarCache(next);
+              return next;
+            });
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlightAvatarsRef.current.delete(id);
+        });
     }
   }, []);
 
+  /**
+   * Progressive non-blocking sync: each endpoint updates UI the millisecond it resolves
+   * (instead of stalling the chat list behind slower upstream `/v1/quota` checks).
+   * Returns `false` if core requests fail so callers (e.g. `onWake`) know to reconnect.
+   */
   const bootstrap = useCallback(
-    async (t: HubTransport) => {
+    async (t: HubTransport): Promise<boolean> => {
       setRefreshing(true);
+      let coreOk = false;
+
+      const agentsP = t
+        .request("GET", "/v1/agents")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextAgents = (JSON.parse(res.body) as { agents: Agent[] }).agents ?? [];
+            coreOk = true;
+            snapStateRef.current.agents = nextAgents;
+            setAgents(nextAgents);
+            fetchAvatars(t, nextAgents, false);
+          }
+        })
+        .catch(() => {});
+
+      const questionsP = t
+        .request("GET", "/v1/questions?all=true")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextQuestions = (JSON.parse(res.body) as { items: HumanItem[] }).items ?? [];
+            snapStateRef.current.questions = nextQuestions;
+            setQuestions(nextQuestions);
+          }
+        })
+        .catch(() => {});
+
+      const infoP = t
+        .request("GET", "/v1/info")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextInfo = JSON.parse(res.body) as HubInfo;
+            coreOk = true;
+            snapStateRef.current.hubInfo = nextInfo;
+            setHubInfo(nextInfo);
+          }
+        })
+        .catch(() => {});
+
+      const nodesP = t
+        .request("GET", "/v1/nodes")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextNodes = (JSON.parse(res.body) as { nodes: RemoteNodeInfo[] }).nodes ?? [];
+            snapStateRef.current.nodes = nextNodes;
+            setNodes(nextNodes);
+          }
+        })
+        .catch(() => {});
+
+      const profileP = t
+        .request("GET", "/v1/profile")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextProfile = JSON.parse(res.body) as UserProfile;
+            snapStateRef.current.profile = nextProfile;
+            setProfile(nextProfile);
+          }
+        })
+        .catch(() => {});
+
+      // Quota probes upstream providers on Hub and can take seconds; run completely off the
+      // critical path so the conversation list refreshes immediately.
+      void t
+        .request("GET", "/v1/quota")
+        .then((res) => {
+          if (res.status < 400) {
+            const nextQuota = JSON.parse(res.body) as QuotaResponse;
+            snapStateRef.current.quota = nextQuota;
+            setQuota(nextQuota);
+            flushSnapshot();
+          }
+        })
+        .catch(() => {});
+
       try {
-        const [infoRes, agentsRes, questionsRes, nodesRes, quotaRes, profileRes] = await Promise.all([
-          t.request("GET", "/v1/info"),
-          t.request("GET", "/v1/agents"),
-          t.request("GET", "/v1/questions?all=true"),
-          t.request("GET", "/v1/nodes"),
-          t.request("GET", "/v1/quota"),
-          t.request("GET", "/v1/profile"),
-        ]);
-
-        const nextInfo = infoRes.status < 400 ? (JSON.parse(infoRes.body) as HubInfo) : hubInfo;
-        const nextAgents =
-          agentsRes.status < 400 ? ((JSON.parse(agentsRes.body) as { agents: Agent[] }).agents ?? []) : agents;
-        const nextQuestions =
-          questionsRes.status < 400
-            ? ((JSON.parse(questionsRes.body) as { items: HumanItem[] }).items ?? [])
-            : questions;
-        const nextNodes =
-          nodesRes.status < 400 ? ((JSON.parse(nodesRes.body) as { nodes: RemoteNodeInfo[] }).nodes ?? []) : nodes;
-        const nextQuota = quotaRes.status < 400 ? (JSON.parse(quotaRes.body) as QuotaResponse) : quota;
-        const nextProfile = profileRes.status < 400 ? (JSON.parse(profileRes.body) as UserProfile) : profile;
-
-        if (nextInfo) setHubInfo(nextInfo);
-        setAgents(nextAgents);
-        setQuestions(nextQuestions);
-        setNodes(nextNodes);
-        if (nextQuota) setQuota(nextQuota);
-        if (nextProfile) setProfile(nextProfile);
-        fetchAvatars(t, nextAgents);
-        persistSnapshot({
-          hubInfo: nextInfo,
-          agents: nextAgents,
-          questions: nextQuestions,
-          nodes: nextNodes,
-          quota: nextQuota,
-          profile: nextProfile,
-        });
+        await Promise.all([agentsP, questionsP, infoP, nodesP, profileP]);
+        if (coreOk) flushSnapshot();
+        return coreOk;
       } finally {
         setRefreshing(false);
       }
     },
-    [agents, fetchAvatars, hubInfo, nodes, persistSnapshot, profile, questions, quota],
+    [fetchAvatars, flushSnapshot],
   );
 
   const handleEvent = useCallback(
@@ -197,31 +267,40 @@ export function App() {
           if (!agent) break;
           setAgents((prev) => {
             const idx = prev.findIndex((a) => a.id === agent.id);
-            if (idx >= 0) {
-              const copy = [...prev];
-              copy[idx] = agent;
-              return copy;
-            }
-            return [agent, ...prev];
+            const next = idx >= 0 ? prev.map((a, i) => (i === idx ? agent : a)) : [agent, ...prev];
+            snapStateRef.current.agents = next;
+            return next;
           });
-          fetchAvatars(t, [agent]);
+          fetchAvatars(t, [agent], true);
           break;
         }
         case "agent.removed": {
           const id = data.id as string;
-          setAgents((prev) => prev.filter((a) => a.id !== id));
+          setAgents((prev) => {
+            const next = prev.filter((a) => a.id !== id);
+            snapStateRef.current.agents = next;
+            return next;
+          });
           break;
         }
         case "agent.status_changed": {
           const id = data.id as string;
           const to = data.to as Agent["status"];
-          setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, status: to } : a)));
+          setAgents((prev) => {
+            const next = prev.map((a) => (a.id === id ? { ...a, status: to } : a));
+            snapStateRef.current.agents = next;
+            return next;
+          });
           break;
         }
         case "agent.model_changed": {
           const id = data.id as string;
           const model = (data.model as string | null) ?? null;
-          setAgents((prev) => prev.map((a) => (a.id === id ? { ...a, model } : a)));
+          setAgents((prev) => {
+            const next = prev.map((a) => (a.id === id ? { ...a, model } : a));
+            snapStateRef.current.agents = next;
+            return next;
+          });
           break;
         }
         case "human.asked":
@@ -230,24 +309,45 @@ export function App() {
           if (!item) break;
           setQuestions((prev) => {
             const idx = prev.findIndex((q) => q.id === item.id);
-            if (idx >= 0) {
-              const copy = [...prev];
-              copy[idx] = item;
-              return copy;
-            }
-            return [item, ...prev];
+            const next = idx >= 0 ? prev.map((q, i) => (i === idx ? item : q)) : [item, ...prev];
+            snapStateRef.current.questions = next;
+            return next;
           });
           break;
         }
         case "human.dismissed": {
           const id = data.id as string;
-          setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, status: "dismissed" } : q)));
+          setQuestions((prev) => {
+            const next = prev.map((q) => (q.id === id ? { ...q, status: "dismissed" as const } : q));
+            snapStateRef.current.questions = next;
+            return next;
+          });
+          break;
+        }
+        case "profile.updated": {
+          void t
+            .request("GET", "/v1/profile")
+            .then((r) => {
+              if (r.status < 400) {
+                const nextProfile = JSON.parse(r.body) as UserProfile;
+                snapStateRef.current.profile = nextProfile;
+                setProfile(nextProfile);
+                flushSnapshot();
+              }
+            })
+            .catch(() => {});
           break;
         }
         case "node.changed": {
           void t
             .request("GET", "/v1/nodes")
-            .then((r) => r.status < 400 && setNodes((JSON.parse(r.body) as { nodes: RemoteNodeInfo[] }).nodes))
+            .then((r) => {
+              if (r.status < 400) {
+                const nextNodes = (JSON.parse(r.body) as { nodes: RemoteNodeInfo[] }).nodes;
+                snapStateRef.current.nodes = nextNodes;
+                setNodes(nextNodes);
+              }
+            })
             .catch(() => {});
           break;
         }
@@ -256,7 +356,13 @@ export function App() {
         case "account.removed": {
           void t
             .request("GET", "/v1/quota")
-            .then((r) => r.status < 400 && setQuota(JSON.parse(r.body) as QuotaResponse))
+            .then((r) => {
+              if (r.status < 400) {
+                const nextQuota = JSON.parse(r.body) as QuotaResponse;
+                snapStateRef.current.quota = nextQuota;
+                setQuota(nextQuota);
+              }
+            })
             .catch(() => {});
           break;
         }
@@ -276,12 +382,16 @@ export function App() {
           setTranscripts((prev) => {
             const cur = prev[targetId];
             if (!cur) return prev;
-            return { ...prev, [targetId]: applyTranscriptEvent(cur, ev) };
+            const updated = applyTranscriptEvent(cur, ev);
+            if (ev.type === "agent.turn_completed" || ev.type === "agent.input") {
+              saveTranscriptCacheEntry(updated);
+            }
+            return { ...prev, [targetId]: updated };
           });
         }
       }
     },
-    [fetchAvatars],
+    [fetchAvatars, flushSnapshot],
   );
 
   const teardown = useCallback(async () => {
@@ -322,26 +432,42 @@ export function App() {
           pairingRef.current = updated;
         }
 
-        await bootstrap(t);
-        if (epoch !== connectEpochRef.current) return;
-
-        sseRef.current = await t.subscribeEvents(
-          lastSeqRef.current,
-          (raw) => handleEvent(raw, t),
-          (err) => {
-            if (epoch !== connectEpochRef.current) return;
-            if (err.code === "unauthorized") {
-              setConnection({ kind: "revoked", message: err.message });
+        // Open SSE live event stream IN PARALLEL with progressive bootstrap so streaming replies
+        // and status updates flow immediately without waiting for the full snapshot round-trip.
+        const ssePromise = t
+          .subscribeEvents(
+            lastSeqRef.current,
+            (raw) => handleEvent(raw, t),
+            (err) => {
+              if (epoch !== connectEpochRef.current) return;
+              if (err.code === "unauthorized") {
+                setConnection({ kind: "revoked", message: err.message });
+                return;
+              }
+              setConnection({ kind: "hub_offline", message: "实时连接已断开，正在重连…" });
+              reconnectTimerRef.current = window.setTimeout(() => {
+                if (pairingRef.current && epoch === connectEpochRef.current) {
+                  void connect(pairingRef.current);
+                }
+              }, 3000);
+            },
+          )
+          .then((handle) => {
+            if (epoch !== connectEpochRef.current) {
+              handle.cancel();
               return;
             }
-            setConnection({ kind: "hub_offline", message: "实时连接已断开，正在重连…" });
-            reconnectTimerRef.current = window.setTimeout(() => {
-              if (pairingRef.current && epoch === connectEpochRef.current) {
-                void connect(pairingRef.current);
-              }
-            }, 3000);
-          },
-        );
+            sseRef.current = handle;
+          })
+          .catch((err) => {
+            if (epoch !== connectEpochRef.current) return;
+            const te = err instanceof TransportError ? err : new TransportError("hub_offline", String(err));
+            if (te.code === "unauthorized") {
+              setConnection({ kind: "revoked", message: te.message });
+            }
+          });
+
+        await Promise.all([bootstrap(t), ssePromise]);
       } catch (err) {
         if (epoch !== connectEpochRef.current) return;
         const te = err instanceof TransportError ? err : new TransportError("hub_offline", String(err));
@@ -379,13 +505,10 @@ export function App() {
       if (!cur || cur.isClosed()) {
         void connect(rec);
       } else {
-        void cur
-          .request("GET", "/v1/info")
-          .then((r) => {
-            if (r.status < 400) void bootstrap(cur);
-            else void connect(rec);
-          })
-          .catch(() => void connect(rec));
+        // Sync directly without a serial pre-flight `/v1/info` probe; reconnect only if stale.
+        void bootstrap(cur).then((ok) => {
+          if (!ok && pairingRef.current) void connect(pairingRef.current);
+        });
       }
     };
     document.addEventListener("visibilitychange", onWake);
@@ -427,6 +550,7 @@ export function App() {
         onBack={() => setOpenAgentId(null)}
         onLoadedTranscript={(t) => {
           setTranscripts((prev) => ({ ...prev, [t.agent.id]: t }));
+          saveTranscriptCacheEntry(t);
           if (t.last_seq > (lastSeqRef.current ?? 0)) lastSeqRef.current = t.last_seq;
         }}
         onAnsweredQuestion={(updated) => {
@@ -476,6 +600,7 @@ export function App() {
           agents={agents}
           nodes={nodes}
           hubInfo={hubInfo}
+          profile={profile}
           fallbackHost={pairing.host}
           openQuestions={openQuestions}
           avatarUrls={avatarUrls}
@@ -485,7 +610,11 @@ export function App() {
           onRefresh={() => (transport ? void bootstrap(transport) : void connect(pairing))}
           onOpenAgent={(id) => setOpenAgentId(id)}
           onOpenInbox={() => setTab("inbox")}
-          onOpenNewChat={() => setShowingNewChat(true)}
+          onOpenStatus={() => setTab("status")}
+          onOpenNewChat={(preset) => setNewChatPreset(preset ?? {})}
+          onEnsureArchivedAvatars={() => {
+            if (transport) fetchAvatars(transport, agents, true);
+          }}
         />
       )}
 
@@ -512,6 +641,7 @@ export function App() {
           pairing={pairingRef.current ?? pairing}
           connection={connection}
           hubInfo={hubInfo}
+          profile={profile}
           nodes={nodes}
           quota={quota}
           transport={transport}
@@ -524,6 +654,9 @@ export function App() {
             setQuestions([]);
             setNodes([]);
             setQuota(undefined);
+            setProfile(undefined);
+            setAvatarUrls({});
+            avatarUrlsRef.current = {};
             setTranscripts({});
           }}
         />
@@ -551,16 +684,18 @@ export function App() {
         </button>
       </nav>
 
-      {showingNewChat && transport && (
+      {newChatPreset && transport && (
         <NewChatModal
           transport={transport}
           nodes={nodes}
           hubInfo={hubInfo}
           fallbackHost={pairing.host}
-          onClose={() => setShowingNewChat(false)}
+          initialNode={newChatPreset.node}
+          initialCwd={newChatPreset.cwd}
+          onClose={() => setNewChatPreset(null)}
           onCreated={(created) => {
             setAgents((prev) => [created, ...prev.filter((a) => a.id !== created.id)]);
-            setShowingNewChat(false);
+            setNewChatPreset(null);
             setOpenAgentId(created.id);
           }}
         />

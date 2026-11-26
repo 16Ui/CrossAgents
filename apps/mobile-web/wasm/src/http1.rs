@@ -2,7 +2,7 @@
 //! Runs directly against the CrossAgents Hub's existing `Hello::Tunnel` byte pipe without requiring
 //! any local loopback TCP port in the browser sandbox.
 
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::oneshot;
 
 const MAX_HEADER_BYTES: usize = 64 * 1024;
@@ -210,9 +210,12 @@ async fn consume_crlf<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<(), Str
     Ok(())
 }
 
-/// Reads a complete HTTP/1.1 response (supports `Content-Length`, `chunked`, and EOF framing).
-pub async fn read_http1_response<R: AsyncRead + Unpin>(reader: R) -> Result<HttpResponse, String> {
-    let mut reader = BufReader::new(reader);
+/// Reads a complete HTTP/1.1 response (supports `Content-Length`, `chunked`, and EOF framing)
+/// directly from an existing buffered reader so pipelined bytes right after `Hello::Tunnel` reply
+/// are consumed without double-buffering or byte loss.
+pub async fn read_http1_response<R: AsyncBufRead + Unpin>(
+    mut reader: R,
+) -> Result<HttpResponse, String> {
     let headers = read_http_headers(&mut reader).await?;
 
     let bytes = if headers.status == 204 || headers.status == 304 {
@@ -243,17 +246,17 @@ pub async fn read_http1_response<R: AsyncRead + Unpin>(reader: R) -> Result<Http
 }
 
 /// Streams HTTP/1.1 SSE events (chunked or plain), invoking `on_data` for each `data:` line until
-/// cancelled or stream ends.
+/// cancelled or stream ends. Takes `AsyncBufRead` directly so pipelined bytes after `Hello::Tunnel`
+/// reply are preserved cleanly.
 pub async fn stream_http1_sse<R, F>(
-    reader: R,
+    mut reader: R,
     mut cancel_rx: oneshot::Receiver<()>,
     mut on_data: F,
 ) -> Result<(), SseError>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
     F: FnMut(String),
 {
-    let mut reader = BufReader::new(reader);
     let headers = read_http_headers(&mut reader).await.map_err(|message| SseError {
         status: 0,
         message,
@@ -427,5 +430,19 @@ mod tests {
         let err = stream_http1_sse(&unauth[..], rx2, |_| {}).await.unwrap_err();
         assert_eq!(err.status, 401);
         assert_eq!(err.message, "device revoked");
+    }
+
+    #[tokio::test]
+    async fn reads_pipelined_response_after_tunnel_reply_line() {
+        // Simulates a single QUIC packet delivering both the `{"ok":true}\n` tunnel reply and
+        // the immediately following HTTP/1.1 response into one shared `BufReader`.
+        let wire = b"{\"ok\":true}\nHTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n{\"agents\":[\"a\"]}";
+        let mut reader = tokio::io::BufReader::with_capacity(4096, &wire[..]);
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await.unwrap();
+        assert_eq!(line, b"{\"ok\":true}\n");
+        let res = read_http1_response(&mut reader).await.unwrap();
+        assert_eq!(res.status, 200);
+        assert_eq!(res.body, "{\"agents\":[\"a\"]}");
     }
 }

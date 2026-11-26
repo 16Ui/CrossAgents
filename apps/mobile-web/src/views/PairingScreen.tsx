@@ -94,7 +94,10 @@ export function PairingScreen({ onPaired }: { onPaired: (record: PairingRecord) 
 
   return (
     <div className="app-shell">
-      <div className="page-scroll" style={{ paddingTop: "calc(var(--safe-top) + 26px)" }}>
+      <div
+        className="page-scroll"
+        style={{ paddingTop: "calc(var(--safe-top) + 26px)", paddingBottom: "calc(22px + var(--safe-bottom))" }}
+      >
         <div
           style={{
             display: "flex",

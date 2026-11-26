@@ -186,10 +186,13 @@
 html,
 body,
 #root {
+  position: fixed;
+  inset: 0;
   margin: 0;
   padding: 0;
   width: 100%;
   height: 100%;
+  overflow: hidden;
   background: var(--page);
   color: var(--text);
   font-family: var(--font-sans);
@@ -237,13 +240,13 @@ a {
 .app-shell {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  height: var(--app-height, 100%);
   width: 100%;
   max-width: 680px;
   margin: 0 auto;
   background: var(--page);
   position: relative;
-  overflow-x: hidden;
+  overflow: hidden;
 }
 
 .app-shell.session-shell {
@@ -385,9 +388,108 @@ a {
 
 .page-scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: 12px 14px calc(18px + var(--safe-bottom));
+  padding: 12px 14px 18px;
+}
+
+/* Personal avatar button in Home header & Status profile banner */
+.nav-avatar-btn {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  transition: transform 0.1s;
+}
+
+.nav-avatar-btn:active {
+  transform: scale(0.94);
+}
+
+.nav-avatar-dot {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 2px solid var(--page);
+  background: var(--muted);
+}
+
+.nav-avatar-dot.ok {
+  background: var(--ok);
+}
+
+.nav-avatar-dot.warn {
+  background: var(--warn);
+}
+
+.profile-banner-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.profile-avatar-wrap {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+}
+
+.profile-status-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2.5px solid var(--surface);
+  background: var(--muted);
+}
+
+.profile-status-dot.ok {
+  background: var(--ok);
+}
+
+.profile-status-dot.accent {
+  background: var(--accent);
+}
+
+.profile-status-dot.warn {
+  background: var(--warn);
+}
+
+.profile-status-dot.danger {
+  background: var(--danger);
+}
+
+.profile-status-dot.pulse {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sync-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: spin 0.75s linear infinite;
 }
 
 /* ---- Bottom Tab Bar ------------------------------------------------------------------ */
@@ -884,6 +986,190 @@ a {
   background: var(--hover);
 }
 
+/* Desktop Sidebar-aligned Machine → Project Folder Tree */
+.tree-root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.machine-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.machine-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.machine-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: left;
+  padding: 2px 0;
+}
+
+.machine-toggle:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.machine-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.machine-count {
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-chev {
+  flex: none;
+  opacity: 0.7;
+}
+
+.tree-add-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+  flex: none;
+  transition: background 0.12s, color 0.12s;
+}
+
+.tree-add-btn:active {
+  background: var(--selected);
+  color: var(--text);
+}
+
+.machine-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.machine-empty-card {
+  background: var(--surface);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.project-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.project-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 9px 8px 11px;
+  background: color-mix(in srgb, var(--surface-sunk) 56%, var(--surface));
+  border-bottom: 1px solid var(--border);
+}
+
+.project-head.closed {
+  border-bottom: none;
+  background: var(--surface);
+}
+
+.project-toggle {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  padding: 2px 0;
+}
+
+.project-toggle:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.project-icon {
+  color: var(--text-2);
+  flex: none;
+}
+
+.project-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.project-count {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+
+.face-pile {
+  display: inline-flex;
+  align-items: center;
+}
+
+.face-pile .avatar {
+  margin-left: -5px;
+  border: 1.5px solid var(--surface);
+}
+
+.face-pile .avatar:first-child {
+  margin-left: 0;
+}
+
+.project-rows {
+  display: flex;
+  flex-direction: column;
+}
+
+.folder-more-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  text-align: center;
+  transition: background 0.12s, color 0.12s;
+}
+
+.folder-more-btn:active {
+  background: var(--hover);
+  color: var(--text);
+}
+
 .agent-list {
   display: flex;
   flex-direction: column;
@@ -1002,6 +1288,13 @@ a {
   gap: 4px;
   max-width: 86%;
   min-width: 0;
+}
+
+.person-turn-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-2);
+  padding-right: 2px;
 }
 
 .bubble {
@@ -1770,7 +2063,7 @@ a {
 .sheet-panel {
   width: 100%;
   max-width: 680px;
-  max-height: 88dvh;
+  max-height: 88%;
   background: var(--surface);
   border-top: 1px solid var(--border-strong);
   border-radius: 18px 18px 0 0;

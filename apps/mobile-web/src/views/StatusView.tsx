@@ -5,6 +5,7 @@ import {
   planLabel,
   quotaLevel,
   resetText,
+  UserAvatar,
   VendorMark,
   vendorName,
   windowLabel,
@@ -19,7 +20,15 @@ import {
 import { nodeDisplayName } from "../store";
 import { FONTS, MODES, PAPERS, setTheme, useTheme } from "../theme";
 import { runRelayDiagnostics, type HubTransport, type RelayDiagItem } from "../transport";
-import type { ConnectionState, HubInfo, PairingRecord, QuotaResponse, RateWindow, RemoteNodeInfo } from "../types";
+import type {
+  ConnectionState,
+  HubInfo,
+  PairingRecord,
+  QuotaResponse,
+  RateWindow,
+  RemoteNodeInfo,
+  UserProfile,
+} from "../types";
 
 function relayHostLabel(url?: string | null): string {
   if (!url) return "";
@@ -34,6 +43,7 @@ export function StatusView({
   pairing,
   connection,
   hubInfo,
+  profile,
   nodes,
   quota,
   transport,
@@ -44,6 +54,7 @@ export function StatusView({
   pairing: PairingRecord;
   connection: ConnectionState;
   hubInfo?: HubInfo;
+  profile?: UserProfile;
   nodes: RemoteNodeInfo[];
   quota?: QuotaResponse;
   transport: HubTransport | null;
@@ -127,6 +138,31 @@ export function StatusView({
       </div>
 
       <div className="page-scroll">
+        {/* Personal Profile Card (aligned 1:1 with Desktop Sidebar `.foot-user`) */}
+        <div className="card profile-banner-card">
+          <div className="profile-avatar-wrap">
+            <UserAvatar image={profile?.avatar} size={46} />
+            <span
+              className={`profile-status-dot ${connChip.cls} ${connection.kind === "connecting" ? "pulse" : ""}`}
+              aria-hidden="true"
+            />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 650, letterSpacing: "-0.015em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {profile?.name?.trim() || pairing.deviceName || "我"}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {hubInfo?.machine?.hostname || pairing.host}
+              {hubInfo?.version ? ` · v${hubInfo.version}` : ""}
+              {pairing.deviceName ? ` · ${pairing.deviceName}` : ""}
+            </div>
+          </div>
+          <span className={`chip ${connChip.cls}`}>
+            <span className={`dot ${connChip.cls}`} />
+            {connChip.label}
+          </span>
+        </div>
+
         {/* Lock-Screen Web Push */}
         <div className="section-label">锁屏审批推送</div>
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>

@@ -37,6 +37,11 @@ mod wasm_api {
     const QUIC_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(12);
     /// Browser-over-relay QUIC initial RTT (prevents premature PTO bursts across WAN relays).
     const BROWSER_INITIAL_RTT: Duration = Duration::from_millis(450);
+    /// Periodic QUIC ping keeps the relay WebSocket + QUIC path warm while the user reads messages.
+    const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(15);
+    /// Receive buffer size for pipelined tunnel HTTP/SSE reads (64 KiB reduces read syscalls on
+    /// larger `/v1/agents` and `/v1/agents/{id}/transcript` JSON payloads).
+    const TUNNEL_READ_BUF: usize = 64 * 1024;
 
     #[wasm_bindgen(start)]
     pub fn init_wasm() {
@@ -103,6 +108,7 @@ mod wasm_api {
     async fn bind_single_relay_endpoint(relay: RelayUrl) -> Result<Endpoint, String> {
         let transport = QuicTransportConfig::builder()
             .initial_rtt(BROWSER_INITIAL_RTT)
+            .keep_alive_interval(QUIC_KEEP_ALIVE)
             .build();
         // Use `presets::Minimal` instead of `presets::N0`:
         // 1. Skips `PkarrPublisher`/`PkarrResolver` calls to `https://dns.iroh.link/pkarr`,
@@ -452,21 +458,31 @@ mod wasm_api {
             self.active_relay.clone()
         }
 
-        async fn open_tunnel_stream(&self) -> Result<(SendStream, BufReader<RecvStream>), JsValue> {
+        /// Opens a multiplexed QUIC bi-stream and pipelines `Hello::Tunnel\n` + the HTTP/1.1
+        /// request in a SINGLE flight — cutting 1 full WAN relay RTT (400–800ms) off every call.
+        /// Hub `crates/link` wraps `recv` in `BufReader`, consumes only the JSON hello line, and
+        /// forwards the remaining buffered HTTP bytes immediately into the local hub TCP socket.
+        async fn open_pipelined_tunnel(
+            &self,
+            http_req: &[u8],
+        ) -> Result<(SendStream, BufReader<RecvStream>), JsValue> {
             let (mut send, recv) = self
                 .conn
                 .open_bi()
                 .await
                 .map_err(|e| js_err("disconnected", &format!("隧道连接已断开：{e}")))?;
-            write_json_line(
-                &mut send,
-                &Hello::Tunnel {
-                    token: self.token.clone(),
-                },
-            )
-            .await
-            .map_err(|e| js_err("disconnected", &e))?;
-            let mut recv = BufReader::new(recv);
+            let mut hello = serde_json::to_vec(&Hello::Tunnel {
+                token: self.token.clone(),
+            })
+            .map_err(|e| js_err("disconnected", &format!("序列化握手消息失败：{e}")))?;
+            hello.push(b'\n');
+            hello.extend_from_slice(http_req);
+            send.write_all(&hello)
+                .await
+                .map_err(|e| js_err("disconnected", &format!("发送隧道请求失败：{e}")))?;
+            let _ = send.flush().await;
+
+            let mut recv = BufReader::with_capacity(TUNNEL_READ_BUF, recv);
             let reply = read_reply_line(&mut recv)
                 .await
                 .map_err(|e| js_err("disconnected", &e))?;
@@ -480,7 +496,7 @@ mod wasm_api {
             Ok((send, recv))
         }
 
-        /// Executes one HTTP/1.1 REST API request through the encrypted iroh tunnel.
+        /// Executes one HTTP/1.1 REST API request through the encrypted iroh tunnel in 1 RTT.
         /// Resolves to JSON `{"status":200,"body":"..."}`.
         pub async fn request(
             &self,
@@ -488,7 +504,6 @@ mod wasm_api {
             path: &str,
             body: Option<String>,
         ) -> Result<String, JsValue> {
-            let (mut send, recv) = self.open_tunnel_stream().await?;
             let req_bytes = build_http1_request(
                 method,
                 path,
@@ -497,15 +512,12 @@ mod wasm_api {
                 body.as_deref(),
                 None,
             );
-            send.write_all(&req_bytes)
-                .await
-                .map_err(|e| js_err("disconnected", &format!("发送请求失败：{e}")))?;
-            let _ = send.flush().await;
+            let (mut send, mut recv) = self.open_pipelined_tunnel(&req_bytes).await?;
 
             // Keep `send` open until the hub finishes writing the HTTP response: finishing the
             // QUIC send stream early causes the hub's `copy_bidirectional` to half-close its
             // loopback TCP socket, which hyper/axum treats as a client disconnect.
-            let response = read_http1_response(recv)
+            let response = read_http1_response(&mut recv)
                 .await
                 .map_err(|e| js_err("transport", &e))?;
             let _ = send.finish();
@@ -522,14 +534,13 @@ mod wasm_api {
             .to_string())
         }
 
-        /// Opens a live SSE `/v1/events` stream over its own multiplexed QUIC stream.
+        /// Opens a live SSE `/v1/events` stream over its own multiplexed QUIC stream in 1 RTT.
         pub async fn subscribe_events(
             &self,
             since: Option<f64>,
             on_event: js_sys::Function,
             on_error: js_sys::Function,
         ) -> Result<WasmEventSubscription, JsValue> {
-            let (mut send, recv) = self.open_tunnel_stream().await?;
             let path = match since {
                 Some(seq) if seq > 0.0 => format!("/v1/events?since={}", seq as u64),
                 _ => "/v1/events?live=true".to_owned(),
@@ -542,10 +553,7 @@ mod wasm_api {
                 None,
                 Some("text/event-stream"),
             );
-            send.write_all(&req_bytes)
-                .await
-                .map_err(|e| js_err("disconnected", &format!("订阅事件流失败：{e}")))?;
-            let _ = send.flush().await;
+            let (send, recv) = self.open_pipelined_tunnel(&req_bytes).await?;
 
             let (cancel_tx, cancel_rx) = oneshot::channel();
             wasm_bindgen_futures::spawn_local(async move {

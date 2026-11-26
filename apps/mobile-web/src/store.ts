@@ -15,6 +15,14 @@ import type {
 
 const PAIRING_KEY = "crossagents.mobile.pairing.v1";
 const SNAPSHOT_KEY = "crossagents.mobile.snapshot.v1";
+const AVATARS_KEY = "crossagents.mobile.avatars.v1";
+const TRANSCRIPTS_KEY = "crossagents.mobile.transcripts.v1";
+const COLLAPSED_KEY = "crossagents.mobile.collapsed.v1";
+
+const MAX_CACHED_AVATARS = 24;
+const MAX_CACHED_TRANSCRIPTS = 6;
+const MAX_CACHED_TURNS = 35;
+const MAX_CACHED_TOOL_OUTPUT = 6000;
 
 export interface CachedSnapshot {
   savedAt: string;
@@ -24,6 +32,11 @@ export interface CachedSnapshot {
   nodes: RemoteNodeInfo[];
   quota?: QuotaResponse;
   profile?: UserProfile;
+}
+
+interface StoredTranscriptCache {
+  order: string[];
+  entries: Record<string, Transcript>;
 }
 
 export function loadPairing(): PairingRecord | null {
@@ -43,6 +56,9 @@ export function savePairing(record: PairingRecord): void {
 export function clearPairing(): void {
   localStorage.removeItem(PAIRING_KEY);
   localStorage.removeItem(SNAPSHOT_KEY);
+  localStorage.removeItem(AVATARS_KEY);
+  localStorage.removeItem(TRANSCRIPTS_KEY);
+  localStorage.removeItem(COLLAPSED_KEY);
 }
 
 export function loadSnapshot(): CachedSnapshot | null {
@@ -61,6 +77,156 @@ export function saveSnapshot(snap: CachedSnapshot): void {
   } catch {
     // quota exceeded - ignore
   }
+}
+
+export function loadAvatarCache(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(AVATARS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveAvatarCache(avatars: Record<string, string>): void {
+  const keys = Object.keys(avatars);
+  const trimmed: Record<string, string> = {};
+  for (const k of keys.slice(-MAX_CACHED_AVATARS)) {
+    trimmed[k] = avatars[k];
+  }
+  const list = Object.keys(trimmed);
+  while (list.length > 0) {
+    try {
+      localStorage.setItem(AVATARS_KEY, JSON.stringify(trimmed));
+      return;
+    } catch {
+      const drop = list.shift();
+      if (drop) delete trimmed[drop];
+    }
+  }
+}
+
+function compactTranscriptForCache(t: Transcript): Transcript {
+  const turns = t.turns.slice(-MAX_CACHED_TURNS).map((turn) => ({
+    ...turn,
+    items: turn.items.map((item) => {
+      if (item.type !== "tool_call") return item;
+      const out =
+        item.output && item.output.length > MAX_CACHED_TOOL_OUTPUT
+          ? `${item.output.slice(0, MAX_CACHED_TOOL_OUTPUT)}\n…`
+          : item.output;
+      const detail = item.detail
+        ? {
+            ...item.detail,
+            output:
+              item.detail.output && item.detail.output.length > MAX_CACHED_TOOL_OUTPUT
+                ? `${item.detail.output.slice(0, MAX_CACHED_TOOL_OUTPUT)}\n…`
+                : item.detail.output,
+            result:
+              item.detail.result && item.detail.result.length > MAX_CACHED_TOOL_OUTPUT
+                ? `${item.detail.result.slice(0, MAX_CACHED_TOOL_OUTPUT)}\n…`
+                : item.detail.result,
+          }
+        : undefined;
+      return { ...item, output: out, detail };
+    }),
+  }));
+  return { ...t, turns };
+}
+
+export function loadTranscriptCache(): Record<string, Transcript> {
+  try {
+    const raw = localStorage.getItem(TRANSCRIPTS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as StoredTranscriptCache;
+    return parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveTranscriptCacheEntry(transcript: Transcript): void {
+  try {
+    let store: StoredTranscriptCache = { order: [], entries: {} };
+    const raw = localStorage.getItem(TRANSCRIPTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as StoredTranscriptCache;
+      if (parsed?.entries && Array.isArray(parsed.order)) store = parsed;
+    }
+    const id = transcript.agent.id;
+    store.order = [id, ...store.order.filter((x) => x !== id)].slice(0, MAX_CACHED_TRANSCRIPTS);
+    const keep = new Set(store.order);
+    for (const k of Object.keys(store.entries)) {
+      if (!keep.has(k)) delete store.entries[k];
+    }
+    store.entries[id] = compactTranscriptForCache(transcript);
+
+    while (store.order.length > 0) {
+      try {
+        localStorage.setItem(TRANSCRIPTS_KEY, JSON.stringify(store));
+        return;
+      } catch {
+        const drop = store.order.pop();
+        if (drop) delete store.entries[drop];
+      }
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function loadCollapsed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(COLLAPSED_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.filter((x): x is string => typeof x === "string")) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveCollapsed(collapsed: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]));
+  } catch {
+    // ignore
+  }
+}
+
+/** Exact desktop workspace helpers (`apps/gui/src/lib/projectView.ts`). */
+export const CHATS_GROUP_KEY = "__chats";
+
+export function homeOf(agent: Agent): string {
+  return agent.home || agent.cwd || "";
+}
+
+export function wsKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+export function wsName(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
+}
+
+export function isStandaloneChat(agent: Agent): boolean {
+  const home = homeOf(agent);
+  if (!home) return true;
+  const parts = home.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  const [dotHome, chats, last] = parts.slice(-3);
+  return (
+    chats === "chats" &&
+    (dotHome === ".crossagents" ||
+      last === agent.id ||
+      (last ?? "").toLowerCase() === agent.name.toLowerCase())
+  );
+}
+
+export function agentMachineKey(agent: { node?: string | null }): string {
+  const n = (agent.node ?? "").trim();
+  return !n || n.toLowerCase() === "local" || n === "centre" ? "local" : n;
 }
 
 export function applyTranscriptEvent(current: Transcript, ev: HubEvent): Transcript {

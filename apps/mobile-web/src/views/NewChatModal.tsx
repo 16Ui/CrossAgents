@@ -10,6 +10,8 @@ export function NewChatModal({
   nodes,
   hubInfo,
   fallbackHost,
+  initialNode,
+  initialCwd,
   onClose,
   onCreated,
 }: {
@@ -17,14 +19,21 @@ export function NewChatModal({
   nodes: RemoteNodeInfo[];
   hubInfo?: HubInfo;
   fallbackHost?: string;
+  initialNode?: string;
+  initialCwd?: string;
   onClose: () => void;
   onCreated: (agent: Agent) => void;
 }) {
   const onlineNodes = nodes.filter((n) => n.online);
-  const defaultNode = onlineNodes.find((n) => n.local)?.id ?? onlineNodes[0]?.id ?? "local";
+  const localNodeId = onlineNodes.find((n) => n.local)?.id ?? onlineNodes[0]?.id ?? "local";
+  const resolvedInitialNode =
+    initialNode && initialNode !== "local"
+      ? onlineNodes.find((n) => n.id === initialNode || n.name === initialNode || n.hostname === initialNode)?.id ??
+        initialNode
+      : localNodeId;
 
-  const [nodeId, setNodeId] = useState(defaultNode);
-  const [cwd, setCwd] = useState("");
+  const [nodeId, setNodeId] = useState(resolvedInitialNode);
+  const [cwd, setCwd] = useState(initialCwd ?? "");
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
   const [pluginName, setPluginName] = useState("");
   const [model, setModel] = useState("");

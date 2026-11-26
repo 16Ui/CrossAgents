@@ -90,6 +90,7 @@ export function SessionScreen({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const initialScrollDoneRef = useRef(false);
 
   const activeAgent = transcript?.agent ?? agent;
   const agentImgUrl = activeAgent?.profile?.avatar_image ? avatarUrls[activeAgent.profile.avatar_image] : undefined;
@@ -172,7 +173,17 @@ export function SessionScreen({
     .find((it) => it.type === "tool_call" && it.status !== "completed" && it.status !== "failed");
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    initialScrollDoneRef.current = false;
+  }, [agentId]);
+
+  useEffect(() => {
+    if (turnsCount === 0) return;
+    if (!initialScrollDoneRef.current) {
+      initialScrollDoneRef.current = true;
+      bottomRef.current?.scrollIntoView({ behavior: "auto" });
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
   }, [turnsCount, lastItemLen]);
 
   async function onPickFiles(files: FileList | null) {
@@ -264,6 +275,12 @@ export function SessionScreen({
             {tone && tone.color !== "off" && (
               <span className={`chip tiny ${tone.color}`}>{tone.label}</span>
             )}
+            {loading && transcript && (
+              <span className="sync-pill" aria-label="同步中">
+                <span className="sync-spinner" />
+                同步中
+              </span>
+            )}
           </div>
           <div className="nav-subtitle">
             <OsIcon os={nodeOs} size={11} />
@@ -312,6 +329,9 @@ export function SessionScreen({
                 {(turn.input || (turn.attachments && turn.attachments.length > 0)) && (
                   <div className="person-turn">
                     <div className="person-turn-col">
+                      {profile?.name?.trim() && (
+                        <div className="person-turn-name">{profile.name.trim()}</div>
+                      )}
                       {turn.attachments && turn.attachments.length > 0 && (
                         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
                           {turn.attachments.map((att) =>
@@ -515,7 +535,7 @@ export function SessionScreen({
           style={{ justifyContent: "center", alignItems: "center", padding: 16 }}
           onClick={() => setZoomUrl(undefined)}
         >
-          <img src={zoomUrl} alt="预览" style={{ maxWidth: "100%", maxHeight: "90dvh", objectFit: "contain" }} />
+          <img src={zoomUrl} alt="预览" style={{ maxWidth: "100%", maxHeight: "90%", objectFit: "contain" }} />
         </div>
       )}
 
