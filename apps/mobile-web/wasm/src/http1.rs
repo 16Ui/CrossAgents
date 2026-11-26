@@ -2,6 +2,9 @@
 //! Runs directly against the CrossAgents Hub's existing `Hello::Tunnel` byte pipe without requiring
 //! any local loopback TCP port in the browser sandbox.
 
+use std::io::Read as _;
+
+use flate2::read::GzDecoder;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 use tokio::sync::oneshot;
 
@@ -58,6 +61,8 @@ pub fn build_http1_request(
         out.push_str(accept);
         out.push_str("\r\n");
         out.push_str("Cache-Control: no-cache\r\n");
+    } else {
+        out.push_str("Accept-Encoding: gzip\r\n");
     }
     out.push_str("Connection: close\r\n");
     if let Some(body) = body {
@@ -75,6 +80,7 @@ struct ParsedHeaders {
     status: u16,
     content_length: Option<usize>,
     chunked: bool,
+    gzip: bool,
 }
 
 async fn read_http_headers<R: AsyncBufRead + Unpin>(
@@ -88,6 +94,7 @@ async fn read_http_headers<R: AsyncBufRead + Unpin>(
     let status = parse_status_code(&status_line)?;
     let mut content_length = None;
     let mut chunked = false;
+    let mut gzip = false;
     let mut total_bytes = n;
 
     loop {
@@ -112,6 +119,10 @@ async fn read_http_headers<R: AsyncBufRead + Unpin>(
                 && val.to_ascii_lowercase().contains("chunked")
             {
                 chunked = true;
+            } else if name.eq_ignore_ascii_case("content-encoding")
+                && val.to_ascii_lowercase().contains("gzip")
+            {
+                gzip = true;
             }
         }
     }
@@ -120,6 +131,7 @@ async fn read_http_headers<R: AsyncBufRead + Unpin>(
         status,
         content_length,
         chunked,
+        gzip,
     })
 }
 
@@ -236,6 +248,17 @@ pub async fn read_http1_response<R: AsyncBufRead + Unpin>(
             .await
             .map_err(|e| format!("读取响应体失败：{e}"))?;
         buf
+    };
+
+    let bytes = if headers.gzip && !bytes.is_empty() {
+        let mut decoder = GzDecoder::new(&bytes[..]);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| format!("解压 gzip 响应体失败：{e}"))?;
+        out
+    } else {
+        bytes
     };
 
     let body = String::from_utf8(bytes).map_err(|e| format!("响应体不是有效 UTF-8：{e}"))?;
@@ -444,5 +467,27 @@ mod tests {
         let res = read_http1_response(&mut reader).await.unwrap();
         assert_eq!(res.status, 200);
         assert_eq!(res.body, "{\"agents\":[\"a\"]}");
+    }
+
+    #[tokio::test]
+    async fn decompresses_gzip_http1_responses() {
+        use flate2::{Compression, write::GzEncoder};
+        use std::io::Write as _;
+
+        let payload = "{\"turns\":[1,2,3],\"text\":\"hello gzip world\"}";
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(payload.as_bytes()).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let mut wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            gz.len()
+        )
+        .into_bytes();
+        wire.extend_from_slice(&gz);
+
+        let res = read_http1_response(&wire[..]).await.unwrap();
+        assert_eq!(res.status, 200);
+        assert_eq!(res.body, payload);
     }
 }

@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   ArrowUp,
   Check,
+  ChevronUp,
   Copy,
   Hand,
   ImagePlus,
@@ -37,10 +38,15 @@ import type {
   HumanItem,
   PluginInfo,
   RemoteNodeInfo,
+  ToolCallDetailResponse,
+  ToolDetail,
   Transcript,
   TranscriptItem,
   UserProfile,
 } from "../types";
+
+const INITIAL_TURN_LIMIT = 12;
+const OLDER_PAGE_SIZE = 15;
 
 interface PendingPhoto {
   id: string;
@@ -80,15 +86,20 @@ export function SessionScreen({
   const [draft, setDraft] = useState("");
   const [photos, setPhotos] = useState<PendingPhoto[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const [attachmentUrls, setAttachmentUrls] = useState<Record<string, string>>({});
+  const [toolDetails, setToolDetails] = useState<Record<string, { output?: string; detail?: ToolDetail }>>({});
+  const [loadingTools, setLoadingTools] = useState<Record<string, boolean>>({});
+  const [clientWindow, setClientWindow] = useState(INITIAL_TURN_LIMIT);
   const [zoomUrl, setZoomUrl] = useState<string>();
   const [modelModalOpen, setModelModalOpen] = useState(false);
 
   const pendingMsgIdRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const initialScrollDoneRef = useRef(false);
 
@@ -115,11 +126,20 @@ export function SessionScreen({
   }, [draft]);
 
   useEffect(() => {
+    setClientWindow(INITIAL_TURN_LIMIT);
+    setToolDetails({});
+    setLoadingTools({});
+  }, [agentId]);
+
+  useEffect(() => {
     if (!transport) return;
     let cancelled = false;
     setLoading(true);
     transport
-      .request("GET", `/v1/agents/${encodeURIComponent(agentId)}/transcript`)
+      .request(
+        "GET",
+        `/v1/agents/${encodeURIComponent(agentId)}/transcript?limit=${INITIAL_TURN_LIMIT}&slim=true`,
+      )
       .then((res) => {
         if (cancelled) return;
         if (res.status >= 400) throw new Error(extractErrorMessage(res.status, res.body));
@@ -137,11 +157,95 @@ export function SessionScreen({
     };
   }, [agentId, transport]);
 
-  // Lazily fetch image attachments referenced in turns
+  // Visible slice: on new Hub (`has_more !== undefined`) server already sliced to latest turns;
+  // on legacy Hub (full transcript returned), still window DOM to latest `clientWindow` turns!
+  const allTurns = transcript?.turns ?? [];
+  const serverPaginated = transcript?.has_more !== undefined;
+  const visibleTurns = serverPaginated
+    ? allTurns
+    : allTurns.length > clientWindow
+      ? allTurns.slice(-clientWindow)
+      : allTurns;
+  const hiddenClientCount = serverPaginated ? 0 : Math.max(0, allTurns.length - visibleTurns.length);
+  const remainingCount = serverPaginated
+    ? Math.max(0, (transcript?.total_turns ?? allTurns.length) - allTurns.length)
+    : hiddenClientCount;
+  const hasOlder = serverPaginated ? Boolean(transcript?.has_more) : hiddenClientCount > 0;
+
+  async function loadOlder() {
+    if (loadingOlder || !transcript) return;
+    const container = messagesRef.current;
+    const prevHeight = container?.scrollHeight ?? 0;
+    const prevTop = container?.scrollTop ?? 0;
+    const restoreScroll = () => {
+      requestAnimationFrame(() => {
+        if (!container) return;
+        container.scrollTop = container.scrollHeight - prevHeight + prevTop;
+      });
+    };
+
+    if (!serverPaginated) {
+      setClientWindow((n) => n + OLDER_PAGE_SIZE);
+      restoreScroll();
+      return;
+    }
+
+    const oldest = transcript.turns[0];
+    if (!oldest || !transport) return;
+    setLoadingOlder(true);
+    setError(undefined);
+    try {
+      const res = await transport.request(
+        "GET",
+        `/v1/agents/${encodeURIComponent(agentId)}/transcript?limit=${OLDER_PAGE_SIZE}&before=${encodeURIComponent(oldest.message_id)}&slim=true`,
+      );
+      if (res.status >= 400) throw new Error(extractErrorMessage(res.status, res.body));
+      const older = JSON.parse(res.body) as Transcript;
+      const seen = new Set(transcript.turns.map((t) => t.message_id));
+      const uniqueOlder = older.turns.filter((t) => !seen.has(t.message_id));
+      onLoadedTranscript({
+        ...transcript,
+        turns: [...uniqueOlder, ...transcript.turns],
+        has_more: older.has_more ?? false,
+        total_turns: older.total_turns ?? transcript.total_turns,
+      });
+      restoreScroll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
+  function expandToolDetail(toolCallId: string) {
+    if (!transport || !toolCallId || toolDetails[toolCallId] || loadingTools[toolCallId]) return;
+    setLoadingTools((prev) => ({ ...prev, [toolCallId]: true }));
+    void transport
+      .request("GET", `/v1/agents/${encodeURIComponent(agentId)}/tools/${encodeURIComponent(toolCallId)}`)
+      .then((res) => {
+        if (res.status < 400) {
+          const parsed = JSON.parse(res.body) as ToolCallDetailResponse;
+          setToolDetails((prev) => ({
+            ...prev,
+            [toolCallId]: { output: parsed.output, detail: parsed.detail },
+          }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setLoadingTools((prev) => {
+          const next = { ...prev };
+          delete next[toolCallId];
+          return next;
+        });
+      });
+  }
+
+  // Lazily fetch image attachments referenced in visible turns
   useEffect(() => {
-    if (!transport || !transcript) return;
+    if (!transport || visibleTurns.length === 0) return;
     const toFetch: string[] = [];
-    for (const turn of transcript.turns) {
+    for (const turn of visibleTurns) {
       for (const att of turn.attachments ?? []) {
         if (att.mime.startsWith("image/") && !attachmentUrls[att.id]) {
           toFetch.push(att.id);
@@ -162,10 +266,11 @@ export function SessionScreen({
         })
         .catch(() => {});
     }
-  }, [agentId, transcript, transport]);
+  }, [agentId, visibleTurns.length, transport]);
 
-  const turnsCount = transcript?.turns.length ?? 0;
-  const lastTurn = transcript?.turns[turnsCount - 1];
+  const turnsCount = visibleTurns.length;
+  const lastTurn = visibleTurns[turnsCount - 1];
+  const lastTurnId = lastTurn?.message_id ?? "";
   const lastItemLen = lastTurn?.items.reduce((acc, it) => acc + (it.type === "output" ? it.text.length : 1), 0) ?? 0;
   const activeTool = lastTurn?.items
     .slice()
@@ -176,15 +281,16 @@ export function SessionScreen({
     initialScrollDoneRef.current = false;
   }, [agentId]);
 
+  // Only auto-scroll on initial open or when new content streams at the bottom (never when prepending older turns).
   useEffect(() => {
-    if (turnsCount === 0) return;
+    if (!lastTurnId) return;
     if (!initialScrollDoneRef.current) {
       initialScrollDoneRef.current = true;
       bottomRef.current?.scrollIntoView({ behavior: "auto" });
     } else {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [turnsCount, lastItemLen]);
+  }, [lastTurnId, lastItemLen]);
 
   async function onPickFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -305,19 +411,39 @@ export function SessionScreen({
         </div>
       )}
 
-      <div className="session-messages">
+      <div className="session-messages" ref={messagesRef}>
         {loading && !transcript ? (
           <div className="empty-state">
-            <p>正在同步对话记录…</p>
+            <p>正在同步最近对话…</p>
           </div>
-        ) : !transcript || transcript.turns.length === 0 ? (
+        ) : !transcript || visibleTurns.length === 0 ? (
           <div className="empty-state">
             {activeAgent && <AgentAvatar agent={activeAgent} imageUrl={agentImgUrl} size={48} />}
             <h3>{activeAgent?.name ?? "开始对话"}</h3>
             <p>在下方输入指令或发送截图即可开始。</p>
           </div>
         ) : (
-          transcript.turns.map((turn) => {
+          <>
+            {hasOlder && (
+              <div className="load-older-wrap">
+                <button
+                  type="button"
+                  className="load-older-btn"
+                  disabled={loadingOlder}
+                  onClick={() => void loadOlder()}
+                >
+                  <ChevronUp size={13} />
+                  <span>
+                    {loadingOlder
+                      ? "正在加载更早的对话…"
+                      : remainingCount > 0
+                        ? `加载更早的对话（还有 ${remainingCount} 轮）`
+                        : "加载更早的对话"}
+                  </span>
+                </button>
+              </div>
+            )}
+            {visibleTurns.map((turn) => {
             const isQueued = !turn.started_at && !turn.completed_at && !turn.withdrawn;
             const plainReply = turn.items
               .filter((it): it is Extract<TranscriptItem, { type: "output" }> => it.type === "output" && it.stream === "text")
@@ -396,7 +522,13 @@ export function SessionScreen({
                     )}
                     <div className="assistant-body">
                       {turn.items.map((item, idx) => (
-                        <ItemView key={idx} item={item} />
+                        <ItemView
+                          key={idx}
+                          item={item}
+                          loadedTool={item.type === "tool_call" ? toolDetails[item.tool_call_id] : undefined}
+                          loadingTool={item.type === "tool_call" ? Boolean(loadingTools[item.tool_call_id]) : false}
+                          onExpandTool={expandToolDetail}
+                        />
                       ))}
                     </div>
                     {plainReply && turn.completed_at && <CopyReplyRow text={plainReply} />}
@@ -404,7 +536,8 @@ export function SessionScreen({
                 )}
               </div>
             );
-          })
+          })}
+          </>
         )}
 
         {transcript?.error && <div className="error-box">{transcript.error}</div>}
@@ -574,7 +707,17 @@ function CopyReplyRow({ text }: { text: string }) {
   );
 }
 
-function ItemView({ item }: { item: TranscriptItem }) {
+function ItemView({
+  item,
+  loadedTool,
+  loadingTool,
+  onExpandTool,
+}: {
+  item: TranscriptItem;
+  loadedTool?: { output?: string; detail?: ToolDetail };
+  loadingTool?: boolean;
+  onExpandTool: (toolCallId: string) => void;
+}) {
   switch (item.type) {
     case "output":
       if (item.stream === "thought") {
@@ -591,17 +734,19 @@ function ItemView({ item }: { item: TranscriptItem }) {
       const done = item.status === "completed";
       const failed = item.status === "failed";
       const dotCls = done ? "ok" : failed ? "danger" : "accent pulse";
-      const output = item.detail?.output || item.output || item.detail?.result;
-      const changes = item.detail?.changes ?? [];
+      const detail = item.detail ?? loadedTool?.detail;
+      const output = detail?.output || item.output || loadedTool?.output || detail?.result;
+      const changes = detail?.changes ?? [];
       const dur =
-        item.detail?.duration_ms != null
-          ? item.detail.duration_ms >= 1000
-            ? `${(item.detail.duration_ms / 1000).toFixed(1)}s`
-            : `${item.detail.duration_ms}ms`
+        detail?.duration_ms != null
+          ? detail.duration_ms >= 1000
+            ? `${(detail.duration_ms / 1000).toFixed(1)}s`
+            : `${detail.duration_ms}ms`
           : null;
-      const hasBody = Boolean(item.detail?.command || changes.length > 0 || output || item.detail?.error);
+      const hasBody = Boolean(detail?.command || changes.length > 0 || output || detail?.error);
+      const canExpand = hasBody || Boolean(item.has_detail);
 
-      if (!hasBody) {
+      if (!canExpand) {
         return (
           <div className="tool-step">
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-2)" }}>
@@ -614,7 +759,14 @@ function ItemView({ item }: { item: TranscriptItem }) {
       }
 
       return (
-        <details className="tool-step">
+        <details
+          className="tool-step"
+          onToggle={(e) => {
+            if (e.currentTarget.open && !hasBody && item.has_detail) {
+              onExpandTool(item.tool_call_id);
+            }
+          }}
+        >
           <summary>
             <span className={`dot ${dotCls}`} />
             <span className="tool-title">{item.title}</span>
@@ -622,10 +774,12 @@ function ItemView({ item }: { item: TranscriptItem }) {
             {failed && <span className="chip danger tiny">失败</span>}
           </summary>
           <div className="tool-detail">
-            {item.detail?.command && <div className="tool-cmd">$ {item.detail.command}</div>}
+            {loadingTool && !hasBody && <div className="tool-loading">正在加载工具输出…</div>}
+            {detail?.command && <div className="tool-cmd">$ {detail.command}</div>}
             {changes.length > 0 && <DiffView changes={changes} />}
             {output && <pre className="tool-out mono">{output.slice(0, 3200)}</pre>}
-            {item.detail?.error && <div className="error-box">{item.detail.error}</div>}
+            {detail?.error && <div className="error-box">{detail.error}</div>}
+            {!loadingTool && !hasBody && <div className="tool-loading">暂无详细输出</div>}
           </div>
         </details>
       );

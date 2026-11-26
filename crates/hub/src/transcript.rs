@@ -31,6 +31,85 @@ pub struct Fold {
 }
 
 impl Fold {
+    /// Slices `self.turns` for progressive loading (`limit` turns ending before `before`, or the
+    /// latest `limit` turns when `before` is `None`). When `slim` is true, strips heavy tool
+    /// `output`/`detail` payloads and marks `has_detail: Some(true)` so clients can expand any
+    /// tool step lazily. Returns `(total_turns, has_more)`.
+    pub fn slice_turns(
+        &mut self,
+        limit: Option<usize>,
+        before: Option<MessageId>,
+        slim: bool,
+    ) -> (usize, bool) {
+        let total = self.turns.len();
+        let end = match before {
+            Some(cursor) => self
+                .turns
+                .iter()
+                .position(|t| t.message_id == cursor)
+                .unwrap_or(0),
+            None => total,
+        };
+        let start = match limit {
+            Some(n) => end.saturating_sub(n),
+            None => 0,
+        };
+        if end < self.turns.len() {
+            self.turns.truncate(end);
+        }
+        if start > 0 {
+            self.turns.drain(..start);
+        }
+        if slim {
+            for turn in &mut self.turns {
+                for item in &mut turn.items {
+                    if let TranscriptItem::ToolCall {
+                        output,
+                        detail,
+                        has_detail,
+                        ..
+                    } = item
+                    {
+                        let had = output.as_ref().is_some_and(|s| !s.is_empty())
+                            || detail.as_ref().is_some_and(|d| {
+                                d.command.is_some()
+                                    || d.output.as_ref().is_some_and(|s| !s.is_empty())
+                                    || d.result.as_ref().is_some_and(|s| !s.is_empty())
+                                    || d.error.as_ref().is_some_and(|s| !s.is_empty())
+                                    || !d.changes.is_empty()
+                            });
+                        *output = None;
+                        *detail = None;
+                        *has_detail = had.then_some(true);
+                    }
+                }
+            }
+        }
+        (total, start > 0)
+    }
+
+    /// Finds and extracts the full `(output, detail)` of a single tool call by id.
+    pub fn take_tool_call(
+        &mut self,
+        target_id: &str,
+    ) -> Option<(Option<String>, Option<Box<crossagents_core::ToolDetail>>)> {
+        for turn in self.turns.iter_mut().rev() {
+            for item in turn.items.iter_mut().rev() {
+                if let TranscriptItem::ToolCall {
+                    tool_call_id,
+                    output,
+                    detail,
+                    ..
+                } = item
+                    && tool_call_id == target_id
+                {
+                    return Some((output.take(), detail.take()));
+                }
+            }
+        }
+        None
+    }
+
     pub fn push(&mut self, event: &Event) {
         self.last_seq = self.last_seq.max(event.seq);
         match &event.kind {
@@ -144,6 +223,7 @@ impl Fold {
                         status: *status,
                         output: None,
                         detail: None,
+                        has_detail: None,
                     });
                 }
             }
@@ -492,6 +572,7 @@ mod tests {
                         exit_code: Some(0),
                         ..ToolDetail::default()
                     })),
+                    has_detail: None,
                 },
                 TranscriptItem::Warning {
                     message: "retrying".into()
@@ -683,5 +764,108 @@ mod tests {
         // A later error is about something else: the exit no longer explains it.
         fold.push(&ev(3, error("not logged in")));
         assert!(fold.last_exit.is_none());
+    }
+
+    #[test]
+    fn slices_turns_and_slims_tool_details() {
+        let id = AgentId::new();
+        let msgs: Vec<MessageId> = (0..5).map(|_| MessageId::new()).collect();
+        let build_fold = || {
+            let mut fold = Fold::default();
+            let mut seq = 1;
+            for (i, &m) in msgs.iter().enumerate() {
+                fold.push(&ev(
+                    seq,
+                    EventKind::AgentInput {
+                        id,
+                        message_id: m,
+                        text: format!("turn {i}"),
+                        from: None,
+                        reply_to: None,
+                        thread: None,
+                        reply_excerpt: None,
+                        attachments: Vec::new(),
+                        notices: Vec::new(),
+                        queued: false,
+                        queued_reason: None,
+                    },
+                ));
+                seq += 1;
+                fold.push(&ev(
+                    seq,
+                    EventKind::AgentTurnStarted { id, message_id: m },
+                ));
+                seq += 1;
+                fold.push(&ev(
+                    seq,
+                    EventKind::AgentToolCall {
+                        id,
+                        tool_call_id: format!("tc-{i}"),
+                        title: format!("run step {i}"),
+                        kind: Some("bash".into()),
+                        status: ToolStatus::Completed,
+                    },
+                ));
+                seq += 1;
+                fold.push(&ev(
+                    seq,
+                    EventKind::AgentToolOutput {
+                        id,
+                        tool_call_id: format!("tc-{i}"),
+                        text: format!("huge output {i}"),
+                    },
+                ));
+                seq += 1;
+                fold.push(&ev(
+                    seq,
+                    EventKind::AgentTurnCompleted {
+                        id,
+                        message_id: m,
+                        stop_reason: StopReason::EndTurn,
+                    },
+                ));
+                seq += 1;
+            }
+            fold
+        };
+
+        let mut latest = build_fold();
+        let (total, has_more) = latest.slice_turns(Some(2), None, true);
+        assert_eq!(total, 5);
+        assert!(has_more);
+        assert_eq!(latest.turns.len(), 2);
+        assert_eq!(latest.turns[0].message_id, msgs[3]);
+        assert_eq!(latest.turns[1].message_id, msgs[4]);
+        match &latest.turns[0].items[0] {
+            TranscriptItem::ToolCall {
+                output,
+                detail,
+                has_detail,
+                ..
+            } => {
+                assert!(output.is_none());
+                assert!(detail.is_none());
+                assert_eq!(*has_detail, Some(true));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+
+        let mut older = build_fold();
+        let (total2, has_more2) = older.slice_turns(Some(2), Some(msgs[3]), true);
+        assert_eq!(total2, 5);
+        assert!(has_more2);
+        assert_eq!(older.turns[0].message_id, msgs[1]);
+        assert_eq!(older.turns[1].message_id, msgs[2]);
+
+        let mut oldest = build_fold();
+        let (_, has_more3) = oldest.slice_turns(Some(5), Some(msgs[1]), false);
+        assert!(!has_more3);
+        assert_eq!(oldest.turns.len(), 1);
+        assert_eq!(oldest.turns[0].message_id, msgs[0]);
+
+        let mut full = build_fold();
+        let (out, det) = full.take_tool_call("tc-3").expect("tool call found");
+        assert_eq!(out.as_deref(), Some("huge output 3"));
+        assert!(det.is_none());
     }
 }

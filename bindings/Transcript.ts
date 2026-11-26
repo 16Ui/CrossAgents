@@ -59,4 +59,12 @@ exit?: AgentExit,
 /**
  * The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
  */
-last_seq: number, };
+last_seq: number, 
+/**
+ * Total turns in the full conversation (populated when `limit` / `before` / `slim` is used).
+ */
+total_turns?: number, 
+/**
+ * True when older turns exist before `turns[0]` (populated on paginated queries).
+ */
+has_more?: boolean, };

@@ -94,6 +94,7 @@ export type TranscriptItem =
       status: "pending" | "in_progress" | "completed" | "failed" | string;
       output?: string;
       detail?: ToolDetail;
+      has_detail?: boolean;
     }
   | { type: "permission"; kind: string; title: string; decision: string }
   | { type: "steer"; message_id: string; text: string; attachments?: Attachment[]; read: boolean }
@@ -136,6 +137,14 @@ export interface Transcript {
   turns: TranscriptTurn[];
   error?: string;
   last_seq: number;
+  total_turns?: number;
+  has_more?: boolean;
+}
+
+export interface ToolCallDetailResponse {
+  tool_call_id: string;
+  output?: string;
+  detail?: ToolDetail;
 }
 
 export interface HumanItem {

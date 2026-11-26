@@ -563,6 +563,14 @@ pub struct Transcript {
     /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
     #[ts(type = "number")]
     pub last_seq: u64,
+    /// Total turns in the full conversation (populated when `limit` / `before` / `slim` is used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_turns: Option<usize>,
+    /// True when older turns exist before `turns[0]` (populated on paginated queries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub has_more: Option<bool>,
 }
 
 /// How an agent's process ended (`agent.exited`); either part is missing when the driver
@@ -730,6 +738,20 @@ pub struct TurnDiffResponse {
     pub stat: TurnDiffStat,
 }
 
+/// `GET /v1/agents/{key}/tools/{tool_call_id}`: full output & detail of a single tool call
+/// fetched lazily after loading a `slim=true` transcript.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ToolCallDetailResponse {
+    pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<Box<crossagents_core::ToolDetail>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -751,6 +773,11 @@ pub enum TranscriptItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         detail: Option<Box<crossagents_core::ToolDetail>>,
+        /// Present (`Some(true)`) on `slim=true` transcripts when heavy `output`/`detail` were
+        /// omitted and can be loaded lazily via `GET /v1/agents/{key}/tools/{tool_call_id}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        has_detail: Option<bool>,
     },
     /// Asked before acting; `decision` is what the permission policy answered.
     Permission {

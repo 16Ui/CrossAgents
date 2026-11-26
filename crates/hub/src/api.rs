@@ -36,7 +36,8 @@ use crossagents_api_types::{
     RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
     RunCostResponse, RunDetail, RunTrace, SaveEgressProxyRequest, SendMessageRequest,
     SendMessageResponse, SetAccountEgressRequest, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
+    SetTopicRequest, TaskReviewRequest, TaskTrace, ToolCallDetailResponse, Transcript,
+    TurnDiffResponse,
     UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse,
     UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
 };
@@ -59,10 +60,11 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tower_http::compression::CompressionLayer;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const EVENT_PAGE: u32 = 500;
+const EVENT_PAGE: u32 = 4000;
 /// A full upload of avatars, base64.
 const AVATAR_BODY_LIMIT: usize =
     crossagents_api_types::MAX_AVATAR_UPLOAD * crossagents_api_types::MAX_AVATAR_BYTES / 3 * 4
@@ -160,6 +162,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(send_now_message),
         )
         .route("/v1/agents/{key}/transcript", get(transcript))
+        .route("/v1/agents/{key}/tools/{tool_call_id}", get(tool_call_detail))
         .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
         .route("/v1/agents/{key}/profile", post(update_profile))
         .route("/v1/agents/{key}/settings", post(agent_settings))
@@ -333,6 +336,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(authed)
         .merge(me)
         .merge(node_channel)
+        .layer(CompressionLayer::new().gzip(true))
         .with_state(state)
 }
 
@@ -1276,33 +1280,59 @@ async fn fold_agent(state: &AppState, agent: AgentId) -> Result<crate::transcrip
     Ok(fold)
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct TranscriptQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before: Option<MessageId>,
+    #[serde(default)]
+    slim: Option<bool>,
+}
+
 /// Rebuilds the agent's conversation from its stored events.
+/// Supports optional progressive pagination (`limit`, `before`) and `slim=true` (omits heavy tool
+/// outputs/diffs so mobile clients open huge sessions in <1s and expand tools lazily).
 async fn transcript(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
+    Query(query): Query<TranscriptQuery>,
 ) -> ApiResult<Json<Transcript>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
     let driver_kind = state.runtime.driver_kind(&agent).await;
     // Clients follow the global stream from `last_seq`. Read the head first: every event
     // of this agent up to it is then folded in, and later ones arrive on the stream.
     let head = state.store().latest_event_seq().await?;
-    let fold = fold_agent(&state, agent.id).await?;
+    let mut fold = fold_agent(&state, agent.id).await?;
+    let slim = query.slim.unwrap_or(false);
+    let paginated = query.limit.is_some() || query.before.is_some() || slim;
+    let (total_turns, has_more) = if paginated {
+        let (total, more) = fold.slice_turns(query.limit, query.before, slim);
+        (Some(total), Some(more))
+    } else {
+        (None, None)
+    };
     // The conversation's spend includes its recruits': nothing is spent out of sight.
-    let mut costs = vec![fold.usage.as_ref().and_then(|u| u.cost_usd)];
-    for recruit in state.store().list_agents().await? {
-        if recruit.recruiter() == Some(agent.id) {
-            costs.push(
-                fold_agent(&state, recruit.id)
-                    .await?
-                    .usage
-                    .and_then(|u| u.cost_usd),
-            );
+    // Skip scanning recruits on `slim=true` progressive mobile requests to keep latency minimal.
+    let conversation_cost_usd = if slim {
+        fold.usage.as_ref().and_then(|u| u.cost_usd)
+    } else {
+        let mut costs = vec![fold.usage.as_ref().and_then(|u| u.cost_usd)];
+        for recruit in state.store().list_agents().await? {
+            if recruit.recruiter() == Some(agent.id) {
+                costs.push(
+                    fold_agent(&state, recruit.id)
+                        .await?
+                        .usage
+                        .and_then(|u| u.cost_usd),
+                );
+            }
         }
-    }
-    let conversation_cost_usd = costs
-        .iter()
-        .any(Option::is_some)
-        .then(|| costs.iter().flatten().sum());
+        costs
+            .iter()
+            .any(Option::is_some)
+            .then(|| costs.iter().flatten().sum())
+    };
     let in_error = agent.status == crossagents_core::AgentStatus::Error;
     let error = in_error.then_some(fold.last_error).flatten();
     let exit = in_error.then_some(fold.last_exit).flatten();
@@ -1322,6 +1352,29 @@ async fn transcript(
         error,
         exit,
         last_seq: head.max(fold.last_seq),
+        total_turns,
+        has_more,
+    }))
+}
+
+/// Full output & structured detail of a single tool call (lazy load for `slim=true` transcripts).
+async fn tool_call_detail(
+    State(state): State<Arc<AppState>>,
+    Path((key, tool_call_id)): Path<(String, String)>,
+) -> ApiResult<Json<ToolCallDetailResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let mut fold = fold_agent(&state, agent.id).await?;
+    let (output, detail) = fold.take_tool_call(&tool_call_id).ok_or_else(|| {
+        AppError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            format!("tool call {tool_call_id} not found for {}", agent.name),
+        )
+    })?;
+    Ok(Json(ToolCallDetailResponse {
+        tool_call_id,
+        output,
+        detail,
     }))
 }
 
