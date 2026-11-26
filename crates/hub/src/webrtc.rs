@@ -99,6 +99,9 @@ pub struct OfferResponse {
     /// any LAN mDNS `.local` hostnames resolved by the hub).
     #[serde(default)]
     pub remote_candidates: Vec<String>,
+    /// True when the client's `srflx` IPv4 matches the hub's own public `srflx` IPv4 (same NAT/LAN).
+    #[serde(default)]
+    pub same_nat: bool,
 }
 
 struct SessionEntry {
@@ -192,7 +195,8 @@ async fn handle_offer(
     // Resolve any RFC 6762 mDNS `.local` candidates emitted by Safari/Chrome on LAN into real
     // IPv4/IPv6 addresses so Full-ICE can send outbound UDP probes (which also punch stateful
     // pinholes through Windows Defender Firewall without needing manual inbound firewall rules).
-    let (resolved_sdp, remote_summary) = resolve_mdns_candidates_in_sdp(&req.sdp).await;
+    let (resolved_sdp, remote_summary, remote_srflx_v4) =
+        resolve_mdns_candidates_in_sdp(&req.sdp).await;
 
     let offer = SdpOffer::from_sdp_string(&resolved_sdp)
         .map_err(|err| AppError::bad_request(format!("invalid WebRTC SDP offer: {err}")))?;
@@ -208,6 +212,10 @@ async fn handle_offer(
             "no usable local UDP interfaces available for WebRTC",
         ));
     }
+
+    let same_nat = gathered
+        .srflx_v4
+        .is_some_and(|hub_ip| remote_srflx_v4.contains(&hub_ip));
 
     let now = Instant::now();
     let mut rtc = Rtc::builder()
@@ -240,12 +248,14 @@ async fn handle_offer(
         shutdown: state.shutdown.clone(),
         device_cancel,
         session_cancel,
+        stun_servers: gathered.stun_servers,
     };
 
     tracing::info!(
         session = session_id,
         local = ?summary,
         remote = ?remote_summary,
+        same_nat,
         "webrtc: accepted offer"
     );
 
@@ -257,6 +267,7 @@ async fn handle_offer(
         sdp: answer_sdp,
         candidates: summary,
         remote_candidates: remote_summary,
+        same_nat,
     }))
 }
 
@@ -266,6 +277,8 @@ async fn handle_offer(
 struct Gathered {
     sockets: HashMap<SocketAddr, Arc<UdpSocket>>,
     candidates: Vec<(Candidate, String)>,
+    srflx_v4: Option<Ipv4Addr>,
+    stun_servers: HashSet<SocketAddr>,
 }
 
 async fn gather_sockets_and_candidates(enable_stun: bool) -> Gathered {
@@ -313,27 +326,38 @@ async fn gather_sockets_and_candidates(enable_stun: bool) -> Gathered {
         candidates.push((cand, "host/loopback".to_owned()));
     }
 
+    let mut srflx_v4 = None;
+    let mut stun_servers = HashSet::new();
     if enable_stun
         && let Some((base_addr, v4_sock)) = primary_v4
-        && let Some(ext_addr) = stun_discover_v4(&v4_sock).await
-        && ext_addr != base_addr
-        && let Ok(cand) = Candidate::server_reflexive(ext_addr, base_addr, Protocol::Udp)
     {
-        tracing::debug!(%base_addr, %ext_addr, "webrtc: discovered srflx candidate via STUN");
-        candidates.push((cand, "srflx/ipv4".to_owned()));
+        let (mapped, probed) = stun_discover_v4(&v4_sock).await;
+        stun_servers = probed;
+        if let Some(ext_addr) = mapped
+            && ext_addr != base_addr
+            && let Ok(cand) = Candidate::server_reflexive(ext_addr, base_addr, Protocol::Udp)
+        {
+            if let IpAddr::V4(v4) = ext_addr.ip() {
+                srflx_v4 = Some(v4);
+            }
+            tracing::debug!(%base_addr, %ext_addr, "webrtc: discovered srflx candidate via STUN");
+            candidates.push((cand, "srflx/ipv4".to_owned()));
+        }
     }
 
     Gathered {
         sockets,
         candidates,
+        srflx_v4,
+        stun_servers,
     }
 }
 
 /// Resolves RFC 6762 `.local` mDNS hostnames in SDP `a=candidate:` lines via OS mDNS
 /// (`tokio::net::lookup_host`) so `str0m` can send outbound ICE connectivity checks directly
 /// to Safari/Chrome peers on the same LAN. Also returns a diagnostic summary of remote
-/// candidate kinds present in the offer.
-async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>) {
+/// candidate kinds and any `srflx` IPv4 addresses present in the offer.
+async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>, HashSet<Ipv4Addr>) {
     // Collect unique `.local` hostnames first and resolve them in parallel.
     let mut mdns_hosts: Vec<String> = Vec::new();
     let mut seen_hosts: HashSet<String> = HashSet::new();
@@ -388,6 +412,7 @@ async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>) {
     let line_ending = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
     let mut out_lines: Vec<String> = Vec::new();
     let mut summary: Vec<String> = Vec::new();
+    let mut srflx_v4: HashSet<Ipv4Addr> = HashSet::new();
 
     for line in sdp.lines() {
         let trimmed = line.trim_end_matches('\r');
@@ -419,6 +444,11 @@ async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>) {
                     }
                     continue;
                 } else if let Ok(ip) = addr.parse::<IpAddr>() {
+                    if kind == "srflx"
+                        && let IpAddr::V4(v4) = ip
+                    {
+                        srflx_v4.insert(v4);
+                    }
                     summary.push(format!(
                         "{kind}/{}",
                         if ip.is_ipv6() { "ipv6" } else { "ipv4" }
@@ -433,7 +463,7 @@ async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>) {
     if sdp.ends_with('\n') {
         rebuilt.push_str(line_ending);
     }
-    (rebuilt, summary)
+    (rebuilt, summary, srflx_v4)
 }
 
 /// Returns prioritized local IPv4 (up to `MAX_V4_SOCKETS`) and global IPv6 (up to
@@ -552,16 +582,18 @@ fn is_global_unicast_ipv6(ip: Ipv6Addr) -> bool {
     (first & 0xe000) == 0x2000
 }
 
-/// Sends a lightweight RFC 5389 STUN Binding Request from `sock` to domestic STUN servers in
-/// parallel and returns the first mapped external IPv4 SocketAddr within `STUN_TIMEOUT`.
-async fn stun_discover_v4(sock: &UdpSocket) -> Option<SocketAddr> {
-    let tx_id: [u8; 12] = uuid::Uuid::new_v4().as_bytes()[..12].try_into().ok()?;
+/// Sends a lightweight RFC 5389 STUN Binding Request from `sock` to verified STUN servers in
+/// parallel and returns `(mapped_addr, probed_servers)` within `STUN_TIMEOUT`.
+async fn stun_discover_v4(sock: &UdpSocket) -> (Option<SocketAddr>, HashSet<SocketAddr>) {
+    let Ok(tx_id): Result<[u8; 12], _> = uuid::Uuid::new_v4().as_bytes()[..12].try_into() else {
+        return (None, HashSet::new());
+    };
     let req = build_stun_binding_request(&tx_id);
 
     let mut targets = Vec::new();
     let resolve_futs = STUN_SERVERS.iter().map(|host| async move {
         tokio::time::timeout(
-            Duration::from_millis(250),
+            Duration::from_millis(300),
             tokio::net::lookup_host(*host),
         )
         .await
@@ -573,8 +605,9 @@ async fn stun_discover_v4(sock: &UdpSocket) -> Option<SocketAddr> {
     for addrs in futures::future::join_all(resolve_futs).await {
         targets.extend(addrs);
     }
+    let probed: HashSet<SocketAddr> = targets.iter().copied().collect();
     if targets.is_empty() {
-        return None;
+        return (None, probed);
     }
 
     for target in &targets {
@@ -590,13 +623,13 @@ async fn stun_discover_v4(sock: &UdpSocket) -> Option<SocketAddr> {
                 if let Some(mapped) = parse_stun_binding_response(&buf[..n], &tx_id)
                     && mapped.is_ipv4()
                 {
-                    return Some(mapped);
+                    return (Some(mapped), probed);
                 }
             }
             _ => break,
         }
     }
-    None
+    (None, probed)
 }
 
 fn build_stun_binding_request(tx_id: &[u8; 12]) -> [u8; 20] {
@@ -744,6 +777,7 @@ struct SessionContext {
     shutdown: CancellationToken,
     device_cancel: Option<CancellationToken>,
     session_cancel: CancellationToken,
+    stun_servers: HashSet<SocketAddr>,
 }
 
 struct IncomingPacket {
@@ -875,8 +909,8 @@ async fn run_session(
     let mut udp_tx_count: u64 = 0;
     let mut logged_send_err = false;
 
-    // Initial drain immediately kicks off ICE connectivity checks.
-    let (transmits, initial_events, mut next_timeout) = match drain_rtc(&mut rtc) {
+    // 1. Drain output from `accept_offer` (maintaining str0m's single-mutation invariant).
+    let (transmits, initial_events, _) = match drain_rtc(&mut rtc) {
         Ok(res) => res,
         Err(err) => {
             tracing::warn!(session = ctx.id, error = %err, "webrtc: initial poll failed");
@@ -892,8 +926,36 @@ async fn run_session(
         &mut logged_send_err,
     )
     .await;
+
+    // 2. CRITICAL: `str0m`'s `IceAgent::poll_timeout()` returns `None` (`not_happening()`, +24h)
+    // until the VERY FIRST `Input::Timeout(now)` is fed! Feed an immediate tick now so Full-ICE
+    // transitions `New -> Checking` and immediately begins sending outbound UDP STUN checks.
+    if let Err(err) = rtc.handle_input(Input::Timeout(Instant::now())) {
+        tracing::warn!(session = ctx.id, error = %err, "webrtc: initial timeout tick failed");
+        cleanup_session(&ctx, recv_tasks, sse_streams, udp_rx_count, udp_tx_count).await;
+        return;
+    }
+    let (kick_txs, kick_events, mut next_timeout) = match drain_rtc(&mut rtc) {
+        Ok(res) => res,
+        Err(err) => {
+            tracing::warn!(session = ctx.id, error = %err, "webrtc: post-tick poll failed");
+            cleanup_session(&ctx, recv_tasks, sse_streams, udp_rx_count, udp_tx_count).await;
+            return;
+        }
+    };
+    send_transmits(
+        ctx.id,
+        &sockets,
+        kick_txs,
+        &mut udp_tx_count,
+        &mut logged_send_err,
+    )
+    .await;
+
+    let mut boot_events = initial_events;
+    boot_events.extend(kick_events);
     if !handle_events(
-        initial_events,
+        boot_events,
         &mut rtc,
         &sockets,
         &mut next_timeout,
@@ -968,6 +1030,10 @@ async fn run_session(
                 break;
             }
             Some(pkt) = udp_rx.recv() => {
+                // Ignore late STUN replies from our own initial STUN discovery probe.
+                if ctx.stun_servers.contains(&pkt.source) {
+                    continue;
+                }
                 udp_rx_count += 1;
                 if udp_rx_count == 1 {
                     tracing::info!(
@@ -975,7 +1041,7 @@ async fn run_session(
                         source = %pkt.source,
                         dest = %pkt.destination,
                         bytes = pkt.data.len(),
-                        "webrtc: first UDP packet received"
+                        "webrtc: first peer UDP packet received"
                     );
                 }
                 let Ok(recv) = Receive::new(Protocol::Udp, pkt.source, pkt.destination, &pkt.data) else {
@@ -1723,13 +1789,59 @@ mod tests {
         let sdp = "v=0\r\n\
 a=candidate:1 1 udp 2122260223 192.168.1.9 50000 typ host\r\n\
 a=candidate:2 1 udp 1686052607 240e:3bd::9 50001 typ srflx raddr 0.0.0.0 rport 0\r\n\
-a=candidate:3 1 udp 2122194687 nonexistent-test-host-xyz.local 50002 typ host\r\n";
-        let (rebuilt, summary) = resolve_mdns_candidates_in_sdp(sdp).await;
+a=candidate:3 1 udp 1686052606 183.16.14.57 50003 typ srflx raddr 0.0.0.0 rport 0\r\n\
+a=candidate:4 1 udp 2122194687 nonexistent-test-host-xyz.local 50002 typ host\r\n";
+        let (rebuilt, summary, srflx_v4) = resolve_mdns_candidates_in_sdp(sdp).await;
         assert!(rebuilt.contains("192.168.1.9 50000"));
         assert!(rebuilt.contains("240e:3bd::9 50001"));
         assert!(summary.contains(&"host/ipv4".to_owned()));
         assert!(summary.contains(&"srflx/ipv6".to_owned()));
+        assert!(summary.contains(&"srflx/ipv4".to_owned()));
         assert!(summary.contains(&"mdns/unresolved".to_owned()));
+        assert!(srflx_v4.contains(&Ipv4Addr::new(183, 16, 14, 57)));
+    }
+
+    /// Regression test: after `accept_offer`, feeding the initial `Input::Timeout(now)` tick MUST
+    /// transition ICE out of `New` and immediately emit outbound STUN connectivity checks without
+    /// waiting for any inbound UDP packet from the peer!
+    #[test]
+    fn initial_timeout_tick_emits_outbound_ice_checks_without_inbound_packets() {
+        let now = Instant::now();
+        let mut client = Rtc::builder().build(now);
+        client
+            .add_local_candidate(Candidate::host("198.51.100.10:50000".parse().unwrap(), Protocol::Udp).unwrap())
+            .unwrap();
+        let mut change = client.sdp_api();
+        change.add_channel(CHANNEL_LABEL.to_owned());
+        let (offer, _pending) = change.apply().unwrap();
+
+        let mut server = Rtc::builder().build(now);
+        server
+            .add_local_candidate(Candidate::host("192.0.2.20:51000".parse().unwrap(), Protocol::Udp).unwrap())
+            .unwrap();
+        let _answer = server.sdp_api().accept_offer(offer).unwrap();
+        let _ = drain_rtc(&mut server).unwrap();
+
+        server.handle_input(Input::Timeout(now)).unwrap();
+        let (txs, evs, next_timeout) = drain_rtc(&mut server).unwrap();
+
+        assert!(
+            !txs.is_empty(),
+            "Full-ICE server must actively send outbound STUN checks after initial tick"
+        );
+        assert!(
+            txs.iter().any(|t| t.destination == "198.51.100.10:50000".parse::<SocketAddr>().unwrap()),
+            "expected outbound STUN probe to remote candidate, got: {:?}",
+            txs.iter().map(|t| t.destination).collect::<Vec<_>>()
+        );
+        assert!(
+            evs.iter().any(|e| matches!(e, Event::IceConnectionStateChange(IceConnectionState::Checking))),
+            "expected ICE state transition to Checking"
+        );
+        assert!(
+            next_timeout.saturating_duration_since(now) < Duration::from_secs(5),
+            "next_timeout should be short ICE pacing interval, not 24h not_happening()"
+        );
     }
 
     /// End-to-end real UDP `str0m` client ↔ real `crossagents-hub` `POST /v1/link/webrtc/offer`

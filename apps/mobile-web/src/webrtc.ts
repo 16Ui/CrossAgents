@@ -45,6 +45,7 @@ interface OfferReply {
   sdp: string;
   candidates?: string[];
   remote_candidates?: string[];
+  same_nat?: boolean;
 }
 
 type ServerFrame =
@@ -302,10 +303,13 @@ export class WebRtcTransport implements HubTransport {
         }
         let settled = false;
         const remoteTag = answer.remote_candidates?.length
-          ? `（已识别候选：${answer.remote_candidates.join(", ")}）`
+          ? `（远端：${answer.remote_candidates.join(", ")}）`
           : "";
+        const sameNatHint = answer.same_nat
+          ? "同局域网 P2P 被本机防火墙/路由器拦截，已保持中继（请在 Windows 防火墙放行 crossagents.exe 或切 5G 试连）"
+          : `P2P 打洞超时，已保持中继${remoteTag}`;
         const timer = window.setTimeout(() => {
-          fail(new TransportError("transport", `P2P 打洞超时，已保持中继${remoteTag}`));
+          fail(new TransportError("transport", sameNatHint));
         }, CHANNEL_OPEN_TIMEOUT_MS);
 
         function cleanup() {
