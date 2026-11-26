@@ -33,6 +33,7 @@ import {
   wsKey,
   wsName,
 } from "../store";
+import type { LinkStatus } from "../transport";
 import type { Agent, HubInfo, HumanItem, RemoteNodeInfo, UserProfile } from "../types";
 
 type FilterMode = "active" | "running" | "archived";
@@ -80,6 +81,7 @@ export function HomeChatsView({
   avatarUrls,
   snapshotSavedAt,
   isConnected,
+  linkStatus,
   refreshing,
   onRefresh,
   onOpenAgent,
@@ -97,6 +99,7 @@ export function HomeChatsView({
   avatarUrls: Record<string, string>;
   snapshotSavedAt?: string;
   isConnected: boolean;
+  linkStatus?: LinkStatus;
   refreshing: boolean;
   onRefresh: () => void;
   onOpenAgent: (agentId: string) => void;
@@ -307,7 +310,14 @@ export function HomeChatsView({
             {!isConnected && snapshotSavedAt ? (
               <div className="nav-subtitle">缓存快照 · {relativeTime(snapshotSavedAt)}</div>
             ) : (
-              <div className="nav-subtitle">{hubInfo?.machine?.hostname || fallbackHost || "中心在线"}</div>
+              <div className="nav-subtitle">
+                <span>{hubInfo?.machine?.hostname || fallbackHost || "中心在线"}</span>
+                {isConnected && linkStatus?.kind === "p2p" && (
+                  <span className="p2p-inline-badge">
+                    P2P{linkStatus.p2pInfo && linkStatus.p2pInfo.rttMs > 0 ? ` · ${linkStatus.p2pInfo.rttMs}ms` : ""}
+                  </span>
+                )}
+              </div>
             )}
           </div>
         </div>

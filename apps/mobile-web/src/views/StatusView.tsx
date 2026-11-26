@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Activity, Bell, BellOff, RefreshCw, Send, ShieldAlert, Unlink } from "lucide-react";
+import { Activity, Bell, BellOff, RefreshCw, Send, ShieldAlert, Unlink, Zap } from "lucide-react";
 import {
   OsIcon,
   planLabel,
@@ -19,7 +19,7 @@ import {
 } from "../push";
 import { nodeDisplayName } from "../store";
 import { FONTS, MODES, PAPERS, setTheme, useTheme } from "../theme";
-import { runRelayDiagnostics, type HubTransport, type RelayDiagItem } from "../transport";
+import { runRelayDiagnostics, type HubTransport, type LinkStatus, type RelayDiagItem } from "../transport";
 import type {
   ConnectionState,
   HubInfo,
@@ -42,6 +42,7 @@ function relayHostLabel(url?: string | null): string {
 export function StatusView({
   pairing,
   connection,
+  linkStatus,
   hubInfo,
   profile,
   nodes,
@@ -53,6 +54,7 @@ export function StatusView({
 }: {
   pairing: PairingRecord;
   connection: ConnectionState;
+  linkStatus?: LinkStatus;
   hubInfo?: HubInfo;
   profile?: UserProfile;
   nodes: RemoteNodeInfo[];
@@ -70,6 +72,7 @@ export function StatusView({
   const [meterMode, setMeterMode] = useState<"remain" | "used">("remain");
   const [diagBusy, setDiagBusy] = useState(false);
   const [diagItems, setDiagItems] = useState<RelayDiagItem[] | null>(null);
+  const [p2pBusy, setP2pBusy] = useState(false);
 
   const pushSupport = getPushSupport();
 
@@ -118,12 +121,37 @@ export function StatusView({
 
   const connChip =
     connection.kind === "connected"
-      ? { label: connection.mode === "iroh" ? "iroh E2EE" : "HTTPS 直连", cls: "ok" }
+      ? connection.mode === "direct"
+        ? { label: "HTTPS 直连", cls: "ok" }
+        : linkStatus?.kind === "p2p"
+          ? {
+              label:
+                linkStatus.p2pInfo && linkStatus.p2pInfo.rttMs > 0
+                  ? `P2P 直连 · ${linkStatus.p2pInfo.rttMs}ms`
+                  : "P2P 直连",
+              cls: "ok",
+            }
+          : linkStatus?.p2pState === "connecting"
+            ? { label: "iroh · 尝试直连…", cls: "ok" }
+            : { label: "iroh 中继", cls: "ok" }
       : connection.kind === "connecting"
         ? { label: "连接中…", cls: "accent" }
         : connection.kind === "revoked"
           ? { label: "已吊销", cls: "danger" }
           : { label: connection.kind === "relay_unreachable" ? "中继不可达" : "离线", cls: "warn" };
+
+  const p2pDetailText =
+    linkStatus?.kind === "p2p" && linkStatus.p2pInfo
+      ? [
+          linkStatus.p2pInfo.ipFamily !== "unknown" ? linkStatus.p2pInfo.ipFamily : null,
+          linkStatus.p2pInfo.localType !== "unknown" || linkStatus.p2pInfo.remoteType !== "unknown"
+            ? `${linkStatus.p2pInfo.localType} ↔ ${linkStatus.p2pInfo.remoteType}`
+            : null,
+          linkStatus.p2pInfo.rttMs > 0 ? `${linkStatus.p2pInfo.rttMs}ms` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : linkStatus?.p2pNote;
 
   return (
     <>
@@ -289,7 +317,19 @@ export function StatusView({
               </div>
               {pairing.relay && (
                 <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                  中继：{relayHostLabel(pairing.relay)}
+                  信令/中继：{relayHostLabel(pairing.relay)}
+                </div>
+              )}
+              {pairing.mode === "iroh" && p2pDetailText && (
+                <div
+                  className="mono"
+                  style={{
+                    fontSize: 11,
+                    color: linkStatus?.kind === "p2p" ? "var(--ok-text)" : "var(--muted)",
+                    marginTop: 2,
+                  }}
+                >
+                  {linkStatus?.kind === "p2p" ? `P2P 直连：${p2pDetailText}` : p2pDetailText}
                 </div>
               )}
             </div>
@@ -299,11 +339,33 @@ export function StatusView({
             </span>
           </div>
 
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button type="button" className="secondary-btn" style={{ flex: 1 }} onClick={onReconnect}>
               <RefreshCw size={14} />
               重连
             </button>
+            {pairing.mode === "iroh" && transport?.retryP2p && connection.kind === "connected" && (
+              <button
+                type="button"
+                className="secondary-btn"
+                disabled={p2pBusy || linkStatus?.p2pState === "connecting"}
+                onClick={async () => {
+                  setP2pBusy(true);
+                  try {
+                    await transport.retryP2p?.();
+                  } finally {
+                    setP2pBusy(false);
+                  }
+                }}
+              >
+                <Zap size={14} />
+                {p2pBusy || linkStatus?.p2pState === "connecting"
+                  ? "直连中"
+                  : linkStatus?.kind === "p2p"
+                    ? "测 RTT"
+                    : "尝试直连"}
+              </button>
+            )}
             <button
               type="button"
               className="secondary-btn"
@@ -318,7 +380,7 @@ export function StatusView({
               }}
             >
               <Activity size={14} />
-              {diagBusy ? "测速中" : "测速"}
+              {diagBusy ? "测速中" : "测中继"}
             </button>
             <button
               type="button"

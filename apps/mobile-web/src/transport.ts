@@ -1,4 +1,16 @@
 import type { InvitePreview, PairingRecord } from "./types";
+import { WebRtcTransport, type WebRtcInfo } from "./webrtc";
+
+export type { WebRtcInfo };
+
+export type ActiveLinkKind = "p2p" | "relay" | "direct";
+
+export interface LinkStatus {
+  kind: ActiveLinkKind;
+  p2pState: "idle" | "connecting" | "active" | "fallback";
+  p2pInfo?: WebRtcInfo;
+  p2pNote?: string;
+}
 
 export interface HttpReply {
   status: number;
@@ -27,6 +39,10 @@ export class TransportError extends Error {
 export interface HubTransport {
   readonly mode: "iroh" | "direct";
   readonly connectedRelay?: string;
+  readonly linkStatus?: LinkStatus;
+  onLinkStatusChange?(cb: (status: LinkStatus) => void): () => void;
+  retryP2p?(): Promise<void>;
+  pingP2p?(): Promise<number | null>;
   request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<HttpReply>;
   subscribeEvents(
     since: number | undefined,
@@ -496,9 +512,348 @@ export class DirectHttpTransport implements HubTransport {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hybrid transport: instant iroh E2EE + transparent WebRTC P2P upgrade & fallback
+
+interface ManagedSse {
+  lastSeq: number | undefined;
+  onEvent: (rawJson: string) => void;
+  onError: (err: TransportError) => void;
+  handle: EventHandle | null;
+  usingP2p: boolean;
+  cancelled: boolean;
+}
+
+export class HybridTransport implements HubTransport {
+  readonly mode = "iroh" as const;
+  readonly connectedRelay: string;
+  private primary: IrohWasmTransport;
+  private webrtc: WebRtcTransport | null = null;
+  private closed = false;
+  private upgrading = false;
+  private status: LinkStatus;
+  private listeners = new Set<(status: LinkStatus) => void>();
+  private activeSse: ManagedSse | null = null;
+
+  constructor(primary: IrohWasmTransport) {
+    this.primary = primary;
+    this.connectedRelay = primary.connectedRelay;
+    this.status = WebRtcTransport.isSupported()
+      ? { kind: "relay", p2pState: "connecting", p2pNote: "正在尝试 P2P 直连…" }
+      : { kind: "relay", p2pState: "fallback", p2pNote: "当前浏览器不支持 WebRTC" };
+    if (WebRtcTransport.isSupported()) {
+      void this.upgradeToP2p();
+    }
+  }
+
+  get linkStatus(): LinkStatus {
+    return this.status;
+  }
+
+  onLinkStatusChange(cb: (status: LinkStatus) => void): () => void {
+    this.listeners.add(cb);
+    return () => {
+      this.listeners.delete(cb);
+    };
+  }
+
+  private setLinkStatus(next: LinkStatus) {
+    this.status = next;
+    for (const cb of this.listeners) {
+      try {
+        cb(next);
+      } catch {
+        // ignore listener errors
+      }
+    }
+  }
+
+  async retryP2p(): Promise<void> {
+    if (this.closed || this.primary.isClosed()) return;
+    if (this.webrtc && !this.webrtc.isClosed()) {
+      await this.pingP2p();
+      return;
+    }
+    await this.upgradeToP2p();
+  }
+
+  async pingP2p(): Promise<number | null> {
+    const rtc = this.webrtc;
+    if (!rtc || rtc.isClosed()) return null;
+    try {
+      const rttMs = await rtc.ping(3000);
+      rtc.info = { ...rtc.info, rttMs };
+      this.setLinkStatus({
+        kind: "p2p",
+        p2pState: "active",
+        p2pInfo: rtc.info,
+      });
+      return rttMs;
+    } catch {
+      this.handleP2pDropped("P2P 测速超时，已切回中继");
+      return null;
+    }
+  }
+
+  private async upgradeToP2p(): Promise<void> {
+    if (this.closed || this.upgrading || !WebRtcTransport.isSupported()) return;
+    if (this.primary.isClosed()) return;
+    this.upgrading = true;
+    this.setLinkStatus({
+      kind: "relay",
+      p2pState: "connecting",
+      p2pNote: "正在经加密中继交换直连候选…",
+    });
+
+    try {
+      const rtc = await WebRtcTransport.connect(this.primary, {
+        onDrop: (reason) => this.handleP2pDropped(reason),
+        onMetrics: (info) => {
+          if (this.webrtc === rtc && !this.closed) {
+            this.setLinkStatus({
+              kind: "p2p",
+              p2pState: "active",
+              p2pInfo: info,
+            });
+          }
+        },
+      });
+      if (this.closed) {
+        await rtc.close();
+        return;
+      }
+      this.webrtc = rtc;
+      this.setLinkStatus({
+        kind: "p2p",
+        p2pState: "active",
+        p2pInfo: rtc.info,
+      });
+      // Seamlessly migrate active live SSE onto the low-latency P2P DataChannel.
+      this.migrateSseToP2p(rtc);
+    } catch (err) {
+      if (this.closed) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.setLinkStatus({
+        kind: "relay",
+        p2pState: "fallback",
+        p2pNote: msg,
+      });
+    } finally {
+      this.upgrading = false;
+    }
+  }
+
+  private handleP2pDropped(reason: string) {
+    if (this.closed) return;
+    if (!this.webrtc) return;
+    this.webrtc = null;
+    this.setLinkStatus({
+      kind: "relay",
+      p2pState: "fallback",
+      p2pNote: `${reason}，已自动回退到 iroh 中继`,
+    });
+    // If SSE was riding P2P, immediately fall back to iroh without losing events.
+    if (this.activeSse && !this.activeSse.cancelled && this.activeSse.usingP2p) {
+      this.reopenSseOnPrimary(this.activeSse);
+    }
+  }
+
+  private trackEventSeq(sub: ManagedSse, rawJson: string) {
+    try {
+      const parsed = JSON.parse(rawJson) as { seq?: number };
+      if (typeof parsed.seq === "number" && parsed.seq > (sub.lastSeq ?? 0)) {
+        sub.lastSeq = parsed.seq;
+      }
+    } catch {
+      // ignore
+    }
+    sub.onEvent(rawJson);
+  }
+
+  private migrateSseToP2p(rtc: WebRtcTransport) {
+    const sub = this.activeSse;
+    if (!sub || sub.cancelled || sub.usingP2p) return;
+    const prevHandle = sub.handle;
+    void rtc
+      .subscribeEvents(
+        sub.lastSeq,
+        (raw) => {
+          if (!sub.cancelled) this.trackEventSeq(sub, raw);
+        },
+        (err) => {
+          if (sub.cancelled || this.activeSse !== sub) return;
+          if (err.code === "unauthorized") {
+            sub.onError(err);
+            return;
+          }
+          // P2P SSE dropped: fall back to primary iroh SSE cleanly.
+          if (this.webrtc === rtc) {
+            this.handleP2pDropped(err.message);
+          } else if (sub.usingP2p) {
+            this.reopenSseOnPrimary(sub);
+          }
+        },
+      )
+      .then((newHandle) => {
+        if (sub.cancelled || this.activeSse !== sub) {
+          newHandle.cancel();
+          return;
+        }
+        sub.handle = newHandle;
+        sub.usingP2p = true;
+        prevHandle?.cancel();
+      })
+      .catch(() => {
+        // Keep existing iroh SSE intact if P2P subscribe failed.
+      });
+  }
+
+  private reopenSseOnPrimary(sub: ManagedSse) {
+    if (sub.cancelled || this.activeSse !== sub) return;
+    sub.usingP2p = false;
+    sub.handle = null;
+    if (this.primary.isClosed()) {
+      sub.onError(new TransportError("hub_offline", "实时连接已断开"));
+      return;
+    }
+    void this.primary
+      .subscribeEvents(
+        sub.lastSeq,
+        (raw) => {
+          if (!sub.cancelled) this.trackEventSeq(sub, raw);
+        },
+        (err) => {
+          if (!sub.cancelled && this.activeSse === sub && !sub.usingP2p) {
+            sub.onError(err);
+          }
+        },
+      )
+      .then((handle) => {
+        if (sub.cancelled || this.activeSse !== sub) {
+          handle.cancel();
+          return;
+        }
+        sub.handle = handle;
+      })
+      .catch((err) => {
+        if (!sub.cancelled && this.activeSse === sub) {
+          sub.onError(err instanceof TransportError ? err : new TransportError("transport", String(err)));
+        }
+      });
+  }
+
+  async request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<HttpReply> {
+    const rtc = this.webrtc;
+    if (rtc && !rtc.isClosed()) {
+      try {
+        return await rtc.request(method, path, body);
+      } catch (err) {
+        const te = err instanceof TransportError ? err : new TransportError("transport", String(err));
+        if (te.code === "unauthorized") throw te;
+        this.handleP2pDropped(te.message);
+        if (method === "GET" && !this.primary.isClosed()) {
+          return this.primary.request(method, path, body);
+        }
+        throw te;
+      }
+    }
+    return this.primary.request(method, path, body);
+  }
+
+  async subscribeEvents(
+    since: number | undefined,
+    onEvent: (rawJson: string) => void,
+    onError: (err: TransportError) => void,
+  ): Promise<EventHandle> {
+    if (this.activeSse) {
+      this.activeSse.cancelled = true;
+      this.activeSse.handle?.cancel();
+    }
+    const sub: ManagedSse = {
+      lastSeq: since,
+      onEvent,
+      onError,
+      handle: null,
+      usingP2p: false,
+      cancelled: false,
+    };
+    this.activeSse = sub;
+
+    const rtc = this.webrtc;
+    if (rtc && !rtc.isClosed()) {
+      try {
+        sub.handle = await rtc.subscribeEvents(
+          since,
+          (raw) => {
+            if (!sub.cancelled) this.trackEventSeq(sub, raw);
+          },
+          (err) => {
+            if (sub.cancelled || this.activeSse !== sub) return;
+            if (err.code === "unauthorized") {
+              sub.onError(err);
+              return;
+            }
+            if (this.webrtc === rtc) {
+              this.handleP2pDropped(err.message);
+            } else if (sub.usingP2p) {
+              this.reopenSseOnPrimary(sub);
+            }
+          },
+        );
+        sub.usingP2p = true;
+      } catch {
+        // Fall through to primary iroh transport below.
+      }
+    }
+
+    if (!sub.handle) {
+      sub.handle = await this.primary.subscribeEvents(
+        since,
+        (raw) => {
+          if (!sub.cancelled) this.trackEventSeq(sub, raw);
+        },
+        (err) => {
+          if (!sub.cancelled && this.activeSse === sub && !sub.usingP2p) {
+            sub.onError(err);
+          }
+        },
+      );
+      sub.usingP2p = false;
+    }
+
+    return {
+      cancel: () => {
+        sub.cancelled = true;
+        sub.handle?.cancel();
+        sub.handle = null;
+        if (this.activeSse === sub) this.activeSse = null;
+      },
+    };
+  }
+
+  isClosed(): boolean {
+    if (this.closed) return true;
+    const p2pAlive = Boolean(this.webrtc && !this.webrtc.isClosed());
+    return !p2pAlive && this.primary.isClosed();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    if (this.activeSse) {
+      this.activeSse.cancelled = true;
+      this.activeSse.handle?.cancel();
+      this.activeSse = null;
+    }
+    const rtc = this.webrtc;
+    this.webrtc = null;
+    await Promise.all([rtc?.close(), this.primary.close()]);
+  }
+}
+
 export async function connectTransport(record: PairingRecord): Promise<HubTransport> {
   if (record.mode === "direct") {
     return new DirectHttpTransport(record);
   }
-  return IrohWasmTransport.connect(record);
+  const iroh = await IrohWasmTransport.connect(record);
+  return new HybridTransport(iroh);
 }

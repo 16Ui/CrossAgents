@@ -40,6 +40,8 @@ uuid.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
 web-push-native = "0.5.0"
+str0m = { version = "0.26", default-features = false, features = ["rust-crypto"] }
+netdev = "0.46"
 
 [dev-dependencies]
 tempfile.workspace = true

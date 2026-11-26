@@ -121,10 +121,12 @@ fn is_extension_trust(method: &Method, pattern: &str) -> bool {
     )
 }
 
-/// POSTs that only read: `files/resolve` answers which paths name something inside a
-/// workspace, the paths carried in the request (docs/tasks/DOGFOOD.md §7).
+/// POSTs that only read (or negotiate a read-capable transport without mutating hub state):
+/// `files/resolve` answers which paths name something inside a workspace (docs/tasks/DOGFOOD.md
+/// §7); `/v1/link/webrtc/offer` opens a P2P DataChannel that still enforces the caller's exact
+/// credential level on every proxied API call.
 fn reads_only(pattern: &str) -> bool {
-    pattern.ends_with("/files/resolve")
+    pattern.ends_with("/files/resolve") || pattern == "/v1/link/webrtc/offer"
 }
 
 /// `None` when `grant` may call the route, else why not (for a 403).
@@ -272,6 +274,11 @@ mod tests {
         );
         assert_eq!(
             required(&Method::GET, "/v1/runs/{key}/files/content"),
+            Level::Read
+        );
+        // Opening a WebRTC DataChannel upgrades transport only; each tunneled call checks auth.
+        assert_eq!(
+            required(&Method::POST, "/v1/link/webrtc/offer"),
             Level::Read
         );
     }

@@ -54,6 +54,7 @@ pub mod usage;
 pub mod usage_series;
 pub mod version_gate;
 pub mod web_push;
+pub mod webrtc;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -434,6 +435,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let agent_tokens = tokens.clone();
     let web_push = Arc::new(web_push::WebPushService::new(&paths.home));
     web_push.clone().watch(bus.clone(), shutdown.clone());
+    let webrtc = Arc::new(webrtc::WebRtcService::new());
     let state = Arc::new(api::AppState {
         devices: Default::default(),
         extensions: extensions.clone(),
@@ -460,6 +462,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         link: Arc::new(link::LinkService::new(&paths.home)),
         remote_nodes,
         web_push,
+        webrtc: webrtc.clone(),
     });
     // The hole-punching entrance, when the person left it on (docs/MULTI-NODE.md §14).
     state.link.resume(&state, addr).await;
@@ -492,6 +495,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            webrtc.stop_all().await;
             link.stop().await;
             let _ = account_start.await;
             let _ = extension_poll.await;

@@ -115,6 +115,8 @@ pub struct AppState {
     pub remote_nodes: Arc<crate::remote_nodes::RemoteNodes>,
     /// Free Web Push (VAPID) notifications for Home-Screen mobile PWAs.
     pub web_push: Arc<crate::web_push::WebPushService>,
+    /// Pure-Rust WebRTC DataChannel P2P gateway (`POST /v1/link/webrtc/offer`).
+    pub webrtc: Arc<crate::webrtc::WebRtcService>,
 }
 
 impl AppState {
@@ -320,6 +322,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::browser::router())
         .merge(crate::api_bytes::router())
         .merge(crate::web_push::router())
+        .merge(crate::webrtc::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
     let me = Router::new()
@@ -358,6 +361,14 @@ impl AppError {
 
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
+    }
+
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, message)
+    }
+
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal, message)
     }
 
     /// The same error, saying why a message was refused (docs/tasks/DELIVERY-AUDIT.md §3).

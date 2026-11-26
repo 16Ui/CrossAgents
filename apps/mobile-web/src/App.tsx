@@ -13,7 +13,13 @@ import {
   saveSnapshot,
   saveTranscriptCacheEntry,
 } from "./store";
-import { connectTransport, TransportError, type EventHandle, type HubTransport } from "./transport";
+import {
+  connectTransport,
+  TransportError,
+  type EventHandle,
+  type HubTransport,
+  type LinkStatus,
+} from "./transport";
 import type {
   Agent,
   ConnectionState,
@@ -61,6 +67,8 @@ export function App() {
 
   const transportRef = useRef<HubTransport | null>(null);
   const [transport, setTransport] = useState<HubTransport | null>(null);
+  const [linkStatus, setLinkStatus] = useState<LinkStatus | undefined>(undefined);
+  const linkUnsubRef = useRef<(() => void) | null>(null);
   const sseRef = useRef<EventHandle | null>(null);
   const lastSeqRef = useRef<number | undefined>(undefined);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -399,6 +407,9 @@ export function App() {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+    linkUnsubRef.current?.();
+    linkUnsubRef.current = null;
+    setLinkStatus(undefined);
     sseRef.current?.cancel();
     sseRef.current = null;
     const prev = transportRef.current;
@@ -424,6 +435,11 @@ export function App() {
         }
         transportRef.current = t;
         setTransport(t);
+        setLinkStatus(t.linkStatus);
+        linkUnsubRef.current =
+          t.onLinkStatusChange?.((status) => {
+            if (epoch === connectEpochRef.current) setLinkStatus(status);
+          }) ?? null;
         setConnection({ kind: "connected", mode: t.mode });
 
         if (record.mode === "iroh" && t.connectedRelay && t.connectedRelay !== record.relay) {
@@ -506,6 +522,9 @@ export function App() {
         void connect(rec);
       } else {
         // Sync directly without a serial pre-flight `/v1/info` probe; reconnect only if stale.
+        if (cur.linkStatus && cur.linkStatus.kind !== "p2p") {
+          void cur.retryP2p?.();
+        }
         void bootstrap(cur).then((ok) => {
           if (!ok && pairingRef.current) void connect(pairingRef.current);
         });
@@ -606,6 +625,7 @@ export function App() {
           avatarUrls={avatarUrls}
           snapshotSavedAt={snapshotSavedAt}
           isConnected={isConnected}
+          linkStatus={linkStatus}
           refreshing={refreshing}
           onRefresh={() => (transport ? void bootstrap(transport) : void connect(pairing))}
           onOpenAgent={(id) => setOpenAgentId(id)}
@@ -640,6 +660,7 @@ export function App() {
         <StatusView
           pairing={pairingRef.current ?? pairing}
           connection={connection}
+          linkStatus={linkStatus}
           hubInfo={hubInfo}
           profile={profile}
           nodes={nodes}
