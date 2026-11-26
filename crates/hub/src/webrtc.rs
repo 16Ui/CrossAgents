@@ -67,14 +67,18 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Grace period after ICE disconnects before tearing down the session.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 
-/// Time budget for domestic STUN server-reflexive discovery.
-const STUN_TIMEOUT: Duration = Duration::from_millis(450);
+/// Time budget for STUN server-reflexive discovery.
+const STUN_TIMEOUT: Duration = Duration::from_millis(650);
 
-/// Domestic-friendly STUN servers (tried in parallel; first valid reply wins).
+/// Time budget for resolving LAN mDNS `.local` ICE candidates emitted by Safari/Chrome.
+const MDNS_TIMEOUT: Duration = Duration::from_millis(450);
+
+/// Verified dual-stack IPv4 + IPv6 STUN servers reachable from China Telecom/Unicom/Mobile
+/// without VPN (tried in parallel; first valid reply wins).
 const STUN_SERVERS: &[&str] = &[
-    "stun.qq.com:3478",
-    "stun.miwifi.com:3478",
     "stun.cloudflare.com:3478",
+    "stun.nextcloud.com:443",
+    "stun.hot-chilli.net:3478",
 ];
 
 /// RFC 5389 STUN magic cookie.
@@ -91,6 +95,10 @@ pub struct OfferResponse {
     /// Human-readable summary of local candidate kinds advertised in the SDP answer, e.g.
     /// `["host/ipv4", "host/ipv6", "srflx/ipv4"]` for client diagnostics.
     pub candidates: Vec<String>,
+    /// Summary of remote candidate kinds accepted from the client's SDP offer (including
+    /// any LAN mDNS `.local` hostnames resolved by the hub).
+    #[serde(default)]
+    pub remote_candidates: Vec<String>,
 }
 
 struct SessionEntry {
@@ -181,7 +189,12 @@ async fn handle_offer(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
 
-    let offer = SdpOffer::from_sdp_string(&req.sdp)
+    // Resolve any RFC 6762 mDNS `.local` candidates emitted by Safari/Chrome on LAN into real
+    // IPv4/IPv6 addresses so Full-ICE can send outbound UDP probes (which also punch stateful
+    // pinholes through Windows Defender Firewall without needing manual inbound firewall rules).
+    let (resolved_sdp, remote_summary) = resolve_mdns_candidates_in_sdp(&req.sdp).await;
+
+    let offer = SdpOffer::from_sdp_string(&resolved_sdp)
         .map_err(|err| AppError::bad_request(format!("invalid WebRTC SDP offer: {err}")))?;
 
     let device_cancel = match &grant {
@@ -231,7 +244,8 @@ async fn handle_offer(
 
     tracing::info!(
         session = session_id,
-        candidates = ?summary,
+        local = ?summary,
+        remote = ?remote_summary,
         "webrtc: accepted offer"
     );
 
@@ -242,6 +256,7 @@ async fn handle_offer(
     Ok(Json(OfferResponse {
         sdp: answer_sdp,
         candidates: summary,
+        remote_candidates: remote_summary,
     }))
 }
 
@@ -314,11 +329,120 @@ async fn gather_sockets_and_candidates(enable_stun: bool) -> Gathered {
     }
 }
 
+/// Resolves RFC 6762 `.local` mDNS hostnames in SDP `a=candidate:` lines via OS mDNS
+/// (`tokio::net::lookup_host`) so `str0m` can send outbound ICE connectivity checks directly
+/// to Safari/Chrome peers on the same LAN. Also returns a diagnostic summary of remote
+/// candidate kinds present in the offer.
+async fn resolve_mdns_candidates_in_sdp(sdp: &str) -> (String, Vec<String>) {
+    // Collect unique `.local` hostnames first and resolve them in parallel.
+    let mut mdns_hosts: Vec<String> = Vec::new();
+    let mut seen_hosts: HashSet<String> = HashSet::new();
+    for line in sdp.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if let Some(rest) = trimmed.strip_prefix("a=candidate:") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let addr = parts[4];
+                if addr.ends_with(".local") && seen_hosts.insert(addr.to_owned()) {
+                    mdns_hosts.push(addr.to_owned());
+                }
+            }
+        }
+    }
+
+    let mut resolved_map: HashMap<String, Vec<IpAddr>> = HashMap::new();
+    if !mdns_hosts.is_empty() {
+        let futs = mdns_hosts.into_iter().map(|host| async move {
+            let ips = tokio::time::timeout(
+                MDNS_TIMEOUT,
+                tokio::net::lookup_host((host.as_str(), 0u16)),
+            )
+            .await
+            .ok()
+            .and_then(|res| res.ok())
+            .map(|iter| {
+                let mut out = Vec::new();
+                let mut seen = HashSet::new();
+                for sa in iter {
+                    let ip = sa.ip();
+                    let ok = match ip {
+                        IpAddr::V4(v4) => is_usable_ipv4(v4),
+                        IpAddr::V6(v6) => is_global_unicast_ipv6(v6),
+                    };
+                    if ok && seen.insert(ip) {
+                        out.push(ip);
+                    }
+                }
+                out
+            })
+            .unwrap_or_default();
+            (host, ips)
+        });
+        for (host, ips) in futures::future::join_all(futs).await {
+            if !ips.is_empty() {
+                resolved_map.insert(host, ips);
+            }
+        }
+    }
+
+    let line_ending = if sdp.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut summary: Vec<String> = Vec::new();
+
+    for line in sdp.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if let Some(rest) = trimmed.strip_prefix("a=candidate:") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 8 {
+                let proto = parts[2].to_ascii_lowercase();
+                let addr = parts[4];
+                let kind = parts[7];
+                if proto != "udp" {
+                    out_lines.push(trimmed.to_owned());
+                    continue;
+                }
+                if addr.ends_with(".local") {
+                    if let Some(ips) = resolved_map.get(addr) {
+                        for ip in ips {
+                            let mut rewritten = parts.clone();
+                            let ip_str = ip.to_string();
+                            rewritten[4] = &ip_str;
+                            out_lines.push(format!("a=candidate:{}", rewritten.join(" ")));
+                            summary.push(format!(
+                                "mdns->{}",
+                                if ip.is_ipv6() { "ipv6" } else { "ipv4" }
+                            ));
+                        }
+                    } else {
+                        summary.push("mdns/unresolved".to_owned());
+                        out_lines.push(trimmed.to_owned());
+                    }
+                    continue;
+                } else if let Ok(ip) = addr.parse::<IpAddr>() {
+                    summary.push(format!(
+                        "{kind}/{}",
+                        if ip.is_ipv6() { "ipv6" } else { "ipv4" }
+                    ));
+                }
+            }
+        }
+        out_lines.push(trimmed.to_owned());
+    }
+
+    let mut rebuilt = out_lines.join(line_ending);
+    if sdp.ends_with('\n') {
+        rebuilt.push_str(line_ending);
+    }
+    (rebuilt, summary)
+}
+
 /// Returns prioritized local IPv4 (up to `MAX_V4_SOCKETS`) and global IPv6 (up to
 /// `MAX_V6_SOCKETS`) addresses for ICE host candidates.
 fn select_local_ips() -> Vec<IpAddr> {
-    let mut v4: Vec<(u8, Ipv4Addr)> = Vec::new();
-    let mut v6: Vec<(u8, Ipv6Addr)> = Vec::new();
+    let mut phys_v4: Vec<(u8, Ipv4Addr)> = Vec::new();
+    let mut virt_v4: Vec<(u8, Ipv4Addr)> = Vec::new();
+    let mut phys_v6: Vec<(u8, Ipv6Addr)> = Vec::new();
+    let mut virt_v6: Vec<(u8, Ipv6Addr)> = Vec::new();
     let mut seen_v4: HashSet<Ipv4Addr> = HashSet::new();
     let mut seen_v6: HashSet<Ipv6Addr> = HashSet::new();
 
@@ -327,24 +451,32 @@ fn select_local_ips() -> Vec<IpAddr> {
             continue;
         }
         let virtual_nic = is_virtual_interface(&iface);
-        let default_bonus = if iface.default { 0u8 } else { 2u8 };
-        let virt_penalty = if virtual_nic { 4u8 } else { 0u8 };
-        let rank = default_bonus + virt_penalty;
+        let rank = if iface.default { 0u8 } else { 1u8 };
 
         for net in &iface.ipv4 {
             let ip = net.addr();
             if is_usable_ipv4(ip) && seen_v4.insert(ip) {
-                v4.push((rank, ip));
+                if virtual_nic {
+                    virt_v4.push((rank, ip));
+                } else {
+                    phys_v4.push((rank, ip));
+                }
             }
         }
         for net in &iface.ipv6 {
             let ip = net.addr();
             if is_global_unicast_ipv6(ip) && seen_v6.insert(ip) {
-                v6.push((rank, ip));
+                if virtual_nic {
+                    virt_v6.push((rank, ip));
+                } else {
+                    phys_v6.push((rank, ip));
+                }
             }
         }
     }
 
+    let mut v4 = if !phys_v4.is_empty() { phys_v4 } else { virt_v4 };
+    let mut v6 = if !phys_v6.is_empty() { phys_v6 } else { virt_v6 };
     v4.sort_by_key(|(rank, _)| *rank);
     v6.sort_by_key(|(rank, _)| *rank);
 
@@ -697,6 +829,7 @@ async fn run_session(
 
     let mut last_activity = Instant::now();
     let mut disconnected_since: Option<Instant> = None;
+    let mut udp_rx_count: u64 = 0;
 
     // Initial drain immediately kicks off ICE connectivity checks.
     let (transmits, initial_events, mut next_timeout) = match drain_rtc(&mut rtc) {
@@ -772,6 +905,16 @@ async fn run_session(
                 break;
             }
             Some(pkt) = udp_rx.recv() => {
+                udp_rx_count += 1;
+                if udp_rx_count == 1 {
+                    tracing::info!(
+                        session = ctx.id,
+                        source = %pkt.source,
+                        dest = %pkt.destination,
+                        bytes = pkt.data.len(),
+                        "webrtc: first UDP packet received"
+                    );
+                }
                 let Ok(recv) = Receive::new(Protocol::Udp, pkt.source, pkt.destination, &pkt.data) else {
                     continue;
                 };
@@ -919,7 +1062,7 @@ async fn handle_events(
                 tracing::info!(session = ctx.id, "webrtc: DTLS connected");
             }
             Event::IceConnectionStateChange(state) => {
-                tracing::debug!(session = ctx.id, ?state, "webrtc: ICE state");
+                tracing::info!(session = ctx.id, ?state, "webrtc: ICE state");
                 match state {
                     IceConnectionState::Connected | IceConnectionState::Completed => {
                         *disconnected_since = None;
@@ -1457,6 +1600,20 @@ mod tests {
         assert!(!is_global_unicast_ipv6("fe80::1".parse().unwrap()));
         assert!(!is_global_unicast_ipv6("fd00::1".parse().unwrap()));
         assert!(!is_global_unicast_ipv6("::1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn summarizes_remote_sdp_candidates_and_handles_mdns() {
+        let sdp = "v=0\r\n\
+a=candidate:1 1 udp 2122260223 192.168.1.9 50000 typ host\r\n\
+a=candidate:2 1 udp 1686052607 240e:3bd::9 50001 typ srflx raddr 0.0.0.0 rport 0\r\n\
+a=candidate:3 1 udp 2122194687 nonexistent-test-host-xyz.local 50002 typ host\r\n";
+        let (rebuilt, summary) = resolve_mdns_candidates_in_sdp(sdp).await;
+        assert!(rebuilt.contains("192.168.1.9 50000"));
+        assert!(rebuilt.contains("240e:3bd::9 50001"));
+        assert!(summary.contains(&"host/ipv4".to_owned()));
+        assert!(summary.contains(&"srflx/ipv6".to_owned()));
+        assert!(summary.contains(&"mdns/unresolved".to_owned()));
     }
 
     /// End-to-end real UDP `str0m` client ↔ real `crossagents-hub` `POST /v1/link/webrtc/offer`

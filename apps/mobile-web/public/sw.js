@@ -3,14 +3,22 @@
 // 2. Receives free Web Push (VAPID) notifications from the CrossAgents Hub and shows a
 //    privacy-safe native iOS lock-screen alert.
 
-const CACHE_NAME = "crossagents-mobile-v6";
+const CACHE_NAME = "crossagents-mobile-v7";
 const SHELL_URLS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(SHELL_URLS).catch(() => {}))
+      .then((cache) =>
+        Promise.all(
+          SHELL_URLS.map((u) =>
+            fetch(new Request(u, { cache: "no-cache" }))
+              .then((res) => (res.ok ? cache.put(u, res) : undefined))
+              .catch(() => {}),
+          ),
+        ),
+      )
       .then(() => self.skipWaiting()),
   );
 });
@@ -30,13 +38,16 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // Navigation requests: network-first so new deployments appear immediately, falling back to cache.
+  // Navigation requests: bypass HTTP disk cache (GitHub Pages sends max-age=600) so new
+  // deployments appear immediately on reopen, falling back to SW cache only when offline.
   if (req.mode === "navigate") {
     event.respondWith(
-      fetch(req)
+      fetch(new Request(req, { cache: "no-cache" }))
         .then((res) => {
-          const clone = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", clone)).catch(() => {});
+          if (res.ok) {
+            const clone = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", clone)).catch(() => {});
+          }
           return res;
         })
         .catch(() => caches.match("./index.html")),

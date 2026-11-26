@@ -51,12 +51,46 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer | null): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+export const PWA_BUILD_LABEL = "v7";
+
+let swReloadWired = false;
+
 export async function registerServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (!("serviceWorker" in navigator)) return null;
   try {
-    return await navigator.serviceWorker.register("./sw.js", { scope: "./" });
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    if (!swReloadWired) {
+      swReloadWired = true;
+      let reloading = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (!hadController || reloading) return;
+        reloading = true;
+        window.location.reload();
+      });
+    }
+    const reg = await navigator.serviceWorker.register("./sw.js", {
+      scope: "./",
+      updateViaCache: "none",
+    });
+    void reg.update().catch(() => {});
+    return reg;
   } catch {
     return null;
+  }
+}
+
+export async function forceRefreshPwa(): Promise<void> {
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration("./");
+      if (reg) await reg.update().catch(() => {});
+    }
+  } finally {
+    window.location.reload();
   }
 }
 

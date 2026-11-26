@@ -379,6 +379,13 @@ a {
   flex: none;
 }
 
+.p2p-inline-badge.muted {
+  background: var(--surface-sunk);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
 .icon-btn {
   width: 34px;
   height: 34px;

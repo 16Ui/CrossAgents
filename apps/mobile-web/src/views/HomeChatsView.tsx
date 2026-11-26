@@ -312,11 +312,15 @@ export function HomeChatsView({
             ) : (
               <div className="nav-subtitle">
                 <span>{hubInfo?.machine?.hostname || fallbackHost || "中心在线"}</span>
-                {isConnected && linkStatus?.kind === "p2p" && (
+                {isConnected && linkStatus?.kind === "p2p" ? (
                   <span className="p2p-inline-badge">
                     P2P{linkStatus.p2pInfo && linkStatus.p2pInfo.rttMs > 0 ? ` · ${linkStatus.p2pInfo.rttMs}ms` : ""}
                   </span>
-                )}
+                ) : isConnected && linkStatus?.p2pState === "connecting" ? (
+                  <span className="p2p-inline-badge muted">直连中…</span>
+                ) : isConnected && linkStatus?.kind === "relay" ? (
+                  <span className="p2p-inline-badge muted">中继</span>
+                ) : null}
               </div>
             )}
           </div>

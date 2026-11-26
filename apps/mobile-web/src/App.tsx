@@ -515,6 +515,7 @@ export function App() {
   useEffect(() => {
     const onWake = () => {
       if (document.visibilityState === "hidden") return;
+      void registerServiceWorker();
       const rec = pairingRef.current;
       if (!rec) return;
       const cur = transportRef.current;

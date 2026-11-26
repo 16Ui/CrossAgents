@@ -3,18 +3,14 @@ import { TransportError, type EventHandle, type HubTransport, type HttpReply } f
 export const WEBRTC_CHANNEL_LABEL = "crossagents-rpc";
 
 const ICE_SERVERS: RTCIceServer[] = [
-  {
-    urls: [
-      "stun:stun.qq.com:3478",
-      "stun:stun.miwifi.com:3478",
-      "stun:stun.cloudflare.com:3478",
-    ],
-  },
+  { urls: "stun:stun.cloudflare.com:3478" },
+  { urls: "stun:stun.nextcloud.com:443" },
+  { urls: "stun:stun.hot-chilli.net:3478" },
 ];
 
-const ICE_GATHER_HARD_TIMEOUT_MS = 1800;
-const ICE_GATHER_SETTLE_MS = 450;
-const CHANNEL_OPEN_TIMEOUT_MS = 6500;
+const ICE_GATHER_HARD_TIMEOUT_MS = 2600;
+const ICE_GATHER_SETTLE_MS = 650;
+const CHANNEL_OPEN_TIMEOUT_MS = 7000;
 const REQUEST_TIMEOUT_MS = 35_000;
 const KEEPALIVE_INTERVAL_MS = 25_000;
 const KEEPALIVE_TIMEOUT_MS = 4500;
@@ -48,6 +44,7 @@ interface ActiveSse {
 interface OfferReply {
   sdp: string;
   candidates?: string[];
+  remote_candidates?: string[];
 }
 
 type ServerFrame =
@@ -78,6 +75,8 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
   return new Promise((resolve) => {
     let settled = false;
     let settleTimer: number | null = null;
+    let hasV4 = false;
+    let hasV6 = false;
     const hardTimer = window.setTimeout(finish, ICE_GATHER_HARD_TIMEOUT_MS);
 
     function finish() {
@@ -100,11 +99,19 @@ function waitForIceGathering(pc: RTCPeerConnection): Promise<void> {
         return;
       }
       const line = ev.candidate.candidate || "";
-      const isGood =
-        line.includes(" typ srflx ") ||
-        (line.includes(" typ host ") && !line.includes(".local") && !line.includes("fe80:"));
-      if (isGood && settleTimer === null) {
-        settleTimer = window.setTimeout(finish, ICE_GATHER_SETTLE_MS);
+      const parts = line.split(/\s+/);
+      const addr = parts[4] || "";
+      const isNonMdns = Boolean(addr) && !addr.endsWith(".local") && !addr.startsWith("fe80:");
+      if (isNonMdns) {
+        if (addr.includes(":")) hasV6 = true;
+        else if (addr.includes(".")) hasV4 = true;
+        if (hasV4 && hasV6) {
+          // Got both IPv4 and IPv6 routable candidates — settle right away.
+          if (settleTimer !== null) window.clearTimeout(settleTimer);
+          settleTimer = window.setTimeout(finish, 180);
+        } else if (settleTimer === null) {
+          settleTimer = window.setTimeout(finish, ICE_GATHER_SETTLE_MS);
+        }
       }
     }
 
@@ -294,8 +301,11 @@ export class WebRtcTransport implements HubTransport {
           return;
         }
         let settled = false;
+        const remoteTag = answer.remote_candidates?.length
+          ? `（已识别候选：${answer.remote_candidates.join(", ")}）`
+          : "";
         const timer = window.setTimeout(() => {
-          fail(new TransportError("transport", "P2P NAT 打洞超时，已保持中继"));
+          fail(new TransportError("transport", `P2P 打洞超时，已保持中继${remoteTag}`));
         }, CHANNEL_OPEN_TIMEOUT_MS);
 
         function cleanup() {

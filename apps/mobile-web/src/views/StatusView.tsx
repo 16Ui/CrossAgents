@@ -13,8 +13,10 @@ import {
 import {
   disableWebPush,
   enableWebPush,
+  forceRefreshPwa,
   getCurrentPushEndpoint,
   getPushSupport,
+  PWA_BUILD_LABEL,
   sendTestPush,
 } from "../push";
 import { nodeDisplayName } from "../store";
@@ -158,9 +160,18 @@ export function StatusView({
       <div className="nav-bar">
         <div className="nav-title-wrap">
           <h1 className="nav-title">概览</h1>
-          <div className="nav-subtitle">推送、外观、节点与订阅额度</div>
+          <div className="nav-subtitle">推送、外观、节点与额度 · PWA {PWA_BUILD_LABEL}</div>
         </div>
-        <button type="button" className="icon-btn" onClick={onRefresh} title="刷新">
+        <button
+          type="button"
+          className="secondary-btn"
+          style={{ height: 30, padding: "0 10px", fontSize: 12 }}
+          onClick={() => void forceRefreshPwa()}
+          title="清除缓存并强制检查前端更新"
+        >
+          检查更新
+        </button>
+        <button type="button" className="icon-btn" onClick={onRefresh} title="刷新数据">
           <RefreshCw size={16} />
         </button>
       </div>
