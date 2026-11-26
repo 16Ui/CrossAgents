@@ -1,5 +1,7 @@
 import type { InvitePreview, PairingRecord } from "./types";
 import { WebRtcTransport, type WebRtcInfo } from "./webrtc";
+import * as wasmBindings from "./wasm-pkg/crossagents_link_wasm.js";
+import wasmAssetUrl from "./wasm-pkg/crossagents_link_wasm_bg.wasm?url";
 
 export type { WebRtcInfo };
 
@@ -184,10 +186,17 @@ export async function runRelayDiagnostics(preferredRelay?: string | null): Promi
 }
 
 // ---------------------------------------------------------------------------
-// Lazy loader for the compiled Rust WASM `crossagents-link-wasm` module.
+// Direct page-context loader for `crossagents-link-wasm`:
+// - Bundled JS bindings avoid Safari dynamic-import failure caching.
+// - `.wasm` binary bypasses Service Worker `FetchEvent.respondWith` completely (preventing iOS
+//   Safari's ~30s SW fetch timeout / `res.clone()` tee bug -> "FetchEvent.respondWith received
+//   an error: TypeError: Load failed"), and instead downloads directly with progress + 3x retry
+//   and persists the completed bytes in CacheStorage (`crossagents-mobile-assets-v1`).
+
+const WASM_CACHE_NAME = "crossagents-mobile-assets-v1";
 
 interface WasmLinkModule {
-  default: () => Promise<unknown>;
+  default: (moduleOrPath?: unknown) => Promise<unknown>;
   decode_invite(code: string): string;
   redeem_invite(code: string, deviceName: string, os: string): Promise<string>;
   WasmLinkSession: {
@@ -209,27 +218,155 @@ interface WasmLinkSessionInstance {
 
 let wasmPromise: Promise<WasmLinkModule> | null = null;
 let wasmReady = false;
+const wasmStageListeners = new Set<(detail: string) => void>();
+
+function notifyWasmStage(detail: string) {
+  for (const cb of wasmStageListeners) {
+    try {
+      cb(detail);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+async function fetchWasmBytesDirect(): Promise<Uint8Array> {
+  const absUrl = new URL(wasmAssetUrl, window.location.href).toString();
+
+  // 1. Check CacheStorage directly first (instant ~45ms cold-start once cached).
+  if ("caches" in window) {
+    try {
+      const cache = await caches.open(WASM_CACHE_NAME);
+      const cached = await cache.match(absUrl);
+      if (cached && cached.ok) {
+        const buf = await cached.arrayBuffer();
+        if (buf.byteLength > 100_000) {
+          return new Uint8Array(buf);
+        }
+      }
+    } catch {
+      // ignore cache read errors
+    }
+  }
+
+  // 2. Download directly in page context with live progress & automatic retries.
+  let lastErr: unknown;
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      notifyWasmStage(
+        attempt === 1
+          ? "正在下载加密内核（首次更新后将本地缓存）…"
+          : `正在重试下载加密内核（第 ${attempt}/${maxAttempts} 次）…`,
+      );
+      const res = await fetch(absUrl, {
+        cache: attempt === 1 ? "default" : "no-store",
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+
+      let bytes: Uint8Array;
+      if (res.body && typeof res.body.getReader === "function") {
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        const contentEncoding = res.headers.get("content-encoding");
+        const clHeader = Number(res.headers.get("content-length") || "0");
+        const exactTotal = !contentEncoding && clHeader > 0 ? clHeader : 0;
+        let lastUi = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) {
+            chunks.push(value);
+            received += value.byteLength;
+            const now = performance.now();
+            if (now - lastUi >= 250) {
+              lastUi = now;
+              if (exactTotal > 0 && received <= exactTotal) {
+                const pct = Math.min(99, Math.round((received / exactTotal) * 100));
+                notifyWasmStage(`正在下载加密内核 ${pct}%…`);
+              } else {
+                notifyWasmStage(`正在下载加密内核（已收 ${(received / 1024 / 1024).toFixed(1)} MB）…`);
+              }
+            }
+          }
+        }
+        bytes = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        bytes = new Uint8Array(await res.arrayBuffer());
+      }
+
+      if (bytes.byteLength < 100_000) {
+        throw new Error(`加密内核文件不完整（仅 ${bytes.byteLength} 字节）`);
+      }
+
+      // 3. Persist completed bytes in CacheStorage and prune superseded `.wasm` files.
+      if ("caches" in window) {
+        try {
+          const cache = await caches.open(WASM_CACHE_NAME);
+          const keys = await cache.keys();
+          await Promise.all(
+            keys
+              .filter((k) => k.url.endsWith(".wasm") && k.url !== absUrl)
+              .map((k) => cache.delete(k)),
+          );
+          await cache.put(
+            absUrl,
+            new Response(bytes.slice().buffer, {
+              status: 200,
+              headers: { "Content-Type": "application/wasm" },
+            }),
+          );
+        } catch {
+          // ignore storage quota errors; in-memory instantiation still works
+        }
+      }
+
+      return bytes;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => window.setTimeout(r, 800 * attempt));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 async function loadWasm(onStage?: (detail: string) => void): Promise<WasmLinkModule> {
-  if (!wasmReady) {
-    onStage?.("正在下载加密内核（首次更新后会自动缓存）…");
+  if (wasmReady) {
+    return wasmBindings as unknown as WasmLinkModule;
   }
-  if (!wasmPromise) {
-    wasmPromise = (async () => {
-      const mod = (await import("./wasm-pkg/crossagents_link_wasm.js")) as unknown as WasmLinkModule;
-      await mod.default();
-      wasmReady = true;
-      return mod;
-    })().catch((err) => {
-      wasmPromise = null;
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new TransportError(
-        "relay_unreachable",
-        `加密内核加载失败（GitHub Pages 下载中断或较慢，请点重试）：${msg}`,
-      );
-    });
+  if (onStage) wasmStageListeners.add(onStage);
+  try {
+    if (!wasmPromise) {
+      wasmPromise = (async () => {
+        const mod = wasmBindings as unknown as WasmLinkModule;
+        const bytes = await fetchWasmBytesDirect();
+        notifyWasmStage("正在初始化加密内核…");
+        await mod.default({ module_or_path: bytes });
+        wasmReady = true;
+        return mod;
+      })().catch((err) => {
+        wasmPromise = null;
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new TransportError(
+          "relay_unreachable",
+          `加密内核下载失败（GitHub Pages 网络中断或过慢，可稍等重试或临时开代理缓存一次）：${msg}`,
+        );
+      });
+    }
+    return await wasmPromise;
+  } finally {
+    if (onStage) wasmStageListeners.delete(onStage);
   }
-  return wasmPromise;
 }
 
 function parseWasmError(err: unknown): TransportError {

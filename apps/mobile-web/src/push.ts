@@ -51,7 +51,7 @@ function arrayBufferToBase64Url(buffer: ArrayBuffer | null): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export const PWA_BUILD_LABEL = "v10";
+export const PWA_BUILD_LABEL = "v11";
 
 let swReloadWired = false;
 
@@ -87,7 +87,23 @@ export async function forceRefreshPwa(): Promise<void> {
     }
     if ("serviceWorker" in navigator) {
       const reg = await navigator.serviceWorker.getRegistration("./");
-      if (reg) await reg.update().catch(() => {});
+      if (reg) {
+        await reg.update().catch(() => {});
+        // Give a newly discovered SW up to 2.5s to install & skipWaiting before reloading.
+        const installing = reg.installing || reg.waiting;
+        if (installing) {
+          await new Promise<void>((resolve) => {
+            const timer = window.setTimeout(resolve, 2500);
+            const onChange = () => {
+              if (installing.state === "activated" || installing.state === "redundant") {
+                window.clearTimeout(timer);
+                resolve();
+              }
+            };
+            installing.addEventListener("statechange", onChange);
+          });
+        }
+      }
     }
   } finally {
     window.location.reload();
