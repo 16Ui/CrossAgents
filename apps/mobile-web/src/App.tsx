@@ -428,7 +428,11 @@ export function App() {
       });
 
       try {
-        const t = await connectTransport(record);
+        const t = await connectTransport(record, (detail) => {
+          if (epoch === connectEpochRef.current) {
+            setConnection({ kind: "connecting", detail });
+          }
+        });
         if (epoch !== connectEpochRef.current) {
           await t.close();
           return;

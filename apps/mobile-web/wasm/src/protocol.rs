@@ -17,8 +17,8 @@ pub const CODE_PREFIX: &str = "ca1-";
 /// accept the clean hostname identically and route strictly by `EndpointId`.
 pub const DEFAULT_N0_RELAYS_NO_DOT: &[&str] = &[
     "https://usw1-1.relay.n0.iroh.link/",
-    "https://aps1-1.relay.n0.iroh.link/",
     "https://euc1-1.relay.n0.iroh.link/",
+    "https://aps1-1.relay.n0.iroh.link/",
     "https://use1-1.relay.n0.iroh.link/",
 ];
 

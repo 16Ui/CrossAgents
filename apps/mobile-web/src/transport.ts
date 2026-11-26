@@ -208,16 +208,25 @@ interface WasmLinkSessionInstance {
 }
 
 let wasmPromise: Promise<WasmLinkModule> | null = null;
+let wasmReady = false;
 
-async function loadWasm(): Promise<WasmLinkModule> {
+async function loadWasm(onStage?: (detail: string) => void): Promise<WasmLinkModule> {
+  if (!wasmReady) {
+    onStage?.("正在下载加密内核（首次更新后会自动缓存）…");
+  }
   if (!wasmPromise) {
     wasmPromise = (async () => {
       const mod = (await import("./wasm-pkg/crossagents_link_wasm.js")) as unknown as WasmLinkModule;
       await mod.default();
+      wasmReady = true;
       return mod;
     })().catch((err) => {
       wasmPromise = null;
-      throw err;
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new TransportError(
+        "relay_unreachable",
+        `加密内核加载失败（GitHub Pages 下载中断或较慢，请点重试）：${msg}`,
+      );
     });
   }
   return wasmPromise;
@@ -336,11 +345,15 @@ export class IrohWasmTransport implements HubTransport {
     this.connectedRelay = session.connected_relay();
   }
 
-  static async connect(record: PairingRecord): Promise<IrohWasmTransport> {
+  static async connect(
+    record: PairingRecord,
+    onStage?: (detail: string) => void,
+  ): Promise<IrohWasmTransport> {
     if (!record.endpoint) {
       throw new TransportError("bad_config", "缺少中心公钥配置");
     }
-    const mod = await loadWasm();
+    const mod = await loadWasm(onStage);
+    onStage?.("正在经加密中继连接中心…");
     const cfg = JSON.stringify({
       endpoint: record.endpoint,
       relay: record.relay ?? null,
@@ -881,10 +894,13 @@ export class HybridTransport implements HubTransport {
   }
 }
 
-export async function connectTransport(record: PairingRecord): Promise<HubTransport> {
+export async function connectTransport(
+  record: PairingRecord,
+  onStage?: (detail: string) => void,
+): Promise<HubTransport> {
   if (record.mode === "direct") {
     return new DirectHttpTransport(record);
   }
-  const iroh = await IrohWasmTransport.connect(record);
+  const iroh = await IrohWasmTransport.connect(record, onStage);
   return new HybridTransport(iroh);
 }

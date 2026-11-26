@@ -3,13 +3,16 @@
 // 2. Receives free Web Push (VAPID) notifications from the CrossAgents Hub and shows a
 //    privacy-safe native iOS lock-screen alert.
 
-const CACHE_NAME = "crossagents-mobile-v9";
+const SHELL_CACHE = "crossagents-mobile-shell-v10";
+// Content-hashed immutable assets (/assets/*.js, *.css, *.wasm) live in a dedicated cache so
+// UI/JS-only updates never evict the cached WASM binary and force a slow re-download.
+const ASSET_CACHE = "crossagents-mobile-assets-v1";
 const SHELL_URLS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
-      .open(CACHE_NAME)
+      .open(SHELL_CACHE)
       .then((cache) =>
         Promise.all(
           SHELL_URLS.map((u) =>
@@ -27,7 +30,13 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((k) => k !== SHELL_CACHE && k !== ASSET_CACHE)
+            .map((k) => caches.delete(k)),
+        ),
+      )
       .then(() => self.clients.claim()),
   );
 });
@@ -46,7 +55,7 @@ self.addEventListener("fetch", (event) => {
         .then((res) => {
           if (res.ok) {
             const clone = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", clone)).catch(() => {});
+            caches.open(SHELL_CACHE).then((cache) => cache.put("./index.html", clone)).catch(() => {});
           }
           return res;
         })
@@ -55,19 +64,21 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Hashed static assets & WASM: cache-first for instant cold-start.
+  // Hashed static assets & WASM: cache-first in persistent ASSET_CACHE for instant cold-start.
   if (url.pathname.includes("/assets/") || url.pathname.endsWith(".wasm") || url.pathname.endsWith(".png")) {
     event.respondWith(
-      caches.match(req).then((cached) => {
-        if (cached) return cached;
-        return fetch(req).then((res) => {
-          if (res.ok) {
-            const clone = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone)).catch(() => {});
-          }
-          return res;
-        });
-      }),
+      caches.open(ASSET_CACHE).then((cache) =>
+        cache.match(req).then((cached) => {
+          if (cached) return cached;
+          return fetch(req).then((res) => {
+            if (res.ok) {
+              const clone = res.clone();
+              cache.put(req, clone).catch(() => {});
+            }
+            return res;
+          });
+        }),
+      ),
     );
   }
 });

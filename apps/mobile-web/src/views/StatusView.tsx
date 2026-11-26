@@ -350,6 +350,20 @@ export function StatusView({
             </span>
           </div>
 
+          {connection.kind === "connecting" && connection.detail && (
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+              {connection.detail}
+            </div>
+          )}
+          {(connection.kind === "hub_offline" ||
+            connection.kind === "relay_unreachable" ||
+            connection.kind === "revoked") &&
+            connection.message && (
+              <div className="error-box" style={{ fontSize: 12, lineHeight: 1.5, wordBreak: "break-word" }}>
+                {connection.message}
+              </div>
+            )}
+
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button type="button" className="secondary-btn" style={{ flex: 1 }} onClick={onReconnect}>
               <RefreshCw size={14} />

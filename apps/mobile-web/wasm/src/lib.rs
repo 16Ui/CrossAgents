@@ -31,10 +31,14 @@ mod wasm_api {
     /// relay WebSocket finishes BEFORE the QUIC handshake timer begins.
     const ONLINE_WAIT_PRIMARY: Duration = Duration::from_millis(5_500);
     const ONLINE_WAIT_FALLBACK: Duration = Duration::from_millis(4_500);
-    /// Happy-Eyeballs head start given to the last-known relay before racing the remaining public
-    /// n0 relays in parallel (prevents an 18s serial stall whenever the hub switches home relays
-    /// while the phone is locked).
-    const PRIMARY_HEAD_START: Duration = Duration::from_millis(3_000);
+    /// Happy-Eyeballs head start given to the last-known relay before racing the top backup
+    /// n0 relays in parallel. High enough (4.5s) that a healthy primary relay (~3.5-4s) finishes
+    /// cleanly with only 1 Endpoint in iOS Safari, yet fast enough to catch a hub relay switch
+    /// (`usw1-1 <-> euc1-1`) without waiting out the full 18s serial timeout.
+    const PRIMARY_HEAD_START: Duration = Duration::from_millis(4_500);
+    /// Maximum backup relays launched in the initial Happy-Eyeballs fan-out (caps peak concurrent
+    /// `iroh::Endpoint` instances at 3 in single-threaded mobile Safari WASM).
+    const FALLBACK_WAVE_SIZE: usize = 2;
     /// Maximum time allowed for the QUIC handshake on a single relay (after `online()`).
     /// Bounds stale-relay detection so fallback across n0 relays completes promptly instead of
     /// waiting out QUIC's full 30s idle timeout.
@@ -250,11 +254,13 @@ mod wasm_api {
             Some(cancel_rx.clone()),
         ));
 
-        let mut launched_rest = custom_relay || rest.is_empty();
+        let mut launched_wave1 = custom_relay || rest.is_empty();
+        let mut launched_tail = custom_relay || rest.len() <= FALLBACK_WAVE_SIZE;
+        let (wave1, tail) = rest.split_at(rest.len().min(FALLBACK_WAVE_SIZE));
         let mut failures = Vec::new();
 
         while !race.is_empty() {
-            let next_res = if !launched_rest {
+            let next_res = if !launched_wave1 {
                 tokio::select! {
                     biased;
                     res = race.next() => Some(res),
@@ -266,9 +272,9 @@ mod wasm_api {
 
             match next_res {
                 None => {
-                    // Primary relay is taking longer than expected: fan out to backup relays now.
-                    launched_rest = true;
-                    for relay in rest {
+                    // Primary relay is taking longer than expected: fan out to top backup relays.
+                    launched_wave1 = true;
+                    for relay in wave1 {
                         race.push(dial_one_relay(
                             endpoint_id,
                             relay.clone(),
@@ -295,9 +301,19 @@ mod wasm_api {
                     if err.connect_error != "cancelled" {
                         failures.push(err);
                     }
-                    if !launched_rest {
-                        launched_rest = true;
-                        for relay in rest {
+                    if !launched_wave1 {
+                        launched_wave1 = true;
+                        for relay in wave1 {
+                            race.push(dial_one_relay(
+                                endpoint_id,
+                                relay.clone(),
+                                ONLINE_WAIT_FALLBACK,
+                                Some(cancel_rx.clone()),
+                            ));
+                        }
+                    } else if race.is_empty() && !launched_tail {
+                        launched_tail = true;
+                        for relay in tail {
                             race.push(dial_one_relay(
                                 endpoint_id,
                                 relay.clone(),
