@@ -71,7 +71,7 @@ const DISCONNECT_GRACE: Duration = Duration::from_secs(10);
 const STUN_TIMEOUT: Duration = Duration::from_millis(650);
 
 /// Time budget for resolving LAN mDNS `.local` ICE candidates emitted by Safari/Chrome.
-const MDNS_TIMEOUT: Duration = Duration::from_millis(450);
+const MDNS_TIMEOUT: Duration = Duration::from_millis(700);
 
 /// Verified dual-stack IPv4 + IPv6 STUN servers reachable from China Telecom/Unicom/Mobile
 /// without VPN (tried in parallel; first valid reply wins).
@@ -768,8 +768,11 @@ fn drain_rtc(
 }
 
 async fn send_transmits(
+    session_id: u64,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
     transmits: Vec<str0m::net::Transmit>,
+    tx_count: &mut u64,
+    logged_send_err: &mut bool,
 ) {
     for t in transmits {
         let sock = sockets.get(&t.source).or_else(|| {
@@ -779,7 +782,32 @@ async fn send_transmits(
                 .map(|(_, s)| s)
         });
         if let Some(sock) = sock {
-            let _ = sock.send_to(&t.contents, t.destination).await;
+            match sock.send_to(&t.contents, t.destination).await {
+                Ok(_) => {
+                    *tx_count += 1;
+                    if *tx_count == 1 {
+                        tracing::info!(
+                            session = session_id,
+                            source = %t.source,
+                            dest = %t.destination,
+                            bytes = t.contents.len(),
+                            "webrtc: first UDP packet sent"
+                        );
+                    }
+                }
+                Err(err) => {
+                    if !*logged_send_err {
+                        *logged_send_err = true;
+                        tracing::warn!(
+                            session = session_id,
+                            source = %t.source,
+                            dest = %t.destination,
+                            error = %err,
+                            "webrtc: UDP send_to failed"
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -795,6 +823,7 @@ async fn run_session(
         let sock = sock.clone();
         let udp_tx = udp_tx.clone();
         let cancel = ctx.session_cancel.clone();
+        let session_id = ctx.id;
         recv_tasks.push(tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             loop {
@@ -812,7 +841,20 @@ async fn run_session(
                                     // Drop packet under extreme UDP burst rather than blocking recv.
                                 }
                             }
-                            Err(_) => break,
+                            Err(err) => {
+                                // CRITICAL on Windows Winsock: any prior `send_to` to an unreachable
+                                // ICE candidate returns ICMP Port Unreachable as WSAECONNRESET (10054)
+                                // on the next `recv_from`. Never break the recv loop on UDP errors!
+                                tracing::debug!(
+                                    session = session_id,
+                                    %local_addr,
+                                    error = %err,
+                                    "webrtc: ignoring transient UDP recv_from error"
+                                );
+                                if err.kind() == std::io::ErrorKind::InvalidInput {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -830,17 +872,26 @@ async fn run_session(
     let mut last_activity = Instant::now();
     let mut disconnected_since: Option<Instant> = None;
     let mut udp_rx_count: u64 = 0;
+    let mut udp_tx_count: u64 = 0;
+    let mut logged_send_err = false;
 
     // Initial drain immediately kicks off ICE connectivity checks.
     let (transmits, initial_events, mut next_timeout) = match drain_rtc(&mut rtc) {
         Ok(res) => res,
         Err(err) => {
             tracing::warn!(session = ctx.id, error = %err, "webrtc: initial poll failed");
-            cleanup_session(&ctx, recv_tasks, sse_streams).await;
+            cleanup_session(&ctx, recv_tasks, sse_streams, udp_rx_count, udp_tx_count).await;
             return;
         }
     };
-    send_transmits(&sockets, transmits).await;
+    send_transmits(
+        ctx.id,
+        &sockets,
+        transmits,
+        &mut udp_tx_count,
+        &mut logged_send_err,
+    )
+    .await;
     if !handle_events(
         initial_events,
         &mut rtc,
@@ -853,11 +904,13 @@ async fn run_session(
         &mut sse_streams,
         &mut last_activity,
         &mut disconnected_since,
+        &mut udp_tx_count,
+        &mut logged_send_err,
         &ctx,
     )
     .await
     {
-        cleanup_session(&ctx, recv_tasks, sse_streams).await;
+        cleanup_session(&ctx, recv_tasks, sse_streams, udp_rx_count, udp_tx_count).await;
         return;
     }
 
@@ -880,11 +933,11 @@ async fn run_session(
         tokio::select! {
             biased;
             _ = ctx.shutdown.cancelled() => {
-                send_graceful_close(&mut rtc, &sockets).await;
+                send_graceful_close(ctx.id, &mut rtc, &sockets, &mut udp_tx_count, &mut logged_send_err).await;
                 break;
             }
             _ = ctx.session_cancel.cancelled() => {
-                send_graceful_close(&mut rtc, &sockets).await;
+                send_graceful_close(ctx.id, &mut rtc, &sockets, &mut udp_tx_count, &mut logged_send_err).await;
                 break;
             }
             _ = device_cancelled => {
@@ -900,8 +953,18 @@ async fn run_session(
                         out_queue.push_back(json);
                     }
                 }
-                let _ = flush_outbound(&mut rtc, &sockets, &mut next_timeout, rpc_channel, &mut out_queue).await;
-                send_graceful_close(&mut rtc, &sockets).await;
+                let _ = flush_outbound(
+                    ctx.id,
+                    &mut rtc,
+                    &sockets,
+                    &mut next_timeout,
+                    rpc_channel,
+                    &mut out_queue,
+                    &mut udp_tx_count,
+                    &mut logged_send_err,
+                )
+                .await;
+                send_graceful_close(ctx.id, &mut rtc, &sockets, &mut udp_tx_count, &mut logged_send_err).await;
                 break;
             }
             Some(pkt) = udp_rx.recv() => {
@@ -925,7 +988,7 @@ async fn run_session(
                 match drain_rtc(&mut rtc) {
                     Ok((txs, evs, t)) => {
                         next_timeout = t;
-                        send_transmits(&sockets, txs).await;
+                        send_transmits(ctx.id, &sockets, txs, &mut udp_tx_count, &mut logged_send_err).await;
                         if !handle_events(
                             evs,
                             &mut rtc,
@@ -938,6 +1001,8 @@ async fn run_session(
                             &mut sse_streams,
                             &mut last_activity,
                             &mut disconnected_since,
+                            &mut udp_tx_count,
+                            &mut logged_send_err,
                             &ctx,
                         ).await {
                             break;
@@ -958,7 +1023,16 @@ async fn run_session(
                         break;
                     }
                 }
-                if !flush_outbound(&mut rtc, &sockets, &mut next_timeout, rpc_channel, &mut out_queue).await {
+                if !flush_outbound(
+                    ctx.id,
+                    &mut rtc,
+                    &sockets,
+                    &mut next_timeout,
+                    rpc_channel,
+                    &mut out_queue,
+                    &mut udp_tx_count,
+                    &mut logged_send_err,
+                ).await {
                     break;
                 }
             }
@@ -970,7 +1044,7 @@ async fn run_session(
                 match drain_rtc(&mut rtc) {
                     Ok((txs, evs, t)) => {
                         next_timeout = t;
-                        send_transmits(&sockets, txs).await;
+                        send_transmits(ctx.id, &sockets, txs, &mut udp_tx_count, &mut logged_send_err).await;
                         if !handle_events(
                             evs,
                             &mut rtc,
@@ -983,6 +1057,8 @@ async fn run_session(
                             &mut sse_streams,
                             &mut last_activity,
                             &mut disconnected_since,
+                            &mut udp_tx_count,
+                            &mut logged_send_err,
                             &ctx,
                         ).await {
                             break;
@@ -1009,17 +1085,20 @@ async fn run_session(
         }
     }
 
-    cleanup_session(&ctx, recv_tasks, sse_streams).await;
+    cleanup_session(&ctx, recv_tasks, sse_streams, udp_rx_count, udp_tx_count).await;
 }
 
 async fn send_graceful_close(
+    session_id: u64,
     rtc: &mut Rtc,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
+    tx_count: &mut u64,
+    logged_send_err: &mut bool,
 ) {
     if rtc.close().is_ok()
         && let Ok((txs, _, _)) = drain_rtc(rtc)
     {
-        send_transmits(sockets, txs).await;
+        send_transmits(session_id, sockets, txs, tx_count, logged_send_err).await;
     }
 }
 
@@ -1027,6 +1106,8 @@ async fn cleanup_session(
     ctx: &SessionContext,
     recv_tasks: Vec<tokio::task::JoinHandle<()>>,
     sse_streams: HashMap<u64, CancellationToken>,
+    udp_rx_count: u64,
+    udp_tx_count: u64,
 ) {
     ctx.session_cancel.cancel();
     for (_, cancel) in sse_streams {
@@ -1036,7 +1117,12 @@ async fn cleanup_session(
         task.abort();
     }
     ctx.service.unregister(ctx.id).await;
-    tracing::info!(session = ctx.id, "webrtc: session closed");
+    tracing::info!(
+        session = ctx.id,
+        udp_rx = udp_rx_count,
+        udp_tx = udp_tx_count,
+        "webrtc: session closed"
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1052,6 +1138,8 @@ async fn handle_events(
     sse_streams: &mut HashMap<u64, CancellationToken>,
     last_activity: &mut Instant,
     disconnected_since: &mut Option<Instant>,
+    udp_tx_count: &mut u64,
+    logged_send_err: &mut bool,
     ctx: &SessionContext,
 ) -> bool {
     for ev in events {
@@ -1084,18 +1172,40 @@ async fn handle_events(
                     match drain_rtc(rtc) {
                         Ok((txs, _, t)) => {
                             *next_timeout = t;
-                            send_transmits(sockets, txs).await;
+                            send_transmits(ctx.id, sockets, txs, udp_tx_count, logged_send_err)
+                                .await;
                         }
                         Err(_) => return false,
                     }
-                    if !flush_outbound(rtc, sockets, next_timeout, *rpc_channel, out_queue).await {
+                    if !flush_outbound(
+                        ctx.id,
+                        rtc,
+                        sockets,
+                        next_timeout,
+                        *rpc_channel,
+                        out_queue,
+                        udp_tx_count,
+                        logged_send_err,
+                    )
+                    .await
+                    {
                         return false;
                     }
                 }
             }
             Event::ChannelBufferedAmountLow(cid) => {
                 if *rpc_channel == Some(cid)
-                    && !flush_outbound(rtc, sockets, next_timeout, *rpc_channel, out_queue).await
+                    && !flush_outbound(
+                        ctx.id,
+                        rtc,
+                        sockets,
+                        next_timeout,
+                        *rpc_channel,
+                        out_queue,
+                        udp_tx_count,
+                        logged_send_err,
+                    )
+                    .await
                 {
                     return false;
                 }
@@ -1123,12 +1233,16 @@ async fn handle_events(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn flush_outbound(
+    session_id: u64,
     rtc: &mut Rtc,
     sockets: &HashMap<SocketAddr, Arc<UdpSocket>>,
     next_timeout: &mut Instant,
     rpc_channel: Option<ChannelId>,
     out_queue: &mut VecDeque<String>,
+    udp_tx_count: &mut u64,
+    logged_send_err: &mut bool,
 ) -> bool {
     let Some(cid) = rpc_channel else {
         return true;
@@ -1146,7 +1260,8 @@ async fn flush_outbound(
                 match drain_rtc(rtc) {
                     Ok((txs, _, t)) => {
                         *next_timeout = t;
-                        send_transmits(sockets, txs).await;
+                        send_transmits(session_id, sockets, txs, udp_tx_count, logged_send_err)
+                            .await;
                     }
                     Err(_) => return false,
                 }
@@ -1156,7 +1271,8 @@ async fn flush_outbound(
                 match drain_rtc(rtc) {
                     Ok((txs, _, t)) => {
                         *next_timeout = t;
-                        send_transmits(sockets, txs).await;
+                        send_transmits(session_id, sockets, txs, udp_tx_count, logged_send_err)
+                            .await;
                     }
                     Err(_) => return false,
                 }
