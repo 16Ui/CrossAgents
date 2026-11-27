@@ -311,6 +311,10 @@ function UpdateCard() {
       text = `已是最新版本（${at(state.checked_at)} 检查）。`;
       action = check;
       break;
+    case "empty":
+      text = `更新源暂未发布可用版本（${at(state.checked_at)} 检查）。`;
+      action = check;
+      break;
     case "downloading":
       text = `发现 ${state.version}，正在后台下载（${state.percent}%）…`;
       break;
@@ -330,7 +334,7 @@ function UpdateCard() {
           <div className="setting-label">更新</div>
           <div className="setting-hint">{text}</div>
           {installOnQuit && state && state.state !== "manual" && <div className="setting-hint">每 4 小时自动检查一次，也可从托盘菜单检查。</div>}
-          {(state?.state === "manual" || state?.state === "error") && (
+          {(state?.state === "manual" || state?.state === "error" || state?.state === "empty") && (
             <div className="setting-hint">
               <a href="https://github.com/16Ui/CrossAgents/releases" target="_blank" rel="noreferrer">打开 fork 发布页</a>
             </div>

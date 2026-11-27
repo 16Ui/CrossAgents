@@ -54,6 +54,11 @@ export function startUpdates(log: (line: string) => void): Updates {
   autoUpdater.on("update-downloaded", (info) => set({ state: "ready", current, version: info.version }));
   const reportError = (err: unknown) => {
     const message = (err instanceof Error ? err.message : String(err)).split("\n")[0];
+    const code = err instanceof Error && "code" in err ? err.code : undefined;
+    if (code === "ERR_UPDATER_NO_PUBLISHED_VERSIONS" || message === "No published versions on GitHub") {
+      if (state.state !== "empty") set({ state: "empty", current, checked_at: now() });
+      return;
+    }
     if (state.state === "error" && state.message === message) return;
     log(`update failed: ${message}`);
     set({ state: "error", current, message, checked_at: now() });

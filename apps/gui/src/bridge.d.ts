@@ -12,6 +12,7 @@ export type UpdateState =
   | { state: "idle"; current: string }
   | { state: "checking"; current: string }
   | { state: "latest"; current: string; checked_at: string }
+  | { state: "empty"; current: string; checked_at: string }
   | { state: "downloading"; current: string; version: string; percent: number }
   | { state: "ready"; current: string; version: string }
   | { state: "error"; current: string; message: string; checked_at: string };
