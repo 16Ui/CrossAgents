@@ -288,6 +288,7 @@ function UpdateCard() {
   const bridge = window.crossagents?.updates;
   const [state, setState] = useUpdateState();
   if (state === undefined) return null;
+  const installOnQuit = bridge?.installOnQuit ?? false;
   const at = (iso: string) => new Date(iso).toLocaleString("zh-CN", { hour12: false });
   let text: string;
   let action: { label: string; run: () => void } | undefined;
@@ -314,7 +315,7 @@ function UpdateCard() {
       text = `发现 ${state.version}，正在后台下载（${state.percent}%）…`;
       break;
     case "ready":
-      text = `${state.version} 已下载，退出时自动安装。也可以现在重启安装：后台的 hub 和 agent 不会中断，重新打开后自动换成新版本。`;
+      text = `${state.version} 已下载。${installOnQuit ? "退出时会自动安装，也可现在重启安装。" : "点击「重启并安装」应用更新。"}更新会重启本机 Hub。`;
       action = { label: "重启并安装", run: () => bridge?.install() };
       break;
     case "error":
@@ -328,7 +329,12 @@ function UpdateCard() {
         <div>
           <div className="setting-label">更新</div>
           <div className="setting-hint">{text}</div>
-          {state && state.state !== "manual" && <div className="setting-hint">每 4 小时自动检查一次；托盘菜单里也可以检查。</div>}
+          {installOnQuit && state && state.state !== "manual" && <div className="setting-hint">每 4 小时自动检查一次，也可从托盘菜单检查。</div>}
+          {(state?.state === "manual" || state?.state === "error") && (
+            <div className="setting-hint">
+              <a href="https://github.com/16Ui/CrossAgents/releases" target="_blank" rel="noreferrer">打开 fork 发布页</a>
+            </div>
+          )}
         </div>
         {action && (
           <button className={state?.state === "ready" ? "primary small" : "ghost small"} onClick={action.run}>

@@ -1,0 +1,171 @@
+name: Fork desktop release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-desktop-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    if: github.repository == '16Ui/CrossAgents' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/gui/package-lock.json
+      - id: version
+        shell: pwsh
+        run: |
+          $version = node -p "require('./apps/gui/package.json').version"
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "A stable version is required: $version" }
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+      - run: npm --prefix apps/gui ci
+      - run: npm --prefix apps/gui test
+      - run: cargo check --workspace --locked
+      - run: npm --prefix apps/gui run electron:installer
+      - run: node apps/gui/scripts/verify-windows-update.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-electron-windows
+          path: |
+            apps/gui/release/*.exe
+            apps/gui/release/*.exe.blockmap
+            apps/gui/release/latest.yml
+          if-no-files-found: error
+
+  tauri:
+    if: github.repository == '16Ui/CrossAgents' && github.ref == 'refs/heads/main' && vars.CROSSAGENTS_TAURI_UPDATE_PUBKEY != ''
+    needs: windows
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-latest
+            platform: darwin-aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    env:
+      TAG: ${{ needs.windows.outputs.tag }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/gui/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/gui/src-tauri
+      - run: npm --prefix apps/gui ci
+      - name: Build signed updater bundles
+        env:
+          CROSSAGENTS_TAURI_UPDATE_ENDPOINT: https://github.com/16Ui/CrossAgents/releases/latest/download/latest.json
+          CROSSAGENTS_TAURI_UPDATE_PUBKEY: ${{ vars.CROSSAGENTS_TAURI_UPDATE_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm --prefix apps/gui run tauri:bundle
+      - name: Stage Tauri artifacts
+        shell: bash
+        working-directory: apps/gui/src-tauri/target/release/bundle
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p upload
+          if [[ "$PLATFORM" == windows-x86_64 ]]; then
+            installers=(nsis/*.exe)
+            test "${#installers[@]}" -eq 1
+            name="CrossAgents-Tauri-${TAG#v}-x64.exe"
+            cp "${installers[0]}" "upload/$name"
+            cp "${installers[0]}.sig" "upload/$name.sig"
+          else
+            test "$(uname -m)" = arm64
+            installers=(dmg/*.dmg)
+            archives=(macos/*.app.tar.gz)
+            test "${#installers[@]}" -eq 1
+            test "${#archives[@]}" -eq 1
+            name="CrossAgents-Tauri-${TAG#v}-arm64.app.tar.gz"
+            cp "${installers[0]}" "upload/CrossAgents-Tauri-${TAG#v}-arm64.dmg"
+            cp "${archives[0]}" "upload/$name"
+            cp "${archives[0]}.sig" "upload/$name.sig"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-tauri-${{ matrix.platform }}
+          path: apps/gui/src-tauri/target/release/bundle/upload/*
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, tauri]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && (needs.tauri.result == 'success' || needs.tauri.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.windows.outputs.tag }}
+      SIGNED_TAURI: ${{ needs.tauri.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fork-*
+          path: artifacts
+          merge-multiple: true
+      - name: Prepare release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SIGNED_TAURI" == true ]]; then
+            node apps/gui/scripts/tauri-update-manifest.mjs \
+              "https://github.com/$GH_REPO/releases/download/$TAG/" \
+              "windows-x86_64=artifacts/CrossAgents-Tauri-${TAG#v}-x64.exe" \
+              "darwin-aarch64=artifacts/CrossAgents-Tauri-${TAG#v}-arm64.app.tar.gz" > artifacts/latest.json
+          else
+            # Keep the signed feed available for everyone already using it.
+            if ! previous=$(gh api "repos/$GH_REPO/releases?per_page=100"); then
+              exit 1
+            fi
+            if jq -e 'any(.[]; .draft == false and any(.assets[]; .name == "latest.json"))' <<< "$previous" >/dev/null; then
+              echo "Signed Tauri updates are already enabled; the new release needs latest.json." >&2
+              exit 1
+            fi
+          fi
+      - name: Publish installer and update metadata together
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_commit=$(git ls-remote origin refs/heads/main | cut -f1)
+          [[ "$current_commit" == "$GITHUB_SHA" ]] || { echo "main changed during the build; start a new release." >&2; exit 1; }
+          remote_tag=$(git ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}" | tail -1 | cut -f1)
+          [[ -z "$remote_tag" || "$remote_tag" == "$GITHUB_SHA" ]] || { echo "$TAG already points to a different commit." >&2; exit 1; }
+          if existing=$(gh release view "$TAG" --json isDraft,targetCommitish); then
+            jq -e --arg sha "$GITHUB_SHA" '.isDraft and .targetCommitish == $sha' <<< "$existing" >/dev/null
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "CrossAgents $TAG" \
+              --notes "CrossAgents desktop builds for the 16Ui fork."
+          fi
+          gh release upload "$TAG" artifacts/* --clobber
+          gh release edit "$TAG" --draft=false --latest

@@ -311,6 +311,7 @@ export class MockBridge implements CrossAgentsBridge {
     for (const listener of this.updateListeners) listener(state);
   }
   updates = {
+    installOnQuit: true,
     get: async () => this.update,
     check: async () => {
       const current = __BUILD__.version;

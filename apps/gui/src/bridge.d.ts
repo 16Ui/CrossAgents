@@ -221,6 +221,7 @@ export interface CrossAgentsBridge {
   onNoticeOpen?(listener: (href: string) => void): () => void;
   /** The GUI's update, and checking or installing it. `null`: this build does not update itself. */
   updates?: {
+    installOnQuit: boolean;
     get(): Promise<UpdateState | null>;
     check(): Promise<UpdateState | null>;
     install(): void;

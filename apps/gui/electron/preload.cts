@@ -123,6 +123,7 @@ const bridge: CrossAgentsBridge & { browser: BrowserBridge } = {
     return result;
   },
   updates: {
+    installOnQuit: true,
     get: () => ipcRenderer.invoke("update:get"),
     check: () => ipcRenderer.invoke("update:check"),
     install: () => ipcRenderer.send("update:install"),

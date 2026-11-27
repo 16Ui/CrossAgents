@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository != '16Ui/CrossAgents'
     runs-on: macos-latest   # Apple 芯片；macos-14 已停用
     timeout-minutes: 60
     env:

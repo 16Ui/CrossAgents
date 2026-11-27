@@ -27,18 +27,23 @@ export function startUpdates(log: (line: string) => void): Updates {
     return { state: () => manual, check: async () => manual, install() {}, onChange() {} };
   }
   const listeners: ((state: UpdateState) => void)[] = [];
-  let state: UpdateState = { state: "idle", current: app.getVersion() };
+  const current = app.getVersion();
+  let state: UpdateState = { state: "idle", current };
+  let operation: Promise<UpdateState> | undefined;
   const set = (next: UpdateState) => {
     state = next;
-    for (const win of BrowserWindow.getAllWindows()) win.webContents.send("update:state", state);
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.webContents.isDestroyed()) win.webContents.send("update:state", state);
+    }
     for (const listener of listeners) listener(state);
   };
-  const current = app.getVersion();
   const now = () => new Date().toISOString();
 
   const updaterLog = (m: unknown) => log(`updater: ${String(m)}`);
   autoUpdater.logger = { info: updaterLog, warn: updaterLog, error: updaterLog, debug: () => {} };
   autoUpdater.autoDownload = true;
+  autoUpdater.allowPrerelease = false;
+  autoUpdater.allowDowngrade = false;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on("checking-for-update", () => set({ state: "checking", current }));
   autoUpdater.on("update-not-available", () => set({ state: "latest", current, checked_at: now() }));
@@ -47,20 +52,28 @@ export function startUpdates(log: (line: string) => void): Updates {
     if (state.state === "downloading") set({ ...state, percent: Math.floor(p.percent) });
   });
   autoUpdater.on("update-downloaded", (info) => set({ state: "ready", current, version: info.version }));
-  autoUpdater.on("error", (err) => {
-    // A download that failed after the check found something: say it was the download.
+  const reportError = (err: unknown) => {
     const message = (err instanceof Error ? err.message : String(err)).split("\n")[0];
-    if (state.state !== "ready") set({ state: "error", current, message, checked_at: now() });
-  });
+    if (state.state === "error" && state.message === message) return;
+    log(`update failed: ${message}`);
+    set({ state: "error", current, message, checked_at: now() });
+  };
+  autoUpdater.on("error", reportError);
+  autoUpdater.on("update-cancelled", () => set({ state: "idle", current }));
 
-  const check = async (): Promise<UpdateState> => {
-    if (state.state === "checking" || state.state === "downloading" || state.state === "ready") return state;
-    try {
-      await autoUpdater.checkForUpdates();
-    } catch (err) {
-      log(`update check failed: ${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`);
-    }
-    return state;
+  const check = (): Promise<UpdateState> => {
+    if (operation) return operation;
+    if (state.state === "ready") return Promise.resolve(state);
+    operation = Promise.resolve().then(async () => {
+      try {
+        const result = await autoUpdater.checkForUpdates();
+        await result?.downloadPromise;
+      } catch (err) {
+        reportError(err);
+      }
+      return state;
+    }).finally(() => { operation = undefined; });
+    return operation;
   };
 
   void check();
@@ -73,7 +86,11 @@ export function startUpdates(log: (line: string) => void): Updates {
       if (state.state !== "ready") return;
       log(`updater: installing ${state.version} now, asked from the GUI`);
       // Silent, and the GUI starts again after: it then upgrades the local hub itself.
-      autoUpdater.quitAndInstall(true, true);
+      try {
+        autoUpdater.quitAndInstall(true, true);
+      } catch (err) {
+        reportError(err);
+      }
     },
     onChange(listener) {
       listeners.push(listener);

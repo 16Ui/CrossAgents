@@ -75,6 +75,7 @@ export function installTauriBridge() {
 
   const bridge: CrossAgentsBridge = {
     updates: {
+      installOnQuit: false,
       get: getUpdate,
       check: checkUpdate,
       install() { void invoke("updates_install", { events: updateEvents() }).catch(console.warn); },
