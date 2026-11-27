@@ -41,6 +41,10 @@ export type ConnectionState = {
   remote?: { target: RemoteTarget; via: Via; deviceName: string; deviceId: string; pairedAt: string };
   tunnel?: TunnelState;
   defaultDeviceName: string;
+  /** In remote mode, also register this machine as an execution node so its local CLIs are usable. */
+  shareNode?: boolean;
+  /** Local execution node status in remote mode ("connecting" | "connected" | "disabled" | "offline" | "unsupported" | "missing" | ...). */
+  nodeStatus?: string;
 };
 /** Pairing goes: find the hub there, `device add`, start the tunnel, check the token. */
 export type PairStep = "locate" | "pair" | "tunnel" | "check" | "redeem" | "forward";
@@ -155,6 +159,7 @@ export interface CrossAgentsBridge {
     /** Pairs by a one-time code made on the hub's machine (hole punching). */
     pairCode(code: string, deviceName: string): Promise<ConnectionState>;
     use(mode: "local" | "remote"): Promise<ConnectionState>;
+    setShareNode?(enabled: boolean): Promise<ConnectionState>;
     reconnect(): Promise<ConnectionState>;
     /** Forgets the pairing here only; the device stays on the hub until revoked there. */
     forget(): Promise<ConnectionState>;

@@ -513,6 +513,19 @@ pub async fn forward(
     proxy: Option<String>,
     events: impl Fn(Event) + Send + Sync + 'static,
 ) -> Result<()> {
+    forward_until(target, token, listen, proxy, CancellationToken::new(), events).await
+}
+
+/// Like [`forward`], but also stops cleanly and closes the iroh endpoint when `cancel` fires
+/// (used by embedded mobile clients on app suspend/reconnect).
+pub async fn forward_until(
+    target: Target,
+    token: String,
+    listen: SocketAddr,
+    proxy: Option<String>,
+    cancel: CancellationToken,
+    events: impl Fn(Event) + Send + Sync + 'static,
+) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("cannot listen on {listen}"))?;
@@ -529,9 +542,13 @@ pub async fn forward(
         revoked: CancellationToken::new(),
     });
     // Dial once now, so a hub that cannot be reached shows before the first request.
-    let _ = link.connection().await;
+    let initial = link.clone();
+    tokio::spawn(async move {
+        let _ = initial.connection().await;
+    });
     loop {
         let accepted = tokio::select! {
+            _ = cancel.cancelled() => break,
             _ = link.revoked.cancelled() => break,
             accepted = listener.accept() => accepted,
         };

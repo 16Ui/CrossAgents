@@ -49,10 +49,26 @@ struct Pairing {
     paired_at: String,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 struct Saved {
     remote: bool,
     pairing: Option<Pairing>,
+    #[serde(default = "default_true")]
+    share_node: bool,
+}
+
+impl Default for Saved {
+    fn default() -> Self {
+        Self {
+            remote: false,
+            pairing: None,
+            share_node: true,
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -94,12 +110,15 @@ pub struct Connection {
     default_device_name: String,
     remote: Option<Pairing>,
     tunnel: Option<Tunnel>,
+    share_node: bool,
+    node_status: Option<String>,
 }
 
 #[derive(Default)]
 struct Runtime {
     saved: Saved,
     tunnel: Option<Tunnel>,
+    node_status: Option<String>,
     token: Option<String>,
     generation: u64,
     worker: Option<tauri::async_runtime::JoinHandle<()>>,
@@ -137,6 +156,7 @@ impl Remote {
         }
         state.token = None;
         state.tunnel = None;
+        state.node_status = None;
         if let Some(pairing) = state
             .saved
             .pairing
@@ -144,11 +164,15 @@ impl Remote {
             .filter(|_| state.saved.remote)
             .cloned()
         {
+            let share_node = state.saved.share_node;
             state.tunnel = Some(Tunnel::connecting());
+            if !share_node {
+                state.node_status = Some("disabled".into());
+            }
             let generation = state.generation;
             let app = app.clone();
             state.worker = Some(tauri::async_runtime::spawn(async move {
-                supervise(app, pairing, generation).await;
+                supervise(app, pairing, share_node, generation).await;
             }));
         }
     }
@@ -161,6 +185,7 @@ impl Remote {
         }
         state.token = None;
         state.tunnel = None;
+        state.node_status = None;
     }
 
     pub fn is_remote(&self) -> bool {
@@ -212,6 +237,8 @@ impl Remote {
             default_device_name: default_device_name(),
             remote: state.saved.pairing.clone(),
             tunnel: state.tunnel.clone(),
+            share_node: state.saved.share_node,
+            node_status: state.node_status.clone(),
         }
     }
 
@@ -303,10 +330,38 @@ fn device_name(name: &str) -> Result<(), String> {
 }
 
 fn default_device_name() -> String {
-    let raw = std::env::var("COMPUTERNAME")
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut raw = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    if raw.trim().is_empty() {
+        raw = std::process::Command::new("scutil")
+            .args(["--get", "LocalHostName"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+    }
+    #[cfg(unix)]
+    if raw.trim().is_empty() {
+        raw = std::process::Command::new("hostname")
+            .arg("-s")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+    }
     let name: String = raw
+        .trim()
+        .strip_suffix(".local")
+        .unwrap_or(raw.trim())
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || "._-".contains(character) {
@@ -319,9 +374,13 @@ fn default_device_name() -> String {
         .collect();
     let name = name.trim_matches(['.', '_', '-']);
     if name.is_empty() {
-        "crossagents-tauri".into()
+        if cfg!(target_os = "macos") {
+            "Mac".into()
+        } else {
+            "CrossAgents".into()
+        }
     } else {
-        format!("{name}-tauri")
+        name.to_owned()
     }
 }
 
@@ -471,6 +530,131 @@ fn link_program() -> Result<PathBuf, String> {
     } else {
         Err("此版本未随附 crossagents-link，请使用安装包".into())
     }
+}
+
+fn crossagents_program() -> Result<PathBuf, String> {
+    let name = if cfg!(windows) {
+        "crossagents.exe"
+    } else {
+        "crossagents"
+    };
+    let path = std::env::current_exe()
+        .map_err(|err| err.to_string())?
+        .with_file_name(name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err("此版本未随附 crossagents 执行节点程序".into())
+    }
+}
+
+#[cfg(unix)]
+async fn unix_enriched_path() -> Option<String> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<String>> = OnceLock::new();
+    if let Some(cached) = CACHED.get() {
+        return cached.clone();
+    }
+    const START: &str = "__CA_PATH_START__";
+    const END: &str = "__CA_PATH_END__";
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let script = format!("printf '\\n{START}%s{END}\\n' \"$PATH\"");
+    let mut shell_path: Option<String> = None;
+    for flag in ["-lic", "-lc"] {
+        let mut cmd = hidden(&shell);
+        cmd.args([flag, &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(3), cmd.output()).await
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(after) = text.split(START).nth(1)
+                && let Some(raw) = after.split(END).next()
+            {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    shell_path = Some(trimmed.to_owned());
+                    break;
+                }
+            }
+        }
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !dirs.iter().any(|d| d == &p) {
+            dirs.push(p);
+        }
+    };
+    if let Some(raw) = shell_path {
+        for p in std::env::split_paths(&raw) {
+            push(p);
+        }
+    }
+    if let Some(current) = std::env::var_os("PATH") {
+        for p in std::env::split_paths(&current) {
+            push(p);
+        }
+    }
+    for fixed in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+    ] {
+        let p = PathBuf::from(fixed);
+        if p.is_dir() {
+            push(p);
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for rel in [
+            ".local/bin",
+            ".cargo/bin",
+            ".volta/bin",
+            ".bun/bin",
+            ".npm-global/bin",
+            ".pnpm",
+            "Library/pnpm",
+            ".asdf/shims",
+            ".mise/shims",
+            ".opencode/bin",
+        ] {
+            let p = home.join(rel);
+            if p.is_dir() {
+                push(p);
+            }
+        }
+        for (root, suffix) in [
+            (home.join(".nvm/versions/node"), "bin"),
+            (home.join(".fnm/node-versions"), "installation/bin"),
+        ] {
+            if let Ok(entries) = fs::read_dir(&root) {
+                let mut versions: Vec<PathBuf> = entries
+                    .flatten()
+                    .map(|e| e.path().join(suffix))
+                    .filter(|p| p.is_dir())
+                    .collect();
+                versions.sort();
+                versions.reverse();
+                for p in versions {
+                    push(p);
+                }
+            }
+        }
+    }
+    let joined = std::env::join_paths(dirs)
+        .ok()
+        .and_then(|os| os.into_string().ok())
+        .filter(|s| !s.is_empty());
+    let _ = CACHED.set(joined.clone());
+    joined
+}
+
+#[cfg(not(unix))]
+async fn unix_enriched_path() -> Option<String> {
+    None
 }
 
 fn ssh() -> Command {
@@ -701,7 +885,101 @@ fn update(app: &AppHandle, generation: u64, tunnel: Tunnel, token: Option<String
     true
 }
 
-async fn supervise(app: AppHandle, pairing: Pairing, generation: u64) {
+fn update_node_status(app: &AppHandle, generation: u64, status: Option<String>) -> bool {
+    let remote = app.state::<Remote>();
+    let mut state = remote.state.lock().expect("remote state");
+    if state.generation != generation {
+        return false;
+    }
+    state.node_status = status;
+    true
+}
+
+struct AbortOnDrop(Option<tauri::async_runtime::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
+async fn supervise_local_node(app: AppHandle, generation: u64, port: u16, token: String) {
+    let program = match crossagents_program() {
+        Ok(path) => path,
+        Err(_) => {
+            update_node_status(&app, generation, Some("missing".into()));
+            return;
+        }
+    };
+    let cwd = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let enriched_path = unix_enriched_path().await;
+    let hub_url = format!("http://127.0.0.1:{port}");
+    let mut delay = 3u64;
+    loop {
+        if !update_node_status(&app, generation, Some("connecting".into())) {
+            return;
+        }
+        let mut command = hidden(&program);
+        command
+            .args(["node", "run", "--hub", &hub_url, "--cwd"])
+            .arg(&cwd)
+            .env("CROSSAGENTS_NODE_TOKEN", &token)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if let Some(path) = &enriched_path {
+            command.env("PATH", path);
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                update_node_status(&app, generation, Some(format!("error: {err}")));
+                return;
+            }
+        };
+        let mut rejected = false;
+        let mut last_err = String::new();
+        if let Some(stderr) = child.stderr.take() {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.contains("node connected to ") {
+                    delay = 3;
+                    if !update_node_status(&app, generation, Some("connected".into())) {
+                        return;
+                    }
+                } else if line.contains("disconnected from hub") {
+                    if !update_node_status(&app, generation, Some("connecting".into())) {
+                        return;
+                    }
+                } else if line.contains("hub rejected node token") {
+                    rejected = true;
+                    last_err = line;
+                } else if !line.trim().is_empty() {
+                    last_err = line;
+                }
+            }
+        }
+        let _ = child.wait().await;
+        if rejected {
+            let status = if last_err.contains("403") {
+                "unsupported".to_owned()
+            } else {
+                "revoked".to_owned()
+            };
+            update_node_status(&app, generation, Some(status));
+            return;
+        }
+        if !update_node_status(&app, generation, Some("connecting".into())) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+        delay = (delay * 2).min(30);
+    }
+}
+
+async fn supervise(app: AppHandle, pairing: Pairing, share_node: bool, generation: u64) {
     let token = tauri::async_runtime::spawn_blocking({
         let id = pairing.device_id.clone();
         move || {
@@ -728,6 +1006,15 @@ async fn supervise(app: AppHandle, pairing: Pairing, generation: u64) {
         if !update(&app, generation, Tunnel::connecting(), None) {
             return;
         }
+        update_node_status(
+            &app,
+            generation,
+            if share_node {
+                Some("connecting".into())
+            } else {
+                Some("disabled".into())
+            },
+        );
         let result = async {
             let (mut child, port, upstream) = connect(&pairing, &token).await?;
             probe(&client, &mut child, port, &token).await?;
@@ -746,6 +1033,14 @@ async fn supervise(app: AppHandle, pairing: Pairing, generation: u64) {
             ) {
                 return Ok(());
             }
+            let _node_guard = AbortOnDrop(share_node.then(|| {
+                tauri::async_runtime::spawn(supervise_local_node(
+                    app.clone(),
+                    generation,
+                    port,
+                    token.clone(),
+                ))
+            }));
             let exit = child.wait().await.map_err(|err| err.to_string())?;
             if matches!(pairing.route, Route::Link { .. }) && exit.code() == Some(3) {
                 Err(Failure::Revoked)
@@ -757,6 +1052,7 @@ async fn supervise(app: AppHandle, pairing: Pairing, generation: u64) {
         match result {
             Ok(()) => return,
             Err(Failure::Revoked) => {
+                update_node_status(&app, generation, None);
                 update(
                     &app,
                     generation,
@@ -766,6 +1062,15 @@ async fn supervise(app: AppHandle, pairing: Pairing, generation: u64) {
                 return;
             }
             Err(Failure::Offline(reason)) => {
+                update_node_status(
+                    &app,
+                    generation,
+                    if share_node {
+                        Some("offline".into())
+                    } else {
+                        Some("disabled".into())
+                    },
+                );
                 if !update(&app, generation, Tunnel::offline(reason, false), None) {
                     return;
                 }
@@ -814,9 +1119,11 @@ async fn store_pairing(
         .await
         .map_err(describe_failure)?;
     drop(child);
+    let share_node = remote.state.lock().expect("remote state").saved.share_node;
     let saved = Saved {
         remote: active,
         pairing: Some(pairing.clone()),
+        share_node,
     };
     let previous = remote
         .state
@@ -996,6 +1303,20 @@ pub async fn connection_use(
         "remote" => return Err("还没有与远程中心配对".into()),
         _ => return Err("连接模式无效".into()),
     };
+    remote.replace(saved)?;
+    Remote::start(&app);
+    Ok(remote.status())
+}
+
+#[tauri::command]
+pub async fn connection_set_share_node(
+    app: AppHandle,
+    remote: State<'_, Remote>,
+    enabled: bool,
+) -> Result<Connection, String> {
+    let _lock = remote.actions.lock().await;
+    let mut saved = remote.state.lock().expect("remote state").saved.clone();
+    saved.share_node = enabled;
     remote.replace(saved)?;
     Remote::start(&app);
     Ok(remote.status())

@@ -55,6 +55,193 @@ function showUnavailableSession() {
 }
 
 export const SCENARIOS: Scenario[] = [
+  {
+    key: "multi-node",
+    label: "多节点：Win 中心 + Mac 在线 + Linux 离线",
+    hint: "一个 GUI 侧栏里同时管理 Windows 中心、在线 MacBook（跑本机 Codex / Claude）和离线 Linux 节点，新建 Chat 可直接切机器与模型",
+    build: () => {
+      const state = emptyHub();
+      const now = new Date().toISOString();
+      const winAgent = {
+        ...agent({
+          name: "Zara",
+          plugin: "claude",
+          model: "claude-sonnet-4-6",
+          role: "worker",
+          cwd: REPO,
+          home: REPO,
+          topic: "修复 Agy 额度与输入法防误发",
+          status: "idle",
+          createdMinutesAgo: 18,
+        }),
+      };
+      const winChat = {
+        ...agent({
+          name: "Iris",
+          plugin: "claude",
+          model: "claude-sonnet-4-6",
+          role: "worker",
+          cwd: "C:/Users/link/.crossagents/chats/iris",
+          home: "C:/Users/link/.crossagents/chats/iris",
+          topic: "聊聊多节点转发架构",
+          status: "idle",
+          createdMinutesAgo: 45,
+        }),
+      };
+      const macCodex = {
+        ...agent({
+          name: "Atlas",
+          plugin: "codex",
+          model: "gpt-5.3-codex",
+          role: "worker",
+          cwd: "/Users/link/Dev/ios-app",
+          home: "/Users/link/Dev/ios-app",
+          topic: "在 Mac 上编译 SwiftUI 预览与签名",
+          status: "running",
+          createdMinutesAgo: 6,
+        }),
+        node: "node-mac-1",
+      };
+      const macChat = {
+        ...agent({
+          name: "Milo",
+          plugin: "codex",
+          model: "gpt-5.3-codex",
+          role: "worker",
+          cwd: "/Users/link/.crossagents/chats/milo",
+          home: "/Users/link/.crossagents/chats/milo",
+          topic: "用 Mac 本地 Codex 写个 Shell 脚本",
+          status: "idle",
+          createdMinutesAgo: 90,
+        }),
+        node: "node-mac-1",
+      };
+      const linuxOld = {
+        ...agent({
+          name: "Orion",
+          plugin: "claude",
+          model: "claude-sonnet-4-6",
+          role: "worker",
+          cwd: "/srv/train-jobs",
+          home: "/srv/train-jobs",
+          topic: "排查 CUDA 显存泄漏",
+          status: "stopped",
+          createdMinutesAgo: 60 * 14,
+        }),
+        node: "node-linux-1",
+      };
+      const macPlugins: PluginInfo[] = [
+        {
+          name: "codex",
+          label: "Codex",
+          provider: "codex",
+          site: null,
+          models: ["gpt-5.3-codex", "gpt-5.3-codex-mini"],
+          all_models: ["gpt-5.3-codex", "gpt-5.3-codex-mini"],
+          shown: null,
+          models_pinned: false,
+          driver: "codex-native",
+          capabilities: capabilitiesOf("codex-native"),
+          efforts: ["low", "medium", "high"],
+          efforts_by_model: { "gpt-5.3-codex": ["low", "medium", "high", "xhigh"] },
+          cli: { installed: true, probing: false, version: "0.172.0", below_minimum: false, unverified: false, can_upgrade: false, self_checking: false } as PluginInfo["cli"],
+        },
+        {
+          name: "claude",
+          label: "Claude",
+          provider: "claude",
+          site: null,
+          models: ["claude-sonnet-4-6", "claude-opus-4-6"],
+          all_models: ["claude-sonnet-4-6", "claude-opus-4-6"],
+          shown: null,
+          models_pinned: false,
+          driver: "claude-native",
+          capabilities: capabilitiesOf("claude-native"),
+          efforts: ["low", "medium", "high"],
+          efforts_by_model: {},
+          cli: { installed: true, probing: false, version: "2.1.80", below_minimum: false, unverified: false, can_upgrade: false, self_checking: false } as PluginInfo["cli"],
+        },
+      ];
+      state.agents = [winAgent, winChat, macCodex, macChat, linuxOld];
+      state.nodes = [
+        {
+          id: "local",
+          name: "local",
+          os: "windows",
+          arch: "x86_64",
+          hostname: "DESKTOP-LINK",
+          shell: "powershell",
+          default_cwd: REPO,
+          version: "0.3.7",
+          connected_at: now,
+          local: true,
+          online: true,
+          plugins: state.plugins.map((p) => ({
+            name: p.name,
+            installed: p.models.length > 0,
+            driver: p.driver,
+            models: p.models,
+            efforts: p.efforts,
+            efforts_by_model: p.efforts_by_model,
+          })),
+        },
+        {
+          id: "node-mac-1",
+          name: "MacBook-Pro",
+          os: "macos",
+          arch: "aarch64",
+          hostname: "Links-MacBook-Pro.local",
+          shell: "zsh",
+          default_cwd: "/Users/link/Dev/ios-app",
+          chats_dir: "/Users/link/.crossagents/chats",
+          version: "0.3.7",
+          connected_at: now,
+          local: false,
+          online: true,
+          plugins: macPlugins.map((p) => ({
+            name: p.name,
+            installed: true,
+            version: p.cli?.version ?? undefined,
+            driver: p.driver,
+            models: p.models,
+            efforts: p.efforts,
+            efforts_by_model: p.efforts_by_model,
+          })),
+        },
+        {
+          id: "node-linux-1",
+          name: "gpu-box",
+          os: "linux",
+          arch: "x86_64",
+          hostname: "gpu-box",
+          shell: "bash",
+          default_cwd: "/srv/train-jobs",
+          version: "0.3.7",
+          connected_at: ago(60 * 6),
+          local: false,
+          online: false,
+          plugins: [],
+        },
+      ];
+      state.nodePlugins = { "node-mac-1": macPlugins, "node-linux-1": [] };
+      const macTurns = [
+        turn({
+          input: "帮我检查 ios-app 的 Xcode SwiftUI 预览为什么报错，并跑一下 swift test。",
+          minutesAgo: 4,
+          items: [
+            think("检查 Package.swift 并在 Mac 本地执行 swift test"),
+            say("我已经在 MacBook-Pro 上用本机 Codex 跑完 `swift test`，全部 18 个用例通过；预览报错是因为 `PreviewProvider` 里少了环境变量注入，已经顺手修好了。"),
+          ],
+        }),
+      ];
+      state.transcripts.set(macCodex.id, transcript(macCodex, macTurns, 120));
+      state.transcripts.set(winAgent.id, transcript(winAgent, [], 100));
+      state.transcripts.set(winChat.id, transcript(winChat, [], 100));
+      state.transcripts.set(macChat.id, transcript(macChat, [], 100));
+      state.transcripts.set(linuxOld.id, transcript(linuxOld, [], 100));
+      return { state, script: [], route: "#/" };
+    },
+  },
   { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏里工作组落在各自的项目下，一个项目只列最近三个", build: () => {
     const scene = workRounds();
     // A work group lives under its project now, so the width has to leave its name readable:

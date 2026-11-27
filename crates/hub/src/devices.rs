@@ -1,5 +1,5 @@
 //! Cached device authentication. Database reads run outside the cache lock.
-use crossagents_core::{CoreError, Device, DeviceOs, Store};
+use crossagents_core::{CoreError, Device, DeviceLevel, DeviceOs, Store};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -120,6 +120,22 @@ impl Devices {
             );
             return Ok(Some((device, cancel)));
         }
+    }
+    pub async fn set_level(
+        &self,
+        store: &dyn Store,
+        id: &str,
+        level: DeviceLevel,
+    ) -> Result<Device, CoreError> {
+        let mut cache = self.cache.lock().await;
+        let device = store.set_device_level(id, level).await?;
+        cache.generation += 1;
+        for entry in cache.entries.values_mut() {
+            if entry.device.id == id {
+                entry.device.level = level;
+            }
+        }
+        Ok(device)
     }
     pub async fn revoke(&self, store: &dyn Store, id: &str) -> Result<(Device, bool), CoreError> {
         let mut cache = self.cache.lock().await;

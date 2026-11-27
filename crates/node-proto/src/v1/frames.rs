@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::{
     Op, WireAgentCommand, WirePermissionDecision, WirePermissionRequest, WireResult,
     WireSessionEvent,
@@ -115,14 +117,23 @@ impl ToHub {
     }
 }
 
-/// A node's report of one plugin, as [`ToHub::Register`] carries it. B1.4 fills it in; B1.1
-/// sends an empty list.
+/// A node's report of one plugin, as [`ToHub::Register`] carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginSnapshot {
     pub name: String,
     pub installed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub efforts_by_model: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<crossagents_core::Capabilities>,
 }
 
 /// Who the node is, as [`ToHub::Register`] says it.
@@ -390,6 +401,11 @@ mod tests {
                 name: "mock".into(),
                 installed: true,
                 version: Some("1.0.0".into()),
+                driver: Some("acp-generic".into()),
+                models: vec!["mock-model".into()],
+                efforts: vec![],
+                efforts_by_model: BTreeMap::new(),
+                capabilities: None,
             }],
         };
         let line = encode(&frame);

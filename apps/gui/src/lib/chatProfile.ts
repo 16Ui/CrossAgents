@@ -1,90 +1,114 @@
 import { useSyncExternalStore } from "react";
 import { api } from "../api";
+import { onHubEvent } from "../hub";
+import { reconcileChatProfile, type ChatProfile, type StoredChatProfile } from "./chatProfileSync";
 
-export type ChatProfile = {
-  name: string;
-  /** A square WebP, synced to the connected hub and cached locally. */
-  avatar: string | null;
-  showAvatars: boolean;
-};
+export { reconcileChatProfile, type ChatProfile, type StoredChatProfile };
 
 const KEY = "crossagents.chatProfile";
 export const DEFAULT_CHAT_PROFILE: ChatProfile = { name: "", avatar: null, showAvatars: true };
 
-function readProfile(): ChatProfile {
+function readStored(): StoredChatProfile {
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
     return {
       name: typeof saved?.name === "string" ? saved.name.slice(0, 32) : "",
       avatar: typeof saved?.avatar === "string" && saved.avatar ? saved.avatar : null,
       showAvatars: saved?.showAvatars !== false,
+      synced: saved?.synced === true,
     };
   } catch {
-    return DEFAULT_CHAT_PROFILE;
+    return { ...DEFAULT_CHAT_PROFILE, synced: false };
   }
 }
 
-let profile = readProfile();
+let stored: StoredChatProfile = readStored();
+let profile: ChatProfile = { name: stored.name, avatar: stored.avatar, showAvatars: stored.showAvatars };
 const listeners = new Set<() => void>();
 
 function notify() {
   listeners.forEach((listener) => listener());
 }
 
-function writeLocal(next: ChatProfile) {
+function writeLocal(next: StoredChatProfile) {
   try {
     localStorage.setItem(KEY, JSON.stringify(next));
   } catch {
     // Ignore storage quota or SSR errors.
   }
-  profile = next;
+  stored = next;
+  profile = { name: next.name, avatar: next.avatar, showAvatars: next.showAvatars };
   notify();
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     if (event.key !== KEY && event.key !== null) return;
-    profile = readProfile();
+    stored = readStored();
+    profile = { name: stored.name, avatar: stored.avatar, showAvatars: stored.showAvatars };
     notify();
   });
 }
 
-export function setChatProfile(patch: Partial<ChatProfile>) {
-  const next: ChatProfile = {
-    ...profile,
+export function setChatProfile(patch: Partial<ChatProfile>): Promise<void> {
+  const touchesHub = patch.name !== undefined || patch.avatar !== undefined;
+  const next: StoredChatProfile = {
+    ...stored,
     ...patch,
-    name: (patch.name ?? profile.name).slice(0, 32),
+    name: (patch.name ?? stored.name).slice(0, 32),
+    synced: touchesHub ? false : stored.synced,
   };
   writeLocal(next);
-  if (patch.name !== undefined || patch.avatar !== undefined) {
-    void api.setProfile({ name: next.name, avatar: next.avatar }).catch(() => undefined);
-  }
+  if (!touchesHub) return Promise.resolve();
+  return api.setProfile({ name: next.name, avatar: next.avatar }).then((saved) => {
+    const savedName = typeof saved?.name === "string" ? saved.name.slice(0, 32) : next.name;
+    const savedAvatar = typeof saved?.avatar === "string" && saved.avatar ? saved.avatar : null;
+    if (stored.name === next.name && stored.avatar === next.avatar) {
+      writeLocal({ ...stored, name: savedName, avatar: savedAvatar, synced: true });
+    }
+  });
 }
 
 let syncStarted = false;
+let lastSyncAt = 0;
 export function startChatProfileSync() {
   if (syncStarted || typeof window === "undefined") return;
   syncStarted = true;
-  const sync = async () => {
+  const sync = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastSyncAt < 5000) return;
+    lastSyncAt = now;
     try {
       const remote = await api.profile();
-      const remoteName = typeof remote?.name === "string" ? remote.name.slice(0, 32) : "";
-      const remoteAvatar = typeof remote?.avatar === "string" && remote.avatar ? remote.avatar : null;
-      if (remoteName || remoteAvatar) {
-        if (remoteName !== profile.name || remoteAvatar !== profile.avatar) {
-          writeLocal({ ...profile, name: remoteName, avatar: remoteAvatar });
+      const { next, push } = reconcileChatProfile(stored, remote);
+      if (
+        next.name !== stored.name
+        || next.avatar !== stored.avatar
+        || next.synced !== stored.synced
+      ) {
+        writeLocal(next);
+      }
+      if (push) {
+        const saved = await api.setProfile(push);
+        const savedName = typeof saved?.name === "string" ? saved.name.slice(0, 32) : push.name;
+        const savedAvatar = typeof saved?.avatar === "string" && saved.avatar ? saved.avatar : null;
+        if (stored.name === push.name && stored.avatar === push.avatar) {
+          writeLocal({ ...stored, name: savedName, avatar: savedAvatar, synced: true });
         }
-      } else if (profile.name || profile.avatar) {
-        // First time on a hub without a saved profile: migrate this device's local profile up.
-        await api.setProfile({ name: profile.name, avatar: profile.avatar });
       }
     } catch {
       // Offline or older hub without /v1/profile: keep local cache.
     }
   };
-  void sync();
+  void sync(true);
+  onHubEvent((event) => {
+    if (event.type === "profile.updated") void sync(true);
+  });
   window.crossagents?.onStatus((status) => {
-    if (status === "connected") void sync();
+    if (status === "connected") void sync(true);
+  });
+  window.addEventListener("focus", () => {
+    void sync(false);
   });
 }
 

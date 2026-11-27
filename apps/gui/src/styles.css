@@ -2485,6 +2485,20 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .code-box > button, .code-box .copy { flex: none; white-space: nowrap; height: 30px; padding: 0 12px; font-size: 12.5px; }
 .code-preview.ok { color: var(--ok-text, var(--text-2)); }
 .code-preview.bad { color: var(--danger-text); }
+.pairing-invite-layout { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-top: 4px; }
+.pairing-invite-body { flex: 1; min-width: 240px; display: flex; flex-direction: column; gap: 8px; }
+.pairing-qr-card {
+  flex: none; display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 10px; border-radius: calc(var(--radius) + 2px);
+  background: #ffffff; border: 1px solid var(--border-strong);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+.pairing-qr-img { display: block; border-radius: 4px; image-rendering: pixelated; }
+.pairing-qr-placeholder {
+  display: grid; place-items: center; font-size: 12px; color: #6b7280;
+  background: #f9fafb; border-radius: 4px;
+}
+.pairing-qr-caption { font-size: 11.5px; font-weight: 500; color: #374151; }
 
 /* The sidebar's one-line "本机 / 远程 host" mark, above the hub connection line */
 .conn-where { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); padding: 2px 4px 0; border-radius: var(--radius); min-width: 0; text-decoration: none; }
@@ -2501,16 +2515,149 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .home-path { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; }
 .home-path input { flex: 1; min-width: 0; }
 
-/* Machines: the sidebar's outer level (the centre today), and the os mark beside names. */
+/* Machines: the sidebar's outer level (centre + remote execution nodes), and the os mark beside names. */
 .machine-head { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .machine-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-2); padding: 3px 6px; }
-.machine-name .dot { margin-left: auto; }
-.machine-name .machine-via { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
-.machine-name .text { flex: 0 1 auto; }
+.machine-name .dot { margin-left: auto; flex-shrink: 0; }
+.machine-name .machine-via { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; opacity: 0.85; }
+.machine-name .text { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-add { opacity: 0; width: 22px; height: 22px; flex-shrink: 0; transition: opacity 120ms ease; }
+.machine-head:hover .machine-add, .machine-head:focus-within .machine-add { opacity: 1; }
 .machine-body { min-width: 0; padding-left: 10px; box-sizing: border-box; }
+.project-head button.group-name.project-name { text-align: left; justify-content: flex-start; padding: 0; background: none; border: 0; font-weight: inherit; }
+.machine-empty { margin: 2px 6px 6px; font-size: 11.5px; color: var(--muted); }
+.chip.node-chip { display: inline-flex; align-items: center; gap: 5px; text-decoration: none; color: var(--text-2); }
+.chip.node-chip:hover { color: var(--text); border-color: var(--line-2); }
+.chip.node-chip.dim { opacity: 0.65; }
+.chip.node-chip .dot { width: 6px; height: 6px; }
 .os-icon { color: var(--muted); vertical-align: -2px; }
 .os-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .device-presence { display: inline-flex; align-items: center; gap: 5px; }
 .hub-row { background: var(--hover); }
 .ts-peer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ts-peer .ts-addr { min-width: 0; overflow-wrap: anywhere; }
+
+.device-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.device-level-select {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft, var(--surface));
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+}
+.device-level-select:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.dir-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+}
+.dir-picker {
+  width: min(560px, 94vw);
+  max-height: min(540px, 84vh);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+.dir-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dir-picker-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.dir-picker-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px 6px;
+}
+.dir-picker-path {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+.dir-picker-filter { padding: 4px 14px 8px; }
+.dir-picker-filter input {
+  width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+.dir-picker-err { padding: 0 14px 8px; }
+.dir-picker-list {
+  flex: 1;
+  min-height: 180px;
+  overflow-y: auto;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.dir-picker-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.dir-picker-row:hover { background: var(--hover, rgba(127, 127, 127, 0.12)); }
+.dir-picker-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dir-picker-empty {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.dir-picker-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+}
+.dir-picker-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--muted);
+}

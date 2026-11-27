@@ -297,6 +297,15 @@ pub trait Store: Send + Sync {
         let _ = (id, os);
         Err(CoreError::Unsupported("devices".into()))
     }
+    /// Changes the permission level of an active (non-revoked) device.
+    async fn set_device_level(
+        &self,
+        id: &str,
+        level: crate::DeviceLevel,
+    ) -> Result<crate::Device, CoreError> {
+        let _ = (id, level);
+        Err(CoreError::Unsupported("devices".into()))
+    }
 
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError>;
     async fn update_account(&self, account: &Account) -> Result<(), CoreError> {

@@ -14,7 +14,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Extension, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -23,13 +23,15 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use crossagents_api_types::{
-    ApiError, ErrorCode, ListNodesResponse, NodeEditFileRequest, NodeEditFileResponse,
-    NodeExecRequest, NodeExecResponse, NodeListFilesRequest, NodeListFilesResponse,
-    NodeReadFileRequest, NodeReadFileResponse, NodeRpcOp, NodeRpcReply, NodeSearchFilesRequest,
-    NodeSearchFilesResponse, NodeWriteFileRequest, NodeWriteFileResponse, RemoteNodeInfo,
-    ToolInfo,
+    ApiError, ErrorCode, FileContentResponse, FileEntry, FileGitChange, FileKind,
+    FileSearchResponse, FileStatusEntry, FileStatusResponse, FileTreeResponse, ListNodesResponse,
+    NodeDirEntry, NodeDirsResponse, NodeEditFileRequest, NodeEditFileResponse, NodeExecRequest,
+    NodeExecResponse, NodeListFilesRequest, NodeListFilesResponse, NodeReadFileRequest,
+    NodeReadFileResponse, NodeRpcOp, NodeRpcReply, NodeSearchFilesRequest, NodeSearchFilesResponse,
+    NodeWriteFileRequest, NodeWriteFileResponse, RemoteNodeInfo, ResolvePathsRequest,
+    ResolvePathsResponse, ResolvedPath, ToolInfo,
 };
-use crossagents_core::{CoreError, Device, DeviceKind, DeviceOs};
+use crossagents_core::{Agent, CoreError, Device, DeviceKind, DeviceLevel, DeviceOs};
 use futures::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -38,10 +40,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::api::{ApiResult, AppError, AppState, VERSION};
+use crate::remote_nodes::NodeStreamMsg;
 
 const FILE_OP_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 60;
 const MAX_EXEC_TIMEOUT_SECS: u64 = 120;
+const NODE_FRAME_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
 struct AuthedNode {
@@ -54,6 +58,10 @@ pub fn node_channel_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/node/stream", get(node_stream))
         .route("/v1/node/results/{call_id}", post(node_result))
+        .route(
+            "/v1/node/frames",
+            post(node_frames).layer(DefaultBodyLimit::max(NODE_FRAME_BODY_LIMIT)),
+        )
         .route_layer(middleware::from_fn_with_state(state, require_node_token))
 }
 
@@ -61,6 +69,7 @@ pub fn node_channel_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 pub fn control_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/nodes", get(list_nodes))
+        .route("/v1/nodes/{node}/dirs", get(node_dirs))
         .route("/v1/nodes/{node}/exec", post(node_exec))
         .route("/v1/nodes/{node}/files/read", post(node_read_file))
         .route("/v1/nodes/{node}/files/write", post(node_write_file))
@@ -95,7 +104,10 @@ async fn require_node_token(
         .authenticate_reporting(state.bus.store().as_ref(), token, os)
         .await;
     match authed {
-        Ok(Some((device, cancel))) if device.kind == DeviceKind::Node => {
+        Ok(Some((device, cancel)))
+            if device.kind == DeviceKind::Node
+                || (device.kind == DeviceKind::Client && device.level >= DeviceLevel::Write) =>
+        {
             request
                 .extensions_mut()
                 .insert(AuthedNode { device, cancel });
@@ -105,7 +117,7 @@ async fn require_node_token(
             StatusCode::FORBIDDEN,
             Json(ApiError::new(
                 ErrorCode::Forbidden,
-                "this endpoint requires a node device token (`crossagents device add <name> --kind node`)",
+                "this endpoint requires a node token or a write/admin client device token",
             )),
         )
             .into_response(),
@@ -126,6 +138,8 @@ fn parse_device_os(raw: &str) -> Option<DeviceOs> {
         "windows" => Some(DeviceOs::Windows),
         "macos" | "darwin" => Some(DeviceOs::Macos),
         "linux" => Some(DeviceOs::Linux),
+        "ios" => Some(DeviceOs::Ios),
+        "android" => Some(DeviceOs::Android),
         _ => None,
     }
 }
@@ -143,6 +157,8 @@ struct NodeStreamQuery {
     #[serde(default)]
     cwd: String,
     #[serde(default)]
+    chats_dir: String,
+    #[serde(default)]
     version: String,
 }
 
@@ -151,6 +167,7 @@ async fn node_stream(
     Extension(authed): Extension<AuthedNode>,
     Query(q): Query<NodeStreamQuery>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let chats_dir = q.chats_dir.trim();
     let info = RemoteNodeInfo {
         id: authed.device.id.clone(),
         name: authed.device.name.clone(),
@@ -175,6 +192,7 @@ async fn node_stream(
             q.shell.trim().to_owned()
         },
         default_cwd: q.cwd.trim().to_owned(),
+        chats_dir: (!chats_dir.is_empty()).then(|| chats_dir.to_owned()),
         version: if q.version.trim().is_empty() {
             "unknown".into()
         } else {
@@ -182,10 +200,12 @@ async fn node_stream(
         },
         connected_at: Utc::now(),
         local: false,
+        online: true,
+        plugins: Vec::new(),
     };
 
     let (mut rx, registration) = state.remote_nodes.register(info.clone()).await;
-    let (out_tx, out_rx) = mpsc::channel::<Result<SseEvent, Infallible>>(64);
+    let (out_tx, out_rx) = mpsc::channel::<Result<SseEvent, Infallible>>(256);
     let cancel = authed.cancel;
     let shutdown = state.shutdown.clone();
 
@@ -200,14 +220,21 @@ async fn node_stream(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = shutdown.cancelled() => break,
-                call = rx.recv() => {
-                    let Some(call) = call else { break };
-                    let Ok(data) = serde_json::to_string(&call) else { continue };
-                    if out_tx
-                        .send(Ok(SseEvent::default().event("call").data(data)))
-                        .await
-                        .is_err()
-                    {
+                _ = out_tx.closed() => break,
+                msg = rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    let sse = match msg {
+                        NodeStreamMsg::Call(call) => {
+                            let Ok(data) = serde_json::to_string(&call) else { continue };
+                            SseEvent::default().event("call").data(data)
+                        }
+                        NodeStreamMsg::Frame(line) => {
+                            SseEvent::default()
+                                .event("frame")
+                                .data(line.trim_end_matches(['\r', '\n']))
+                        }
+                    };
+                    if out_tx.send(Ok(sse)).await.is_err() {
                         break;
                     }
                 }
@@ -220,6 +247,18 @@ async fn node_stream(
             .interval(Duration::from_secs(15))
             .text("ping"),
     )
+}
+
+async fn node_frames(
+    State(state): State<Arc<AppState>>,
+    Extension(authed): Extension<AuthedNode>,
+    body: String,
+) -> StatusCode {
+    if state.remote_nodes.feed_frames(&authed.device.id, &body).await {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
+    }
 }
 
 async fn node_result(
@@ -236,8 +275,640 @@ async fn node_result(
 
 async fn list_nodes(State(state): State<Arc<AppState>>) -> Json<ListNodesResponse> {
     Json(ListNodesResponse {
-        nodes: state.remote_nodes.list(state.started_at, VERSION).await,
+        nodes: state
+            .remote_nodes
+            .list(
+                state.store().as_ref(),
+                state.runtime.plugins(),
+                state.started_at,
+                VERSION,
+            )
+            .await,
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct NodeDirsQuery {
+    #[serde(default)]
+    path: String,
+}
+
+const DRIVES_SENTINEL: &str = "__drives__";
+
+async fn node_dirs(
+    State(state): State<Arc<AppState>>,
+    Path(node): Path<String>,
+    Query(q): Query<NodeDirsQuery>,
+) -> ApiResult<Json<NodeDirsResponse>> {
+    let key = node.trim();
+    if key.is_empty() || key.eq_ignore_ascii_case("local") {
+        let requested = q.path.trim().to_owned();
+        let resp = tokio::task::spawn_blocking(move || list_local_dirs(&requested))
+            .await
+            .map_err(|e| CoreError::Agent(format!("dir listing task failed: {e}")))??;
+        return Ok(Json(resp));
+    }
+
+    let info = state.remote_nodes.resolve_online(key).await.ok_or_else(|| {
+        CoreError::Agent(format!("节点 {key:?} 当前离线，无法浏览目录"))
+    })?;
+    let is_windows = info.os.eq_ignore_ascii_case("windows");
+    let req_path = q.path.trim();
+    let target = if req_path.is_empty() {
+        info.default_cwd.clone()
+    } else {
+        req_path.to_owned()
+    };
+    let listed: NodeListFilesResponse = state
+        .remote_nodes
+        .call(
+            &info.id,
+            NodeRpcOp::ListFiles(NodeListFilesRequest {
+                path: target,
+                max_entries: Some(500),
+            }),
+            FILE_OP_TIMEOUT,
+        )
+        .await?;
+    let mut dirs: Vec<NodeDirEntry> = listed
+        .entries
+        .into_iter()
+        .filter(|e| e.is_dir)
+        .map(|e| NodeDirEntry {
+            path: join_remote_path(&listed.path, &e.name, is_windows),
+            name: e.name,
+        })
+        .collect();
+    sort_dir_entries(&mut dirs);
+    let parent = parent_remote_path(&listed.path, is_windows);
+    Ok(Json(NodeDirsResponse {
+        node: info.name,
+        os: info.os,
+        path: listed.path,
+        parent,
+        dirs,
+        truncated: listed.truncated,
+    }))
+}
+
+fn sort_dir_entries(dirs: &mut [NodeDirEntry]) {
+    dirs.sort_by(|a, b| {
+        a.name
+            .starts_with('.')
+            .cmp(&b.name.starts_with('.'))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+}
+
+fn list_local_dirs(requested: &str) -> Result<NodeDirsResponse, CoreError> {
+    let os = std::env::consts::OS.to_owned();
+    if cfg!(windows) && requested == DRIVES_SENTINEL {
+        let mut dirs = Vec::new();
+        for letter in b'A'..=b'Z' {
+            let root = format!("{}:\\", letter as char);
+            if std::path::Path::new(&root).is_dir() {
+                dirs.push(NodeDirEntry {
+                    name: root.clone(),
+                    path: root,
+                });
+            }
+        }
+        return Ok(NodeDirsResponse {
+            node: "local".into(),
+            os,
+            path: String::new(),
+            parent: None,
+            dirs,
+            truncated: false,
+        });
+    }
+
+    let dir = if requested.is_empty() {
+        dirs::home_dir()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    } else {
+        std::path::PathBuf::from(requested)
+    };
+    let rd = std::fs::read_dir(&dir)
+        .map_err(|e| CoreError::Agent(format!("无法读取目录 {}: {e}", dir.display())))?;
+    let mut dirs = Vec::new();
+    for entry in rd.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path().to_string_lossy().into_owned();
+        dirs.push(NodeDirEntry { name, path });
+    }
+    sort_dir_entries(&mut dirs);
+    let truncated = dirs.len() > 500;
+    dirs.truncate(500);
+    let path_str = dir.to_string_lossy().into_owned();
+    let parent = match dir.parent() {
+        Some(p) if !p.as_os_str().is_empty() && p != dir => {
+            Some(p.to_string_lossy().into_owned())
+        }
+        _ if cfg!(windows) => Some(DRIVES_SENTINEL.into()),
+        _ => None,
+    };
+    Ok(NodeDirsResponse {
+        node: "local".into(),
+        os,
+        path: path_str,
+        parent,
+        dirs,
+        truncated,
+    })
+}
+
+fn join_remote_path(base: &str, child: &str, windows: bool) -> String {
+    let sep = if windows { '\\' } else { '/' };
+    let child = child.trim_matches(['/', '\\']);
+    if child.is_empty() {
+        return base.to_owned();
+    }
+    let trimmed = base.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        if windows {
+            child.to_owned()
+        } else {
+            format!("/{child}")
+        }
+    } else if windows {
+        format!("{trimmed}{sep}{}", child.replace('/', "\\"))
+    } else {
+        format!("{trimmed}{sep}{}", child.replace('\\', "/"))
+    }
+}
+
+fn parent_remote_path(path: &str, windows: bool) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if windows {
+        let clean = trimmed.trim_end_matches(['\\', '/']);
+        if clean.len() <= 2 && clean.ends_with(':') {
+            return None;
+        }
+        let idx = clean.rfind(['\\', '/'])?;
+        let head = &clean[..idx];
+        if head.len() == 2 && head.ends_with(':') {
+            Some(format!("{head}\\"))
+        } else if head.is_empty() {
+            None
+        } else {
+            Some(head.to_owned())
+        }
+    } else {
+        let clean = trimmed.trim_end_matches('/');
+        if clean.is_empty() {
+            return None;
+        }
+        match clean.rfind('/') {
+            Some(0) => Some("/".into()),
+            Some(idx) => Some(clean[..idx].to_owned()),
+            None => None,
+        }
+    }
+}
+
+fn sanitize_rel_path(raw: &str) -> Result<String, AppError> {
+    let trimmed = raw.trim().replace('\\', "/");
+    let stripped = trimmed.trim_start_matches("./").trim_matches('/');
+    if stripped.is_empty() {
+        return Ok(String::new());
+    }
+    if trimmed.starts_with('/')
+        || (trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':')
+    {
+        return Err(AppError::bad_request("path must be relative to the workspace"));
+    }
+    let mut parts = Vec::new();
+    for part in stripped.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            return Err(AppError::bad_request("path cannot escape the workspace"));
+        }
+        parts.push(part);
+    }
+    Ok(parts.join("/"))
+}
+
+fn is_ignored_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | ".DS_Store" | "__pycache__" | ".next" | "dist" | ".venv" | "venv"
+    )
+}
+
+async fn resolve_remote_agent_node(
+    state: &AppState,
+    agent: &Agent,
+) -> Result<(RemoteNodeInfo, String, bool), AppError> {
+    let node_key = agent
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::bad_request("agent has no remote node"))?;
+    let info = state
+        .remote_nodes
+        .resolve_online(node_key)
+        .await
+        .ok_or_else(|| {
+            CoreError::Agent(format!("节点 {node_key:?} 当前离线，无法查看工作区文件"))
+        })?;
+    let root = agent.cwd.to_string_lossy().into_owned();
+    let is_windows = info.os.eq_ignore_ascii_case("windows");
+    Ok((info, root, is_windows))
+}
+
+pub(crate) async fn remote_agent_files_tree(
+    state: &AppState,
+    agent: &Agent,
+    rel_path: &str,
+    all: bool,
+) -> ApiResult<Json<FileTreeResponse>> {
+    let (info, root, is_windows) = resolve_remote_agent_node(state, agent).await?;
+    let rel = sanitize_rel_path(rel_path)?;
+    let target = if rel.is_empty() {
+        root.clone()
+    } else {
+        join_remote_path(&root, &rel, is_windows)
+    };
+    let listed: NodeListFilesResponse = state
+        .remote_nodes
+        .call(
+            &info.id,
+            NodeRpcOp::ListFiles(NodeListFilesRequest {
+                path: target,
+                max_entries: Some(1000),
+            }),
+            FILE_OP_TIMEOUT,
+        )
+        .await?;
+    let mut entries = Vec::with_capacity(listed.entries.len());
+    for entry in listed.entries {
+        let ignored = is_ignored_name(&entry.name);
+        if ignored && !all {
+            continue;
+        }
+        let child_rel = if rel.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{rel}/{}", entry.name)
+        };
+        entries.push(FileEntry {
+            name: entry.name,
+            path: child_rel,
+            kind: if entry.is_dir {
+                FileKind::Dir
+            } else {
+                FileKind::File
+            },
+            size: (!entry.is_dir).then_some(entry.size),
+            ignored,
+        });
+    }
+    Ok(Json(FileTreeResponse {
+        root,
+        path: rel,
+        git_ref: None,
+        entries,
+    }))
+}
+
+pub(crate) async fn remote_agent_files_content(
+    state: &AppState,
+    agent: &Agent,
+    rel_path: &str,
+) -> ApiResult<Json<FileContentResponse>> {
+    let (info, root, is_windows) = resolve_remote_agent_node(state, agent).await?;
+    let rel = sanitize_rel_path(rel_path)?;
+    if rel.is_empty() {
+        return Err(AppError::bad_request("file path is required"));
+    }
+    let full = join_remote_path(&root, &rel, is_windows);
+    match state
+        .remote_nodes
+        .call::<NodeReadFileResponse>(
+            &info.id,
+            NodeRpcOp::ReadFile(NodeReadFileRequest {
+                path: full.clone(),
+                start_line: None,
+                end_line: None,
+            }),
+            FILE_OP_TIMEOUT,
+        )
+        .await
+    {
+        Ok(resp) => Ok(Json(FileContentResponse {
+            path: rel,
+            abs_path: resp.path,
+            size: resp.content.len() as u64,
+            binary: false,
+            truncated: resp.truncated,
+            text: Some(resp.content),
+            git_ref: None,
+        })),
+        Err(CoreError::Agent(msg)) if msg.contains("not valid UTF-8") => {
+            Ok(Json(FileContentResponse {
+                path: rel,
+                abs_path: full,
+                size: 0,
+                binary: true,
+                truncated: false,
+                text: None,
+                git_ref: None,
+            }))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub(crate) async fn remote_agent_files_status(
+    state: &AppState,
+    agent: &Agent,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let (info, root, _) = resolve_remote_agent_node(state, agent).await?;
+    let resp: NodeExecResponse = state
+        .remote_nodes
+        .call(
+            &info.id,
+            NodeRpcOp::Exec(NodeExecRequest {
+                command: "git status --porcelain=v1 -uall".into(),
+                cwd: Some(root.clone()),
+                timeout_secs: Some(8),
+            }),
+            Duration::from_secs(12),
+        )
+        .await?;
+    if resp.exit_code != Some(0) {
+        return Ok(Json(FileStatusResponse {
+            root,
+            git: false,
+            entries: Vec::new(),
+        }));
+    }
+    let mut entries = Vec::new();
+    for line in resp.stdout.lines() {
+        if line.len() < 4 {
+            continue;
+        }
+        let code = &line[..2];
+        let raw_path = line[3..].trim().trim_matches('"');
+        let path = raw_path
+            .rsplit_once(" -> ")
+            .map_or(raw_path, |(_, next)| next)
+            .replace('\\', "/");
+        if path.is_empty() {
+            continue;
+        }
+        let change = if code == "??" || code.contains('A') {
+            FileGitChange::Added
+        } else if code.contains('D') {
+            FileGitChange::Deleted
+        } else {
+            FileGitChange::Modified
+        };
+        entries.push(FileStatusEntry { path, change });
+    }
+    Ok(Json(FileStatusResponse {
+        root,
+        git: true,
+        entries,
+    }))
+}
+
+pub(crate) async fn remote_agent_files_search(
+    state: &AppState,
+    agent: &Agent,
+    query: &str,
+    all: bool,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let (info, root, is_windows) = resolve_remote_agent_node(state, agent).await?;
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Ok(Json(FileSearchResponse {
+            root,
+            paths: Vec::new(),
+            truncated: false,
+        }));
+    }
+
+    let git_cmd = if all {
+        "git ls-files --cached --others"
+    } else {
+        "git ls-files --cached --others --exclude-standard"
+    };
+    if let Ok(resp) = state
+        .remote_nodes
+        .call::<NodeExecResponse>(
+            &info.id,
+            NodeRpcOp::Exec(NodeExecRequest {
+                command: git_cmd.into(),
+                cwd: Some(root.clone()),
+                timeout_secs: Some(8),
+            }),
+            Duration::from_secs(12),
+        )
+        .await
+        && resp.exit_code == Some(0)
+    {
+        let mut paths = Vec::new();
+        let mut truncated = false;
+        for line in resp.stdout.lines() {
+            let p = line.trim().replace('\\', "/");
+            if p.is_empty() {
+                continue;
+            }
+            if p.to_ascii_lowercase().contains(&needle) {
+                if paths.len() >= 200 {
+                    truncated = true;
+                    break;
+                }
+                paths.push(p);
+            }
+        }
+        return Ok(Json(FileSearchResponse {
+            root,
+            paths,
+            truncated,
+        }));
+    }
+
+    // Fallback for non-git remote folders: bounded BFS via ListFiles.
+    let mut queue = std::collections::VecDeque::from([String::new()]);
+    let mut visited = 0usize;
+    let mut paths = Vec::new();
+    let mut truncated = false;
+    while let Some(dir) = queue.pop_front() {
+        if visited >= 25 || paths.len() >= 200 {
+            truncated = true;
+            break;
+        }
+        visited += 1;
+        let target = if dir.is_empty() {
+            root.clone()
+        } else {
+            join_remote_path(&root, &dir, is_windows)
+        };
+        let Ok(listed) = state
+            .remote_nodes
+            .call::<NodeListFilesResponse>(
+                &info.id,
+                NodeRpcOp::ListFiles(NodeListFilesRequest {
+                    path: target,
+                    max_entries: Some(300),
+                }),
+                Duration::from_secs(10),
+            )
+            .await
+        else {
+            continue;
+        };
+        for entry in listed.entries {
+            if !all && is_ignored_name(&entry.name) {
+                continue;
+            }
+            let rel = if dir.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{dir}/{}", entry.name)
+            };
+            if entry.is_dir {
+                queue.push_back(rel);
+            } else if rel.to_ascii_lowercase().contains(&needle) {
+                if paths.len() >= 200 {
+                    truncated = true;
+                    break;
+                }
+                paths.push(rel);
+            }
+        }
+    }
+    Ok(Json(FileSearchResponse {
+        root,
+        paths,
+        truncated,
+    }))
+}
+
+pub(crate) async fn remote_agent_files_resolve(
+    state: &AppState,
+    agent: &Agent,
+    req: ResolvePathsRequest,
+) -> ApiResult<Json<ResolvePathsResponse>> {
+    let (info, root, is_windows) = resolve_remote_agent_node(state, agent).await?;
+    let norm_root = root.replace('\\', "/").trim_end_matches('/').to_owned();
+    let mut candidates: Vec<Option<String>> = Vec::with_capacity(req.paths.len());
+    let mut parents: Vec<String> = Vec::new();
+    for raw in &req.paths {
+        let norm = raw.trim().replace('\\', "/");
+        let rel = if let Some(rest) = norm.strip_prefix(&format!("{norm_root}/")) {
+            sanitize_rel_path(rest).ok()
+        } else if norm == norm_root {
+            Some(String::new())
+        } else {
+            sanitize_rel_path(&norm).ok()
+        };
+        if let Some(r) = &rel
+            && !r.is_empty()
+        {
+            let parent = r.rsplit_once('/').map_or(String::new(), |(p, _)| p.to_owned());
+            if !parents.contains(&parent) && parents.len() < 12 {
+                parents.push(parent);
+            }
+        }
+        candidates.push(rel);
+    }
+
+    let mut dir_cache: std::collections::HashMap<String, Vec<crossagents_api_types::NodeFileEntry>> =
+        std::collections::HashMap::new();
+    for parent in parents {
+        let target = if parent.is_empty() {
+            root.clone()
+        } else {
+            join_remote_path(&root, &parent, is_windows)
+        };
+        if let Ok(listed) = state
+            .remote_nodes
+            .call::<NodeListFilesResponse>(
+                &info.id,
+                NodeRpcOp::ListFiles(NodeListFilesRequest {
+                    path: target,
+                    max_entries: Some(1000),
+                }),
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            dir_cache.insert(parent, listed.entries);
+        }
+    }
+
+    let entries = req
+        .paths
+        .into_iter()
+        .zip(candidates)
+        .map(|(input, rel)| {
+            let Some(rel) = rel else {
+                return ResolvedPath {
+                    input,
+                    path: None,
+                    abs_path: None,
+                    kind: None,
+                };
+            };
+            if rel.is_empty() {
+                return ResolvedPath {
+                    input,
+                    path: Some(String::new()),
+                    abs_path: Some(root.clone()),
+                    kind: Some(FileKind::Dir),
+                };
+            }
+            let (parent, name) = match rel.rsplit_once('/') {
+                Some((p, n)) => (p.to_owned(), n),
+                None => (String::new(), rel.as_str()),
+            };
+            let found = dir_cache.get(&parent).and_then(|list| {
+                list.iter().find(|e| {
+                    if is_windows {
+                        e.name.eq_ignore_ascii_case(name)
+                    } else {
+                        e.name == name
+                    }
+                })
+            });
+            match found {
+                Some(entry) => ResolvedPath {
+                    input,
+                    abs_path: Some(join_remote_path(&root, &rel, is_windows)),
+                    path: Some(rel),
+                    kind: Some(if entry.is_dir {
+                        FileKind::Dir
+                    } else {
+                        FileKind::File
+                    }),
+                },
+                None => ResolvedPath {
+                    input,
+                    path: None,
+                    abs_path: None,
+                    kind: None,
+                },
+            }
+        })
+        .collect();
+    Ok(Json(ResolvePathsResponse { entries }))
 }
 
 async fn node_exec(
@@ -426,7 +1097,15 @@ pub async fn call_mcp_tool(
 ) -> Option<Result<Value, CoreError>> {
     match name {
         "node_list" => {
-            let nodes = state.remote_nodes.list(state.started_at, VERSION).await;
+            let nodes = state
+                .remote_nodes
+                .list(
+                    state.store().as_ref(),
+                    state.runtime.plugins(),
+                    state.started_at,
+                    VERSION,
+                )
+                .await;
             Some(Ok(json!({ "nodes": nodes })))
         }
         "node_exec" => Some(run_mcp_exec(state, input).await),

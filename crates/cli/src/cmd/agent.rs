@@ -47,9 +47,12 @@ pub struct AddArgs {
     /// nothing.
     #[arg(long, value_enum)]
     pub role: Option<RoleArg>,
-    /// Working directory; defaults to the current directory.
+    /// Working directory; defaults to the current directory (or the node's default when `--node` is set).
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Remote execution node name, id, or hostname (`local` or omitted runs on the hub).
+    #[arg(long)]
+    pub node: Option<String>,
     /// Account the agent runs under (see `crossagents account ls`).
     #[arg(long)]
     pub account: Option<String>,
@@ -93,8 +96,12 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
         AgentCommand::Add(args) => {
             let args = *args;
             let cwd = match args.cwd {
-                Some(cwd) => cwd,
-                None => std::env::current_dir().context("cannot read current directory")?,
+                Some(cwd) => cwd.display().to_string(),
+                None if args.node.is_some() => String::new(),
+                None => std::env::current_dir()
+                    .context("cannot read current directory")?
+                    .display()
+                    .to_string(),
             };
             let req = CreateAgentRequest {
                 name: Some(args.name),
@@ -103,7 +110,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 driver: args.driver,
                 model: args.model,
                 role: args.role.map(Into::into),
-                cwd: cwd.display().to_string(),
+                cwd,
                 config: {
                     let mut config = serde_json::Map::new();
                     if let Some(account) = &args.account {
@@ -127,6 +134,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                     persona: args.persona,
                 },
                 worktree: None,
+                node: args.node,
             };
             let agent: Agent = client.post("/v1/agents", &req).await?;
             if ctx.json {

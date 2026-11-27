@@ -149,6 +149,9 @@ impl CollabSetup {
     /// The account's environment, plus what the project declares for an agent in a run
     /// worktree; the account's wins (docs/tasks/TOOLCHAIN.md §3.2).
     async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
+        if crate::runtime::is_remote_agent(agent) {
+            return Ok(Vec::new());
+        }
         let account = self.accounts.agent_env(agent).await?;
         let mut env = with_project_env(
             account,
@@ -195,25 +198,32 @@ impl SessionSetup for CollabSetup {
     }
 
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
-        // An existing agent does not open a session on a CLI below its description's floor
-        // either: the same gate `POST /v1/agents` puts on new ones, for agents made before it
-        // (docs/research/multica.md §2.9). A CLI that has not answered its version starts as
-        // before.
-        crate::version_gate::check(agent, &self.plugins).await?;
-        let mut agent_env = self.agent_env(agent).await?;
-        if let Some(role) = self.coordination_role(agent).await {
-            agent_env.push((COORDINATION_ENV.into(), role.into()));
-        }
-        // Use the driver's existing proxy-only refusal for sessions that have no proxy,
-        // including drivers which do not otherwise run the vendor reachability probe.
-        if crossagents_drivers::process::effective_proxy_url(&agent_env).is_none() {
-            let policy =
-                crossagents_core::EgressPolicy::from_env(&agent_env).unwrap_or_else(|| {
-                    crossagents_core::EgressPolicy::default_for_provider(&agent.plugin)
-                });
-            crossagents_drivers::process::check_proxy(&agent_env, None, policy).await?;
-        }
-        self.accounts.check_fingerprint(agent, &agent_env).await?;
+        let remote = crate::runtime::is_remote_agent(agent);
+        let agent_env = if remote {
+            // Remote nodes run their own local CLIs, logins, proxies and filesystem.
+            Vec::new()
+        } else {
+            // An existing agent does not open a session on a CLI below its description's floor
+            // either: the same gate `POST /v1/agents` puts on new ones, for agents made before it
+            // (docs/research/multica.md §2.9). A CLI that has not answered its version starts as
+            // before.
+            crate::version_gate::check(agent, &self.plugins).await?;
+            let mut agent_env = self.agent_env(agent).await?;
+            if let Some(role) = self.coordination_role(agent).await {
+                agent_env.push((COORDINATION_ENV.into(), role.into()));
+            }
+            // Use the driver's existing proxy-only refusal for sessions that have no proxy,
+            // including drivers which do not otherwise run the vendor reachability probe.
+            if crossagents_drivers::process::effective_proxy_url(&agent_env).is_none() {
+                let policy =
+                    crossagents_core::EgressPolicy::from_env(&agent_env).unwrap_or_else(|| {
+                        crossagents_core::EgressPolicy::default_for_provider(&agent.plugin)
+                    });
+                crossagents_drivers::process::check_proxy(&agent_env, None, policy).await?;
+            }
+            self.accounts.check_fingerprint(agent, &agent_env).await?;
+            agent_env
+        };
         let (permission, permissions) = self.permissions(agent).await;
         let (lessons, groups) = match self.orchestrator.get() {
             Some(orchestrator) => (
@@ -299,10 +309,10 @@ fn instructions(
 ) -> String {
     let guide = crossagents_orchestrator::protocol::guide_for(agent, groups);
     let mut text = format!("{}\n\n{guide}", agent.identity());
-    for section in [crate::rules::for_agent(agent).as_deref(), lessons]
-        .into_iter()
-        .flatten()
-    {
+    let local_rules = (!crate::runtime::is_remote_agent(agent))
+        .then(|| crate::rules::for_agent(agent))
+        .flatten();
+    for section in [local_rules.as_deref(), lessons].into_iter().flatten() {
         text.push_str("\n\n");
         text.push_str(section);
     }

@@ -1,8 +1,134 @@
 use std::sync::Mutex;
 
+use reqwest::Url;
 use serde_json::{Value, json};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 use tauri_plugin_updater::{Update, UpdaterExt};
+
+fn normalize_proxy(raw: &str) -> Option<Url> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let chosen = if trimmed.contains('=') {
+        let mut https = None;
+        let mut http = None;
+        let mut socks = None;
+        for part in trimmed.split(';') {
+            let Some((k, v)) = part.split_once('=') else {
+                continue;
+            };
+            let v = v.trim();
+            if v.is_empty() {
+                continue;
+            }
+            match k.trim().to_ascii_lowercase().as_str() {
+                "https" => https = Some(v),
+                "http" => http = Some(v),
+                "socks" => socks = Some(v),
+                _ => {}
+            }
+        }
+        https.or(http).or(socks)?
+    } else {
+        trimmed
+    };
+    let with_scheme = if chosen.contains("://") {
+        chosen.to_owned()
+    } else {
+        format!("http://{chosen}")
+    };
+    Url::parse(&with_scheme).ok()
+}
+
+fn system_proxy_url() -> Option<Url> {
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key)
+            && let Some(url) = normalize_proxy(&val)
+        {
+            return Some(url);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let query = |name: &str| -> Option<String> {
+            let out = Command::new("reg")
+                .creation_flags(0x08000000)
+                .args([
+                    "query",
+                    r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                    "/v",
+                    name,
+                ])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().find_map(|line| {
+                let mut parts = line.split_whitespace();
+                if !parts.next()?.eq_ignore_ascii_case(name) {
+                    return None;
+                }
+                let kind = parts.next()?;
+                let at = line.find(kind)? + kind.len();
+                Some(line[at..].trim().to_owned())
+            })
+        };
+        let enabled = query("ProxyEnable").is_some_and(|v| v == "0x1" || v == "1");
+        if enabled
+            && let Some(server) = query("ProxyServer")
+            && let Some(url) = normalize_proxy(&server)
+        {
+            return Some(url);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+        if let Ok(out) = Command::new("scutil")
+            .arg("--proxy")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            && out.status.success()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let get = |key: &str| -> Option<String> {
+                text.lines().find_map(|line| {
+                    let (k, v) = line.split_once(':')?;
+                    (k.trim() == key).then(|| v.trim().to_owned())
+                })
+            };
+            for (en, host, port) in [
+                ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+                ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+            ] {
+                if get(en).as_deref() == Some("1")
+                    && let (Some(h), Some(p)) = (get(host), get(port))
+                    && !h.is_empty()
+                    && !p.is_empty()
+                    && let Some(url) = normalize_proxy(&format!("http://{h}:{p}"))
+                {
+                    return Some(url);
+                }
+            }
+        }
+    }
+    None
+}
 
 #[derive(Default)]
 pub struct Updates {
@@ -75,7 +201,11 @@ async fn run_check(app: &AppHandle, updates: &Updates, events: Option<&Channel<V
         json!({ "state": "checking", "current": current }),
     );
     let result = async {
-        let Some(update) = app.updater()?.check().await? else {
+        let mut builder = app.updater_builder();
+        if let Some(proxy) = system_proxy_url() {
+            builder = builder.proxy(proxy);
+        }
+        let Some(update) = builder.build()?.check().await? else {
             return Ok(json!({ "state": "latest", "current": current, "checked_at": now() }));
         };
         let version = update.version.clone();

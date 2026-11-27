@@ -2,6 +2,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
+import type { RemoteNodeInfo } from "@bindings/RemoteNodeInfo";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Work } from "@bindings/Work";
@@ -24,7 +25,8 @@ import { sessionWork } from "./lib/projectView";
 import { stepLine } from "./lib/workGroups";
 import { WorkDetails } from "./lib/workDetails";
 import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
-import { CENTRE_MACHINE, machineFoldKey, machineGroups, reorderIds, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
+import { CENTRE_MACHINE, buildMachineGroups, machineFoldKey, reorderIds, searchMachineGroups, type SidebarMachine, capped, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
+import { agentMachineKey, normalizeNodeOs, selectNode, useNodes } from "./nodes";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { IssueNoticeActions } from "./lessons/IssueNoticeActions";
@@ -450,6 +452,7 @@ function OtherWorks({ works, runs, agents, route }: { works: Work[]; runs: RunDe
 
 export function Sidebar({ route }: { route: string[] }) {
   const { list, tree, agents, loaded } = useWorkspaces();
+  const nodes = useNodes();
   const questions = useQuestions();
   const pinned = usePinned();
   const order = projectOrder.use();
@@ -552,18 +555,33 @@ export function Sidebar({ route }: { route: string[] }) {
     await Promise.allSettled(targets.map((a) => api.archiveAgent(a.id, true)));
     flashToast(`已归档 ${targets.length} 个空闲会话`);
   };
-  const groups = sidebarGroups(everyone, runs, list, pinned, [...order], sessionOrder);
+  const remoteNodes = (nodes.data ?? []).filter((n) => !n.local);
+  const remoteNodeMap = new Map(remoteNodes.map((n) => [n.id, n]));
+  const allMachines = buildMachineGroups(
+    everyone,
+    runs,
+    remoteNodes.map((n) => n.id),
+    pinned,
+    [...order],
+    sessionOrder,
+  );
+  const groups = allMachines.flatMap((m) => m.groups);
   const isActiveMember = (m: SidebarMember) => {
     const state = deliveryOf(m.agent.id)?.state;
     const running = state ? state !== "idle" : m.agent.status === "running";
     return running || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id);
   };
-  const filteredGroups = onlyActive
-    ? groups.map((g) => ({ ...g, members: g.members.filter(isActiveMember) })).filter((g) => g.members.length > 0)
-    : groups;
-  const shown = searchGroups(filteredGroups, query);
-  // A work group belongs to the project its `repo` names; one no project claims goes last.
-  const projectKeys = new Set(groups.map((g) => g.key));
+  const filteredMachines = onlyActive
+    ? allMachines.map((m) => ({
+        ...m,
+        groups: m.groups.map((g) => ({ ...g, members: g.members.filter(isActiveMember) })).filter((g) => g.members.length > 0),
+      }))
+    : allMachines;
+  const shownMachines = searchMachineGroups(filteredMachines, query);
+  const shown = shownMachines.flatMap((m) => m.groups);
+  // A work group belongs to the project its `repo` names on the centre machine; one no project claims goes last.
+  const centreGroups = allMachines.find((m) => m.key === CENTRE_MACHINE)?.groups ?? [];
+  const projectKeys = new Set(centreGroups.map((g) => g.key));
   const otherWorks = workList.filter((w) => !projectKeys.has(workProject(w)));
   const archived = everyone.filter((a) => a.archived_at);
   const isSession = (a: Agent) => route[0] === "s" && isAgent(a, route[1]);
@@ -575,11 +593,12 @@ export function Sidebar({ route }: { route: string[] }) {
     e.stopPropagation();
     setCtxMenu({ agent, x: Math.min(e.clientX, window.innerWidth - 200), y: Math.min(e.clientY, window.innerHeight - 220) });
   };
-  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[]) => (
+  const row = (member: SidebarMember, groupKey?: string, groupIds?: string[], nodeOffline?: boolean) => (
     <SessionRow
       key={member.agent.id}
       member={member}
       active={isSession(member.agent)}
+      nodeOffline={nodeOffline}
       dragKey={groupKey ? { group: groupKey, id: member.agent.id } : undefined}
       onReorder={groupKey && groupIds ? (fromId, toId, after) => reorderInGroup(groupKey, groupIds, fromId, toId, after) : undefined}
       onMenu={openRowMenu(member.agent)}
@@ -745,58 +764,58 @@ export function Sidebar({ route }: { route: string[] }) {
                 ))}
               </section>
             )}
-            {(() => {
-              const machines = machineGroups(shown);
-              const singleLocal = machines.length === 1 && machines[0].key === CENTRE_MACHINE;
-              return machines.map((machine) => {
-                const body = (
-                  <>
-                    {machine.groups.map((g) => {
-                      const groupWorks = workList.filter((w) => workProject(w) === g.key);
-                      const workLeads = new Set(groupWorks.map((w) => w.lead));
-                      const sessionMembers = searching
-                        ? g.members
-                        : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
-                      return (
-                        <Group
-                          key={g.key}
-                          group={g}
+            {shownMachines.map((machine) => {
+              const isRemote = machine.key !== CENTRE_MACHINE;
+              const remoteNode = isRemote ? remoteNodeMap.get(machine.key) : undefined;
+              const nodeOffline = isRemote && !(remoteNode?.online ?? false);
+              return (
+                <Machine key={machine.key} machine={machine} node={remoteNode} searching={searching}>
+                  {machine.groups.map((g) => {
+                    const isCentre = !isRemote;
+                    const foldKey = isCentre ? g.key : `${machine.key}:${g.key}`;
+                    const groupWorks = isCentre ? workList.filter((w) => workProject(w) === g.key) : [];
+                    const workLeads = new Set(groupWorks.map((w) => w.lead));
+                    const sessionMembers = searching
+                      ? g.members
+                      : g.members.filter((m) => !workLeads.has(m.agent.id) || isSession(m.agent) || pinned.has(sessionKey(m.agent)));
+                    return (
+                      <Group
+                        key={foldKey}
+                        group={g}
+                        foldKey={foldKey}
+                        machineKey={machine.key}
+                        remote={isRemote}
+                        searching={searching}
+                        active={isCentre && route[0] === "w" && route[1] === g.key}
+                        onMove={
+                          g.key === CHATS || isRemote
+                            ? undefined
+                            : () => {
+                                const keys = centreGroups.filter((x) => x.key !== CHATS).map((x) => x.key);
+                                const i = keys.indexOf(g.key);
+                                if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
+                                projectOrder.replace(keys);
+                              }
+                        }
+                      >
+                        <Capped
+                          items={sessionMembers}
+                          keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
                           searching={searching}
-                          active={route[0] === "w" && route[1] === g.key}
-                          onMove={
-                            g.key === CHATS
-                              ? undefined
-                              : () => {
-                                  const keys = groups.filter((x) => x.key !== CHATS).map((x) => x.key);
-                                  const i = keys.indexOf(g.key);
-                                  if (i > 0) [keys[i - 1], keys[i]] = [keys[i], keys[i - 1]];
-                                  projectOrder.replace(keys);
-                                }
-                          }
                         >
-                          <Capped
-                            items={sessionMembers}
-                            keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
-                            searching={searching}
-                          >
-                            {(m) => row(m, g.key, sessionMembers.map((x) => x.agent.id))}
-                          </Capped>
-                          {!searching && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
-                        </Group>
-                      );
-                    })}
-                    {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
-                  </>
-                );
-                return singleLocal ? (
-                  <div key={machine.key}>{body}</div>
-                ) : (
-                  <Machine key={machine.key} machine={machine} searching={searching}>
-                    {body}
-                  </Machine>
-                );
-              });
-            })()}
+                          {(m) => row(m, foldKey, sessionMembers.map((x) => x.agent.id), nodeOffline)}
+                        </Capped>
+                        {!searching && isCentre && <WorkList works={groupWorks} runs={runs} agents={everyone} route={route} />}
+                      </Group>
+                    );
+                  })}
+                  {!searching && isRemote && machine.groups.length === 0 && (
+                    <p className="machine-empty">{nodeOffline ? "节点离线" : "暂无会话 · 点右侧 + 新建"}</p>
+                  )}
+                  {!searching && !isRemote && <OtherWorks works={otherWorks} runs={runs} agents={everyone} route={route} />}
+                </Machine>
+              );
+            })}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
@@ -914,11 +933,11 @@ export function Sidebar({ route }: { route: string[] }) {
                     </span>
                   </button>
                 )}
-                {list.filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd)).length > 0 && (
+                {list.filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd) && w.agents.every((a) => agentMachineKey(a) === agentMachineKey(ctxMenu.agent))).length > 0 && (
                   <>
                     <div className="menu-head">移入项目</div>
                     {list
-                      .filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd))
+                      .filter((w) => wsKey(w.path) !== wsKey(ctxMenu.agent.cwd) && w.agents.every((a) => agentMachineKey(a) === agentMachineKey(ctxMenu.agent)))
                       .map((w) => (
                         <button
                           key={w.key}
@@ -1050,19 +1069,26 @@ function NeedsYou({ items: incoming, agents }: { items: TodoItem[]; agents: Agen
 
 function Group({
   group,
+  foldKey,
+  machineKey = CENTRE_MACHINE,
+  remote = false,
   searching,
   active,
   onMove,
   children,
 }: {
   group: SidebarGroup;
+  foldKey?: string;
+  machineKey?: string;
+  remote?: boolean;
   searching: boolean;
   active: boolean;
   onMove?: () => void;
   children: ReactNode;
 }) {
   const collapsed = useCollapsed();
-  const closed = groupClosed(collapsed, group.key, searching);
+  const key = foldKey ?? group.key;
+  const closed = groupClosed(collapsed, key, searching);
   const name = group.key === CHATS ? t("sidebar.standalone") : group.name;
   const needs = useContext(Needs);
   const confirmed = useContext(Confirmed);
@@ -1084,7 +1110,7 @@ function Group({
           aria-label={t(closed ? "sidebar.expandProject" : "sidebar.collapseProject", { name })}
           aria-expanded={!closed}
           disabled={searching}
-          onClick={() => toggleCollapsed(group.key)}
+          onClick={() => toggleCollapsed(key)}
         >
           <span className="project-glyph">
             <Icon name={group.key === CHATS ? "chat" : "folder"} size={14} />
@@ -1093,8 +1119,10 @@ function Group({
             <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
           </span>
         </button>
-        {group.key === CHATS ? (
-          <span className="group-name project-name">{name}</span>
+        {group.key === CHATS || remote ? (
+          <button type="button" className="group-name project-name" title={name} onClick={() => !searching && toggleCollapsed(key)}>
+            {name}
+          </button>
         ) : (
           <a className="group-name project-name" title={name} href={wsHref(group.key)} aria-current={active ? "page" : undefined}>
             {name}
@@ -1131,8 +1159,9 @@ function Group({
             className="icon-btn group-add"
             href="#/"
             onClick={() => {
+              selectNode(remote ? machineKey : "");
               selectWorkspace(group.key === CHATS ? "" : group.key);
-              startNew(group.key === CHATS ? "chat" : "run");
+              startNew(remote || group.key === CHATS ? "chat" : "run");
             }}
             title={t("sidebar.newIn", { name })}
             aria-label={t("sidebar.newIn", { name })}
@@ -1180,12 +1209,14 @@ type Dot = "live" | "warn" | "danger" | "unread" | undefined;
 function SessionRow({
   member,
   active,
+  nodeOffline,
   dragKey,
   onReorder,
   onMenu,
 }: {
   member: SidebarMember;
   active: boolean;
+  nodeOffline?: boolean;
   dragKey?: { group: string; id: string };
   onReorder?: (fromId: string, toId: string, after: boolean) => void;
   onMenu?: (e: ReactMouseEvent) => void;
@@ -1214,9 +1245,11 @@ function SessionRow({
             ? "等它来取"
             : running
               ? t("sidebar.working")
-              : agent.status === "stopped"
-                ? t("sidebar.stopped")
-                : t("sidebar.idle");
+              : nodeOffline
+                ? "节点离线"
+                : agent.status === "stopped"
+                  ? t("sidebar.stopped")
+                  : t("sidebar.idle");
   const turn = useRowLive(agent);
   const summary = summaryText(member.summary) || summaryText(agent.topic);
   const fresh = unread?.kind === "done";
@@ -1260,7 +1293,7 @@ function SessionRow({
     <Row
       href={sessionHref(agent)}
       active={active}
-      dim={compact && agent.status === "stopped"}
+      dim={compact && (agent.status === "stopped" || !!nodeOffline)}
       compact={compact}
       flash={justDone}
       peek={peek}
@@ -1858,21 +1891,85 @@ function OldHubNotice() {
 }
 
 /**
- * A machine and the workspaces on it. Today the only machine is the centre, where the hub runs
- * (docs/MULTI-NODE.md §15): its row carries what the old connection mark did — 本机, or 远程 host,
- * and whether the tunnel is up — so a dropped centre is not mistaken for a quiet page. Folding
- * is remembered with the groups; searching shows the matches regardless. The row opens 设置 →「连接」.
+ * A machine and the workspaces on it: the centre hub machine plus any connected (or known
+ * offline) remote execution nodes. Folding is remembered per machine; hovering offers `+`
+ * to start a new Chat directly on that machine.
  */
-function Machine({ machine, searching, children }: { machine: SidebarMachine; searching: boolean; children: ReactNode }) {
+function Machine({
+  machine,
+  node,
+  searching,
+  children,
+}: {
+  machine: SidebarMachine;
+  node?: RemoteNodeInfo;
+  searching: boolean;
+  children: ReactNode;
+}) {
+  const isCentre = machine.key === CENTRE_MACHINE;
   const state = useConnectionState();
   const status = useConnectionStatus();
   const [info, setInfo] = useState<HubInfo>();
   useEffect(() => {
-    if (status === "connected") api.info().then(setInfo, () => {});
-  }, [status, state?.mode]);
+    if (isCentre && status === "connected") api.info().then(setInfo, () => {});
+  }, [isCentre, status, state?.mode]);
   const collapsed = useCollapsed();
   const foldKey = machineFoldKey(machine.key);
   const closed = groupClosed(collapsed, foldKey, searching);
+
+  if (!isCentre) {
+    const online = node?.online ?? false;
+    const os = normalizeNodeOs(node?.os);
+    const name = node?.name || machine.key;
+    const installed = (node?.plugins ?? []).filter((p) => p.installed).map((p) => p.name);
+    const title = [
+      node?.hostname && node.hostname !== name ? `${name} (${node.hostname})` : name,
+      online ? "在线节点" : "离线节点",
+      node?.os && node.os !== "unknown" ? (node.arch ? `${node.os}/${node.arch}` : node.os) : undefined,
+      installed.length ? `可用 CLI: ${installed.join(", ")}` : undefined,
+      node?.default_cwd || undefined,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <section className="group machine">
+        <div className="group-head machine-head">
+          <button
+            className="icon-btn"
+            aria-label={`${closed ? "展开" : "折叠"}机器 ${name}`}
+            aria-expanded={!closed}
+            disabled={searching}
+            onClick={() => toggleCollapsed(foldKey)}
+          >
+            <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
+          </button>
+          <a className={`machine-name conn-where ${online ? "ok" : "muted"}`} href="#/settings/devices" title={title}>
+            <OsIcon os={os} size={14} />
+            <span className="text">{name}</span>
+            {!online && <span className="machine-via">离线</span>}
+            <span className={`dot ${online ? "ok" : "off"}`} />
+          </a>
+          {online && (
+            <a
+              className="icon-btn machine-add"
+              href="#/"
+              onClick={() => {
+                selectNode(machine.key);
+                selectWorkspace("");
+                startNew("chat");
+              }}
+              title={`在 ${name} 上新建会话`}
+              aria-label={`在 ${name} 上新建会话`}
+            >
+              <Icon name="plus" size={13} />
+            </a>
+          )}
+        </div>
+        {!closed && <div className="machine-body">{children}</div>}
+      </section>
+    );
+  }
+
   // A plain browser tab has no connection bridge: the mark then follows the hub connection alone.
   const words = state ? markWords(state) : undefined;
   const tone = words?.tone ?? (status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger");
@@ -1895,8 +1992,21 @@ function Machine({ machine, searching, children }: { machine: SidebarMachine; se
         <a className={`machine-name conn-where ${tone}`} href="#/settings/connection" title={title}>
           <OsIcon os={info?.machine?.os} size={14} />
           <span className="text">{name}</span>
-          {remote && words && host && <span className="machine-via">{words.text}</span>}
+          {remote && host && <span className="machine-via">中心</span>}
           <span className={`dot ${tone === "muted" ? "off" : tone}`} />
+        </a>
+        <a
+          className="icon-btn machine-add"
+          href="#/"
+          onClick={() => {
+            selectNode("");
+            selectWorkspace("");
+            startNew("chat");
+          }}
+          title={`在 ${name} 上新建会话`}
+          aria-label={`在 ${name} 上新建会话`}
+        >
+          <Icon name="plus" size={13} />
         </a>
       </div>
       {!closed && <div className="machine-body">{children}</div>}

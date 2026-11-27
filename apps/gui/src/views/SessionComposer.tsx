@@ -9,13 +9,15 @@ import { api, errorText } from "../api";
 import { HeldFiles, MiniFiles, useHeld } from "../attach";
 import { ErrorBox, Icon, Vendor, displayName } from "../components";
 import { useCompact } from "../contextusage";
-import { useHubData, usePlugins } from "../hub";
+import { useHubData } from "../hub";
+import { useNodePlugins } from "../nodes";
 import { supportNote } from "../lib/attachments";
 // `draft` is this file's word for the text being typed, so the module keeps the plural.
 import * as drafts from "../lib/draft";
 import { queueHeading } from "../lib/delivery";
 import { t } from "../lib/i18n";
 import { canSteer, composerAction, composerHint, composerPlaceholder } from "../lib/steer";
+import { isImeEvent } from "../lib/ime";
 import { mentionsFor, useMention } from "../mention";
 import { ModelEffortPicks } from "../modelPick";
 import { sendMessage } from "../outbox";
@@ -104,7 +106,7 @@ export function Composer({
   const [deferred, setDeferred] = useState<string[]>([]);
   const [keepNote, setKeepNote] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
-  const plugins = usePlugins();
+  const plugins = useNodePlugins(agent.node);
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
   const compact = useCompact(agent);
   const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
@@ -234,7 +236,7 @@ export function Composer({
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (isImeEvent(e)) return;
     if (e.key === "Escape") {
       if (canInterrupt) {
         e.preventDefault();

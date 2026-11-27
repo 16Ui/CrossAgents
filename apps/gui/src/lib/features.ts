@@ -111,6 +111,7 @@ export function featureOf(path: string): Feature | undefined {
 export function operationOf(method: string, path: string): RefusalKey | undefined {
   const p = path.split("?")[0];
   if (method === "DELETE" && /^\/v1\/devices\/[^/]+$/.test(p)) return "devices.revoke";
+  if (method === "POST" && /^\/v1\/devices\/[^/]+\/level$/.test(p)) return "devices.revoke";
   if (method === "POST" && /^\/v1\/agents\/[^/]+\/settings$/.test(p)) return "agent.settings";
   if (method === "POST" && p === "/v1/repos/init") return "repos.init";
   return featureOf(p);
@@ -184,6 +185,12 @@ export function noteForbidden(method: string, path: string, message: string) {
   if (isFeature(key) && !offeredOf(state).includes(key)) return;
   if (state.refused[key] === message) return;
   publish({ ...state, refused: { ...state.refused, [key]: message } });
+}
+
+/** Forgets cached 403 refusals (for instance after this device is promoted to admin). */
+export function clearRefusals() {
+  if (Object.keys(state.refused).length === 0) return;
+  publish({ ...state, refused: {} });
 }
 
 /** Forgets what the hub said, as when the page starts over. */

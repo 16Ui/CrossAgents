@@ -1,0 +1,98 @@
+name: Deploy Mobile PWA (WASM iroh)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/mobile-web/**"
+      - ".github/workflows/mobile-pwa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install clang and binaryen (wasm-opt) for wasm32 build
+        run: sudo apt-get update && sudo apt-get install -y clang binaryen
+
+      - name: Install wasm-bindgen-cli matching Cargo.lock
+        run: |
+          WB_VER=$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/"/,""); print $3; exit}' apps/mobile-web/wasm/Cargo.lock)
+          echo "Installing wasm-bindgen-cli v${WB_VER}..."
+          curl -sSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WB_VER}/wasm-bindgen-${WB_VER}-x86_64-unknown-linux-musl.tar.gz" | tar -xz --strip-components=1 -C /usr/local/bin "wasm-bindgen-${WB_VER}-x86_64-unknown-linux-musl/wasm-bindgen"
+          wasm-bindgen --version
+
+      - name: Build crossagents-link-wasm
+        working-directory: apps/mobile-web/wasm
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo build --release --target wasm32-unknown-unknown
+          mkdir -p ../src/wasm-pkg
+          wasm-bindgen \
+            target/wasm32-unknown-unknown/release/crossagents_link_wasm.wasm \
+            --target web \
+            --out-dir ../src/wasm-pkg \
+            --no-typescript
+          WASM_OUT=../src/wasm-pkg/crossagents_link_wasm_bg.wasm
+          echo "WASM before wasm-opt: raw=$(wc -c < "$WASM_OUT") gzip=$(gzip -c "$WASM_OUT" | wc -c)"
+          if wasm-opt -Os \
+            --strip-debug --strip-producers \
+            --enable-bulk-memory \
+            --enable-nontrapping-float-to-int \
+            --enable-sign-ext \
+            --enable-mutable-globals \
+            --enable-reference-types \
+            --enable-multivalue \
+            "$WASM_OUT" -o "${WASM_OUT}.opt"; then
+            mv "${WASM_OUT}.opt" "$WASM_OUT"
+            echo "WASM after wasm-opt:  raw=$(wc -c < "$WASM_OUT") gzip=$(gzip -c "$WASM_OUT" | wc -c)"
+          else
+            rm -f "${WASM_OUT}.opt"
+            echo "wasm-opt skipped"
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build Mobile PWA
+        working-directory: apps/mobile-web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/mobile-web/dist
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

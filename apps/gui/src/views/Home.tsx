@@ -8,9 +8,13 @@ import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentLine, agentTitle, displayName, hueOf, relationText, sessionLabel, useAgents } from "../components";
-import { useHubData, usePlugins } from "../hub";
+import { useHubData } from "../hub";
+import { CENTRE_MACHINE } from "../lib/sidebarTree";
+import { agentMachineKey, normalizeNodeOs, selectNode, useNodePlugins, useNodes, useSelectedNode } from "../nodes";
+import { OsIcon } from "../osIcon";
 import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
+import { isImeEvent } from "../lib/ime";
 import { modelDisplay } from "../lib/modelDisplay";
 import { favoriteKey, toggleFavorite, useModelFavorites } from "../lib/modelFavorites";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
@@ -26,7 +30,8 @@ import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
 import { mentionsFor, useMention } from "../mention";
 import { QuestionCards } from "../questions";
-import { CHATS, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
+import { RemoteDirPicker } from "../RemoteDirPicker";
+import { CHATS, homeOf, isChat, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
 const DRAFT: draft.Where = { kind: "home" };
 const PRESET_KEY = "crossagents.preset";
@@ -88,24 +93,60 @@ function shortImportTitle(title: string, fallbackId: string): string {
  */
 export function HomeView() {
   const agents = useAgents();
-  const plugins = usePlugins();
+  const nodes = useNodes();
+  const selectedNode = useSelectedNode();
+  const remoteNodes = (nodes.data ?? []).filter((n) => !n.local);
+  const localNode = (nodes.data ?? []).find((n) => n.local);
+  const activeRemote = selectedNode
+    ? remoteNodes.find((n) => n.id === selectedNode || n.name === selectedNode)
+    : undefined;
+  const activeNodeId = activeRemote?.id ?? "";
+  const isRemoteNode = !!activeRemote;
+  const plugins = useNodePlugins(activeNodeId);
   const scope = useSelectedWorkspace();
   const { list: all } = useWorkspaces();
-  // Projects only: the chats group is not a directory to work in.
-  const list = all.filter((w) => w.key !== CHATS);
+  const targetMachineKey = activeNodeId || CENTRE_MACHINE;
+  const everyoneAll = (agents.data ?? []).filter((a) => !a.archived_at);
+  const machineAgents = everyoneAll.filter((a) => agentMachineKey(a) === targetMachineKey);
+  // Projects scoped to the currently selected execution machine (centre or remote node).
+  const list = (() => {
+    const map = new Map<string, { key: string; path: string; name: string }>();
+    if (!isRemoteNode) {
+      for (const w of all) {
+        if (w.key === CHATS) continue;
+        if (w.runs.length > 0 || w.agents.some((a) => agentMachineKey(a) === CENTRE_MACHINE)) {
+          map.set(w.key, { key: w.key, path: w.path, name: w.name });
+        }
+      }
+    }
+    for (const a of machineAgents) {
+      if (isChat(a)) continue;
+      const h = homeOf(a);
+      if (!h) continue;
+      const k = wsKey(h);
+      if (!map.has(k)) map.set(k, { key: k, path: h, name: wsName(h) });
+    }
+    return [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
+  })();
   const current = list.find((w) => w.key === scope);
   const [folder, setFolder] = useState<string>();
-  // A remote hub's folders are on the centre's machine: there is no system dialog for them,
-  // so the person types the path and the hub checks it when the agent is created.
+  // A remote hub or a remote execution node has its folders on that machine: there is no
+  // local system dialog for them, so the person types the path on that machine.
   const remote = useConnectionState()?.mode === "remote";
+  const manualOnly = remote || isRemoteNode;
   const [pathEntry, setPathEntry] = useState(false);
+  const [dirPickerOpen, setDirPickerOpen] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const cwd = folder ?? current?.path;
   const [mode, setModeState] = useState<Mode>(() => load<Mode>(MODE_KEY, "chat", (v) => v === "chat" || v === "run"));
   const setMode = (m: Mode) => {
+    if (isRemoteNode && m === "run") return;
     setModeState(m);
     save(MODE_KEY, m);
   };
+  useEffect(() => {
+    if (isRemoteNode && mode === "run") setModeState("chat");
+  }, [isRemoteNode, mode]);
   // 文件 → 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
   useEffect(() => {
     const onMode = (e: Event) => {
@@ -140,7 +181,7 @@ export function HomeView() {
     return a ? a.account.label || a.account.id : undefined;
   };
   // Archived conversations are not picked again.
-  const everyone = (agents.data ?? []).filter((a) => !a.archived_at);
+  const everyone = machineAgents;
   // In a workspace, offer only its agents (a run works in its planner's directory).
   const here = everyone.filter((a) => !cwd || wsKey(a.cwd) === wsKey(cwd));
   // What was typed last time this page was open: leaving it unmounts the composer, and a
@@ -232,8 +273,11 @@ export function HomeView() {
   const [modelOpenSignal, setModelOpenSignal] = useState(0);
   const favorites = useModelFavorites();
   const importable = useHubData(
-    () => api.importableSessions(importAllDirs ? undefined : sessionRepo).then((r) => r.candidates.filter((c) => !c.existing_agent_id)),
-    [sessionRepo, importAllDirs],
+    () =>
+      isRemoteNode
+        ? Promise.resolve([] as ImportableSession[])
+        : api.importableSessions(importAllDirs ? undefined : sessionRepo).then((r) => r.candidates.filter((c) => !c.existing_agent_id)),
+    [sessionRepo, importAllDirs, isRemoteNode],
     (e) => e.type === "agent.created" || e.type === "agent.removed",
   );
   useEffect(() => {
@@ -483,7 +527,8 @@ export function HomeView() {
       const agent = await api.createAgent({
         ...body,
         config: configWithPermission(body.config, chatPermission),
-        ...(chatWorktree && cwd ? { worktree: true } : {}),
+        ...(!isRemoteNode && chatWorktree && cwd ? { worktree: true } : {}),
+        ...(isRemoteNode ? { node: activeRemote.id } : {}),
       });
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
@@ -577,7 +622,7 @@ export function HomeView() {
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
+    if (isImeEvent(e)) return;
     // Enter sends (Ctrl/Cmd+Enter too); Shift+Enter is a newline, as in a conversation.
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -597,6 +642,24 @@ export function HomeView() {
     } else setFolder(dir);
     setPathEntry(false);
   };
+  const pickRemoteDir = (dir: string) => {
+    setDirPickerOpen(false);
+    setPathEntry(false);
+    setManualPath("");
+    const known = list.find((w) => w.key === wsKey(dir));
+    if (known) {
+      setFolder(undefined);
+      selectWorkspace(known.key);
+    } else {
+      setFolder(dir);
+    }
+  };
+  const centreLabel = localNode?.hostname || "中心";
+  const browseTargetNode = isRemoteNode ? activeRemote.id : "local";
+  const browseTargetLabel = isRemoteNode ? activeRemote.name : centreLabel;
+  const browseTargetOs = isRemoteNode ? activeRemote.os : localNode?.os;
+  const browseInitialPath = folder ?? current?.path ?? (isRemoteNode ? activeRemote.default_cwd : "");
+
   const wsItems: MenuItem[] = [
     // A chat may live outside any project; a run always works in one.
     ...(mode === "chat"
@@ -629,15 +692,28 @@ export function HomeView() {
         },
       }),
     ),
-    ...(remote
+    ...(manualOnly
       ? [
           {
             kind: "item",
-            key: "path",
-            label: "输入中心上的路径…",
-            sub: "这个路径在中心那台机器上；建 agent 时 hub 会校验",
+            key: "browse",
+            label: `浏览 ${browseTargetLabel} 目录…`,
+            sub: `直接查看并选择 ${browseTargetLabel} 上的文件夹`,
             icon: <Icon name="folder" size={14} />,
-            onPick: () => setPathEntry(true),
+            onPick: () => setDirPickerOpen(true),
+          } satisfies MenuItem,
+          {
+            kind: "item",
+            key: "path",
+            label: isRemoteNode ? `手动输入 ${activeRemote.name} 路径…` : "手动输入中心路径…",
+            sub: isRemoteNode
+              ? `这个路径在 ${activeRemote.name}（${activeRemote.os}）上`
+              : "这个路径在中心那台机器上；建 agent 时 hub 会校验",
+            icon: <Icon name="folder" size={14} />,
+            onPick: () => {
+              if (!manualPath && isRemoteNode && activeRemote.default_cwd) setManualPath(activeRemote.default_cwd);
+              setPathEntry(true);
+            },
           } satisfies MenuItem,
         ]
       : pickFolder
@@ -660,6 +736,46 @@ export function HomeView() {
           ]
         : []),
   ];
+
+  const switchTargetNode = (nextNodeId: string) => {
+    selectNode(nextNodeId);
+    setFolder(undefined);
+    selectWorkspace("");
+    setSessionId(undefined);
+    setImportPick(undefined);
+    setPathEntry(false);
+    setDirPickerOpen(false);
+    setManualPath("");
+  };
+  const nodeItems: MenuItem[] =
+    remoteNodes.length > 0
+      ? [
+          {
+            kind: "item",
+            key: "node:local",
+            label: centreLabel,
+            sub: `中心 · 在线${localNode?.plugins?.filter((p) => p.installed).length ? ` · ${localNode.plugins.filter((p) => p.installed).map((p) => p.name).join(" / ")}` : ""}`,
+            icon: <OsIcon os={normalizeNodeOs(localNode?.os)} size={14} />,
+            on: !isRemoteNode,
+            onPick: () => switchTargetNode(""),
+          },
+          ...remoteNodes.map((n): MenuItem => {
+            const installed = (n.plugins ?? []).filter((p) => p.installed).map((p) => p.name);
+            return {
+              kind: "item",
+              key: `node:${n.id}`,
+              label: n.name,
+              sub: n.online
+                ? `在线${installed.length ? ` · ${installed.join(" / ")}` : ` · ${n.os}`}`
+                : "离线（请在该机器运行 crossagents node run）",
+              icon: <OsIcon os={normalizeNodeOs(n.os)} size={14} />,
+              on: activeNodeId === n.id,
+              disabled: !n.online,
+              onPick: () => switchTargetNode(n.id),
+            };
+          }),
+        ]
+      : [];
 
   /**
    * Models by vendor; a vendor with several logins gets a group per login, so picking a model
@@ -861,13 +977,17 @@ export function HomeView() {
   const missing =
     !agents.data || !plugins.data
       ? undefined
-      : sessionUse && !sessionUse.selectable && sessionUse.reason
-        ? t(sessionUse.reason.key, sessionUse.reason.vars)
-        : !chosenSession && !chosenImport && !offered.length
-          ? t("home.noModels")
-          : mode === "run" && !where
-            ? t("home.needWorkspace")
-            : undefined;
+      : isRemoteNode && !activeRemote.online
+        ? `节点「${activeRemote.name}」当前离线，请在该机器上运行 crossagents node run`
+        : sessionUse && !sessionUse.selectable && sessionUse.reason
+          ? t(sessionUse.reason.key, sessionUse.reason.vars)
+          : !chosenSession && !chosenImport && !offered.length
+            ? isRemoteNode
+              ? `节点「${activeRemote.name}」上没有检测到可用的 CLI 模型`
+              : t("home.noModels")
+            : mode === "run" && !where
+              ? t("home.needWorkspace")
+              : undefined;
 
   return (
     <div className="page">
@@ -880,7 +1000,14 @@ export function HomeView() {
               <Icon name="chat" size={14} />
               {t("home.chat")}
             </button>
-            <button className={mode === "run" ? "active" : ""} role="radio" aria-checked={mode === "run"} onClick={() => setMode("run")} title={t("home.runHint")}>
+            <button
+              className={mode === "run" ? "active" : ""}
+              role="radio"
+              aria-checked={mode === "run"}
+              disabled={isRemoteNode}
+              onClick={() => setMode("run")}
+              title={isRemoteNode ? "远程节点目前支持 Chat 模式；Work 请切换回中心机器" : t("home.runHint")}
+            >
               <Icon name="tasks" size={14} />
               {t("home.run")}
             </button>
@@ -913,22 +1040,39 @@ export function HomeView() {
                 value={manualPath}
                 onChange={(e) => setManualPath(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  if (e.key === "Enter" && !isImeEvent(e)) {
                     e.preventDefault();
                     useManualPath();
                   } else if (e.key === "Escape") setPathEntry(false);
                 }}
-                placeholder="中心上的路径，例如 /home/me/project 或 C:\\work\\project"
-                aria-label="中心上的路径"
+                placeholder={
+                  isRemoteNode
+                    ? `${activeRemote.name} 上的路径，例如 ${activeRemote.default_cwd || "/Users/you/project"}`
+                    : "中心上的路径，例如 /home/me/project 或 C:\\work\\project"
+                }
+                aria-label={isRemoteNode ? `${activeRemote.name} 上的路径` : "中心上的路径"}
                 autoFocus
               />
               <button type="button" className="primary small" onClick={useManualPath} disabled={!manualPath.trim()}>
                 用这个路径
               </button>
+              <button type="button" className="ghost small" onClick={() => setDirPickerOpen(true)}>
+                浏览目录
+              </button>
               <button type="button" className="ghost small" onClick={() => setPathEntry(false)}>
                 取消
               </button>
             </div>
+          )}
+          {dirPickerOpen && (
+            <RemoteDirPicker
+              node={browseTargetNode}
+              label={browseTargetLabel}
+              os={browseTargetOs}
+              initialPath={browseInitialPath}
+              onSelect={pickRemoteDir}
+              onClose={() => setDirPickerOpen(false)}
+            />
           )}
           {/* Two parts that keep their place in both modes: the chips a start is set up with
               wrap among themselves on the left, the actions stay pinned to the bottom right.
@@ -936,9 +1080,18 @@ export function HomeView() {
               second row as soon as the chips needed one, so Chat and Work looked different. */}
           <div className="bar">
             <div className="bar-chips">
+              {nodeItems.length > 0 && (
+                <ChipMenu
+                  icon={<OsIcon os={normalizeNodeOs(isRemoteNode ? activeRemote.os : localNode?.os)} size={14} />}
+                  label={isRemoteNode ? activeRemote.name : centreLabel}
+                  title={`执行机器：${isRemoteNode ? `${activeRemote.name}（${activeRemote.os}）` : `${centreLabel}（中心）`}`}
+                  items={nodeItems}
+                  up
+                />
+              )}
               <ChipMenu
                 icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name={mode === "chat" ? "chat" : "folder"} size={14} />}
-                label={wsLabel ?? (remote ? "输入中心上的路径" : t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace"))}
+                label={wsLabel ?? (isRemoteNode ? `${activeRemote.name} · 随便聊聊` : remote ? "输入中心上的路径" : t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace"))}
                 title={folder ?? current?.path}
                 items={wsItems}
                 up
@@ -1074,7 +1227,7 @@ export function HomeView() {
                 plugin={chosenImport?.plugin ?? chosenSession?.agent.plugin ?? chatModel?.plugin}
               />
             </Field>
-            {cwd && !chosenSession && !chosenImport && (
+            {!isRemoteNode && cwd && !chosenSession && !chosenImport && (
               <div className="field">
                 <span>分支隔离</span>
                 <label className="field-check">

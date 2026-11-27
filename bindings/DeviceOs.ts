@@ -3,4 +3,4 @@
 /**
  * The operating system a device (or the hub's own machine) runs.
  */
-export type DeviceOs = "windows" | "macos" | "linux" | "other";
+export type DeviceOs = "windows" | "macos" | "linux" | "ios" | "android" | "other";

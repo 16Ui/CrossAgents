@@ -1787,3 +1787,162 @@ async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder
         .unwrap();
     assert_eq!(again.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn transcript_supports_progressive_pagination_slim_tools_and_gzip() {
+    use crossagents_api_types::{ToolCallDetailResponse, Transcript, TranscriptItem};
+    use crossagents_core::{EventKind, MessageId, StopReason, ToolDetail, ToolStatus};
+
+    let t = TestHub::start().await;
+    let agent: Agent = t.create("Luna").await.json().await.unwrap();
+    let store = t.hub.bus.store();
+
+    let mut msgs = Vec::new();
+    for i in 0..4 {
+        let m = MessageId::new();
+        msgs.push(m);
+        store
+            .append_event(EventKind::AgentInput {
+                id: agent.id,
+                message_id: m,
+                text: format!("prompt {i}"),
+                from: None,
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
+                attachments: Vec::new(),
+                notices: Vec::new(),
+                queued: false,
+                queued_reason: None,
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentTurnStarted {
+                id: agent.id,
+                message_id: m,
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentToolCall {
+                id: agent.id,
+                tool_call_id: format!("tool-{i}"),
+                title: format!("exec {i}"),
+                kind: Some("bash".into()),
+                status: ToolStatus::Completed,
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentToolDetail {
+                id: agent.id,
+                tool_call_id: format!("tool-{i}"),
+                detail: ToolDetail {
+                    command: Some(format!("echo {i}")),
+                    output: Some("x".repeat(400)),
+                    ..ToolDetail::default()
+                },
+            })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentTurnCompleted {
+                id: agent.id,
+                message_id: m,
+                stop_reason: StopReason::EndTurn,
+            })
+            .await
+            .unwrap();
+    }
+
+    // 1. Progressive slim page: latest 2 turns, tool details stripped with `has_detail: Some(true)`.
+    let page1: Transcript = t
+        .get(&format!("/v1/agents/{}/transcript?limit=2&slim=true", agent.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page1.total_turns, Some(4));
+    assert_eq!(page1.has_more, Some(true));
+    assert_eq!(page1.turns.len(), 2);
+    assert_eq!(page1.turns[0].message_id, msgs[2]);
+    assert_eq!(page1.turns[1].message_id, msgs[3]);
+    match &page1.turns[1].items[0] {
+        TranscriptItem::ToolCall {
+            tool_call_id,
+            output,
+            detail,
+            has_detail,
+            ..
+        } => {
+            assert_eq!(tool_call_id, "tool-3");
+            assert!(output.is_none());
+            assert!(detail.is_none());
+            assert_eq!(*has_detail, Some(true));
+        }
+        other => panic!("expected slim ToolCall, got {other:?}"),
+    }
+
+    // 2. Older page via `before` cursor.
+    let page2: Transcript = t
+        .get(&format!(
+            "/v1/agents/{}/transcript?limit=2&before={}&slim=true",
+            agent.id, msgs[2]
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page2.total_turns, Some(4));
+    assert_eq!(page2.has_more, Some(false));
+    assert_eq!(page2.turns.len(), 2);
+    assert_eq!(page2.turns[0].message_id, msgs[0]);
+    assert_eq!(page2.turns[1].message_id, msgs[1]);
+
+    // 3. Lazy single-tool detail endpoint.
+    let tool_res: ToolCallDetailResponse = t
+        .get(&format!("/v1/agents/{}/tools/tool-3", agent.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tool_res.tool_call_id, "tool-3");
+    assert_eq!(
+        tool_res.detail.as_ref().and_then(|d| d.command.as_deref()),
+        Some("echo 3")
+    );
+
+    // 4. HTTP gzip compression works on JSON responses and skips SSE streams.
+    let gz_res = t
+        .get(&format!("/v1/agents/{}/transcript", agent.id))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gz_res.status(), StatusCode::OK);
+    assert_eq!(
+        gz_res
+            .headers()
+            .get("content-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("gzip")
+    );
+    let sse_res = t
+        .get("/v1/events?live=true")
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sse_res.status(), StatusCode::OK);
+    assert!(
+        sse_res.headers().get("content-encoding").is_none(),
+        "SSE streams must never be gzip-buffered"
+    );
+}

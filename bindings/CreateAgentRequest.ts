@@ -30,4 +30,8 @@ profile: AgentProfile,
 /**
  * When true and `cwd` is a git repository, create an isolated git worktree for this session.
  */
-worktree?: boolean, };
+worktree?: boolean, 
+/**
+ * Target execution node id, name, or hostname (`None` or `"local"` runs on the hub).
+ */
+node?: string, };

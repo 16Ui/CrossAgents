@@ -11,6 +11,7 @@
 //! implements the local form and leaves the interface for the other.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,11 +22,11 @@ use crossagents_core::{
     DriverSession, PermissionDecision, PermissionHandler, Prompt, SessionEvent, SessionSpec,
     TurnOutcome,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::protocol::{
-    Op, PROTOCOL_V1, ProtocolMismatch, RegisterInfo, SessionInfo, ToHub, ToNode, WireError,
-    WirePrompt, WireReply, WireResult, WireSpec, decode, encode, negotiate_protocol,
+    Op, PROTOCOL_V1, PluginSnapshot, ProtocolMismatch, RegisterInfo, SessionInfo, ToHub, ToNode,
+    WireError, WirePrompt, WireReply, WireResult, WireSpec, decode, encode, negotiate_protocol,
 };
 use crate::transport::{Transport, TransportError};
 
@@ -110,6 +111,67 @@ impl DriverInfo for LocalDriverInfo {
     }
 }
 
+/// [`DriverInfo`] built from a remote node's [`PluginSnapshot`] reported in `Register`.
+pub struct SnapshotDriverInfo {
+    snapshot: PluginSnapshot,
+    kind: DriverKind,
+    capabilities: Capabilities,
+}
+
+impl SnapshotDriverInfo {
+    pub fn new(snapshot: PluginSnapshot) -> Self {
+        let kind = snapshot
+            .driver
+            .as_deref()
+            .and_then(|d| DriverKind::from_str(d).ok())
+            .unwrap_or(DriverKind::AcpGeneric);
+        let capabilities = snapshot.capabilities.clone().unwrap_or(Capabilities {
+            resume: true,
+            interrupt: true,
+            set_model: true,
+            ..Capabilities::default()
+        });
+        Self {
+            snapshot,
+            kind,
+            capabilities,
+        }
+    }
+}
+
+#[async_trait]
+impl DriverInfo for SnapshotDriverInfo {
+    fn name(&self) -> &str {
+        &self.snapshot.name
+    }
+
+    fn kind(&self) -> DriverKind {
+        self.kind
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities.clone()
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.snapshot.models.clone()
+    }
+
+    fn model_efforts(&self, model: &str) -> Option<Vec<String>> {
+        self.snapshot
+            .efforts_by_model
+            .get(model)
+            .cloned()
+            .or_else(|| {
+                (!self.snapshot.efforts.is_empty()).then(|| self.snapshot.efforts.clone())
+            })
+    }
+
+    fn installed(&self) -> bool {
+        self.snapshot.installed
+    }
+}
+
 /// Where the hub gets a connection to its node: an in-memory link now, the tunnel later.
 #[async_trait]
 pub trait HubLink: Send + Sync {
@@ -147,6 +209,7 @@ struct HubShared {
     last_seq: AtomicU64,
     next_id: AtomicU64,
     register: Mutex<Option<Result<RegisterInfo, ProtocolMismatch>>>,
+    register_tx: watch::Sender<Option<RegisterInfo>>,
     /// Kept across rejected registrations so a later restart resets replay tracking.
     accepted_epoch: Mutex<Option<String>>,
 }
@@ -406,7 +469,7 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 shared.last_seq.store(0, Ordering::SeqCst);
             }
             *accepted_epoch = Some(epoch.clone());
-            *register = Some(Ok(RegisterInfo {
+            let info = RegisterInfo {
                 epoch,
                 protocol,
                 capabilities,
@@ -414,7 +477,9 @@ fn dispatch(shared: &Arc<HubShared>, frame: ToHub) {
                 os,
                 hostname,
                 plugins,
-            }));
+            };
+            *register = Some(Ok(info.clone()));
+            let _ = shared.register_tx.send(Some(info));
         }
         ToHub::Event {
             seq,
@@ -504,6 +569,7 @@ pub struct RemoteNode {
 
 impl RemoteNode {
     pub fn new(link: Arc<dyn HubLink>) -> Self {
+        let (register_tx, _) = watch::channel(None);
         let shared = Arc::new(HubShared {
             link,
             writer: Mutex::new(None),
@@ -515,10 +581,21 @@ impl RemoteNode {
             last_seq: AtomicU64::new(0),
             next_id: AtomicU64::new(0),
             register: Mutex::new(None),
+            register_tx,
             accepted_epoch: Mutex::new(None),
         });
         let actor = tokio::spawn(run(shared.clone()));
         Self { shared, actor }
+    }
+
+    /// Whether this node currently has an active accepted control stream.
+    pub fn is_online(&self) -> bool {
+        self.shared.writer().is_some()
+    }
+
+    /// Subscribes to accepted `Register` updates from this node.
+    pub fn watch_register(&self) -> watch::Receiver<Option<RegisterInfo>> {
+        self.shared.register_tx.subscribe()
     }
 
     /// A driver for one of this node's `(plugin, driver)` pairs.

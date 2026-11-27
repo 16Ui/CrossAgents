@@ -5,6 +5,7 @@
 // switch reloads the window.
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import type { DeviceLevel } from "@bindings/DeviceLevel";
 import type { LinkInvite } from "@bindings/LinkInvite";
 import type { LinkStatus } from "@bindings/LinkStatus";
 import type { ConnectionState, CrossAgentsBridge, PairStep, RemoteTarget } from "../bridge";
@@ -18,6 +19,7 @@ import { useArmed } from "../parts";
 import { when } from "../lib/time";
 import type { TailscaleStatus } from "../bridge";
 import { OsIcon } from "../osIcon";
+import { PairingQr } from "../PairingQr";
 import { peerAddress, sortPeers, tailscaleNote } from "../lib/tailscale";
 
 type Bridge = NonNullable<CrossAgentsBridge["connection"]>;
@@ -74,7 +76,7 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
         <div className="guide-goals" role="tablist" aria-label="要做什么">
           <button type="button" role="tab" aria-selected={goal === "join"} className={goal === "join" ? "active" : ""} data-action="goal-join" onClick={() => setGoal("join")}>
             <span className="guide-goal-title">连到别的电脑上的中心</span>
-            <span className="guide-goal-hint">这台只开界面，agent 在中心那台跑</span>
+            <span className="guide-goal-hint">连上中心，并自动接入本机的 codex / claude 等 agent</span>
           </button>
           <button type="button" role="tab" aria-selected={goal === "host"} className={goal === "host" ? "active" : ""} data-action="goal-host" onClick={() => setGoal("host")}>
             <span className="guide-goal-title">让别的电脑连进来</span>
@@ -128,6 +130,45 @@ function ConnectionForm({ bridge, state }: { bridge: Bridge; state: ConnectionSt
                 重新连接
               </button>
             </div>
+            {bridge.setShareNode && (
+              <div className="setting-line">
+                <div>
+                  <div className="setting-label">把这台电脑作为执行节点</div>
+                  <div className="setting-hint">
+                    开启后，连上中心时会自动识别并接入本机已安装的 codex / claude 等 CLI，无需手动开终端运行节点。
+                    {state.mode === "remote" && state.nodeStatus === "unsupported" && (
+                      <> <strong>中心版本偏旧，请先将中心更新到最新版。</strong></>
+                    )}
+                    {state.mode === "remote" && state.nodeStatus === "missing" && (
+                      <> <strong>当前安装包未附带节点程序，请重新安装正式版。</strong></>
+                    )}
+                  </div>
+                </div>
+                <div className="row">
+                  {state.mode === "remote" && state.nodeStatus && (
+                    <span className={`chip small ${state.nodeStatus === "connected" ? "ok" : state.nodeStatus === "unsupported" || state.nodeStatus === "missing" || state.nodeStatus.startsWith("error") ? "danger" : state.nodeStatus === "connecting" ? "warn" : ""}`}>
+                      {state.nodeStatus === "connected"
+                        ? "已接入"
+                        : state.nodeStatus === "connecting"
+                          ? "接入中"
+                          : state.nodeStatus === "disabled"
+                            ? "已关闭"
+                            : state.nodeStatus === "unsupported"
+                              ? "需更新中心"
+                              : state.nodeStatus === "missing"
+                                ? "缺少组件"
+                                : "离线"}
+                    </span>
+                  )}
+                  <button
+                    disabled={busy}
+                    onClick={() => void act(() => bridge.setShareNode!(!(state.shareNode ?? true)))}
+                  >
+                    {(state.shareNode ?? true) ? "关闭" : "开启"}
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="setting-line">
               <div>
                 <div className="setting-label">忘记这台中心</div>
@@ -359,7 +400,7 @@ function CodePairForm({ bridge, state }: { bridge: Bridge; state: ConnectionStat
           <li>
             <div className="guide-step-title">给这台电脑起个名字，然后连接</div>
             <div className="conn-row">
-              <Field label="设备名（在中心的「设备」页里认它）">
+              <Field label="这台电脑的名字（会显示在侧边栏和中心的「设备」页）">
                 <input data-field="name" value={name} onChange={(e) => setName(e.target.value)} maxLength={64} disabled={busy} />
               </Field>
             </div>
@@ -553,6 +594,7 @@ function HostSection({ state }: { state: ConnectionState }) {
 function HostGuide() {
   const [status, setStatus] = useState<LinkStatus>();
   const [invite, setInvite] = useState<LinkInvite>();
+  const [inviteLevel, setInviteLevel] = useState<DeviceLevel>("write");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [relay, setRelay] = useState("");
@@ -612,7 +654,7 @@ function HostGuide() {
     );
   const makeCode = () =>
     run(
-      () => api.createLinkInvite(),
+      () => api.createLinkInvite(inviteLevel),
       (made) => {
         setInvite(made);
         setShowCode(false);
@@ -710,6 +752,28 @@ function HostGuide() {
                 </div>
               </div>
               <div className="row guide-actions">
+                <div className="segmented small" role="group" aria-label="配对设备权限">
+                  <button
+                    type="button"
+                    className={inviteLevel === "write" ? "active" : ""}
+                    aria-pressed={inviteLevel === "write"}
+                    disabled={busy}
+                    onClick={() => setInviteLevel("write")}
+                    title="日常使用：可发起会话与控制 agent"
+                  >
+                    读写
+                  </button>
+                  <button
+                    type="button"
+                    className={inviteLevel === "admin" ? "active" : ""}
+                    aria-pressed={inviteLevel === "admin"}
+                    disabled={busy}
+                    onClick={() => setInviteLevel("admin")}
+                    title="自己的主力设备：出差时也能管中心账号、开终端、审批扩展"
+                  >
+                    管理（主力设备）
+                  </button>
+                </div>
                 <button className={running && (!invite || expired) ? "primary" : ""} type="button" data-action="link-invite" disabled={busy || !running} onClick={() => void makeCode()}>
                   {invite ? "再生成一个" : "生成配对码"}
                 </button>
@@ -717,33 +781,42 @@ function HostGuide() {
             </div>
           </li>
           <li className={invite && !expired ? "now" : ""}>
-            <div className="guide-step-title">在另一台电脑上粘贴</div>
+            <div className="guide-step-title">在另一台电脑粘贴，或用手机扫码</div>
             {invite && !expired ? (
-              <>
-                <div className={`code-box ${showCode ? "open" : ""}`} data-role="invite">
-                  {showCode ? (
-                    <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
-                  ) : (
-                    <code className="mono code-line" title={invite.code} aria-label="配对码">
-                      {invite.code}
-                    </code>
-                  )}
-                  <CopyButton className="copy" text={invite.code} label="复制" title="复制配对码" />
-                  <button type="button" className="ghost small" data-action="code-toggle" onClick={() => setShowCode((v) => !v)}>
-                    {showCode ? "收起" : "显示全部"}
-                  </button>
+              <div className="pairing-invite-layout">
+                <PairingQr code={invite.code} />
+                <div className="pairing-invite-body">
+                  <div className={`code-box ${showCode ? "open" : ""}`} data-role="invite">
+                    {showCode ? (
+                      <textarea className="mono code-input" readOnly value={invite.code} rows={3} onFocus={(e) => e.currentTarget.select()} aria-label="配对码" />
+                    ) : (
+                      <code className="mono code-line" title={invite.code} aria-label="配对码">
+                        {invite.code}
+                      </code>
+                    )}
+                    <CopyButton className="copy" text={invite.code} label="复制" title="复制配对码" />
+                    <button type="button" className="ghost small" data-action="code-toggle" onClick={() => setShowCode((v) => !v)}>
+                      {showCode ? "收起" : "显示全部"}
+                    </button>
+                  </div>
+                  <div className="setting-hint">
+                    还剩 <strong>{left}</strong> 过期，只能用一次。
+                  </div>
+                  <div className="setting-hint">
+                    <strong>手机端（iPhone 免签 PWA / iOS App）</strong>：在 iPhone Safari 打开你的 CrossAgents 移动版 PWA 并「添加到主屏幕」，或在 iOS App 中点「扫码配对」扫描左侧二维码。
+                  </div>
+                  <div className="setting-hint">
+                    <strong>电脑端</strong>：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的设备。
+                  </div>
                 </div>
-                <div className="setting-hint">
-                  还剩 <strong>{left}</strong> 过期，只能用一次。在那台电脑上：设置 →「连接」→「连到别的电脑上的中心」→「配对码」，粘贴后点「连接」。只发给你自己的电脑。
-                </div>
-              </>
+              </div>
             ) : (
-              <div className="setting-hint">{expired ? "刚才的配对码已经过期，重新生成一个。" : "生成配对码后，在这里复制。"}</div>
+              <div className="setting-hint">{expired ? "刚才的配对码已经过期，重新生成一个。" : "生成配对码后，在这里扫码或复制。"}</div>
             )}
           </li>
         </ol>
       </div>
-      <div className="notice">连进来的电脑会出现在「设备」页（write 读写级别），在那里可以吊销。点「关闭」后谁都连不进来，没用掉的配对码也作废。</div>
+      <div className="notice">连进来的电脑会出现在「设备」页，在那里可以随时切换权限级别（如把已连的 Mac 升为「管理」）或吊销。点「关闭」后谁都连不进来，没用掉的配对码也作废。</div>
     </section>
   );
 }

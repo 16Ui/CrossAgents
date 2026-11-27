@@ -5,6 +5,7 @@
 
 import { useEffect, useState, type KeyboardEvent, type RefObject } from "react";
 import { matchCommands, type SlashCommand, type SlashGroup } from "./lib/slash";
+import { isImeEvent } from "./lib/ime";
 
 /**
  * A command the menu can offer. With `run` it happens on pick (and the input clears); without
@@ -68,7 +69,7 @@ export function useSlash(ref: RefObject<HTMLTextAreaElement | null>, setValue: (
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
-    if (!open || e.nativeEvent.isComposing) return false;
+    if (!open || isImeEvent(e)) return false;
     if (!shown.length) {
       if (e.key !== "Escape") return false;
       setQuery(undefined);

@@ -1,0 +1,39 @@
+[workspace]
+
+[package]
+name = "crossagents-link-wasm"
+version = "0.3.10"
+edition = "2024"
+license = "Apache-2.0"
+description = "Browser WASM iroh client bridging CrossAgents mobile PWA directly to a CrossAgents hub over E2EE relays"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = "0.23.1"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
+n0-future = "0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.0", features = ["io-util", "sync", "macros"] }
+url = "2.5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.7"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1.54.0", features = ["full"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

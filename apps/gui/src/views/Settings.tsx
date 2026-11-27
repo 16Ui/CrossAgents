@@ -8,7 +8,7 @@ import type { HubInfo } from "@bindings/HubInfo";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
-import { avatarFromFile } from "../avatarImages";
+import { avatarDataUrlFromFile } from "../avatarImages";
 import { ChatAvatar } from "../ChatAvatar";
 import { ErrorBox, FamilyMark, Icon, VendorMark, type IconName } from "../components";
 import { useConnectionStatus, usePlugins } from "../hub";
@@ -190,12 +190,10 @@ function ChatProfileSettings() {
   const [error, setError] = useState<string>();
 
   function save(patch: Partial<ChatProfile>) {
-    try {
-      setChatProfile(patch);
-      setError(undefined);
-    } catch {
-      setError("无法保存个性化设置。请检查本机的应用存储后重试。");
-    }
+    setError(undefined);
+    void setChatProfile(patch).catch((err) => {
+      setError(`头像/昵称已保存在本机，但同步到中心失败：${errorText(err)}`);
+    });
   }
 
   async function chooseImage(event: ChangeEvent<HTMLInputElement>) {
@@ -205,9 +203,10 @@ function ChatProfileSettings() {
     setBusy(true);
     setError(undefined);
     try {
-      save({ avatar: await avatarFromFile(file) });
-    } catch {
-      setError("无法读取这张图片，请换一张 PNG、JPEG 或 WebP 图片。");
+      const dataUrl = await avatarDataUrlFromFile(file);
+      await setChatProfile({ avatar: dataUrl });
+    } catch (err) {
+      setError(`无法保存头像：${errorText(err)}`);
     } finally {
       setBusy(false);
     }
@@ -220,7 +219,7 @@ function ChatProfileSettings() {
           <ChatAvatar image={profile.avatar} size={44} />
           <div>
             <div className="setting-label">我的聊天资料</div>
-            <div className="setting-hint">昵称和头像仅用于本机显示。</div>
+            <div className="setting-hint">昵称和头像会自动同步到已连接的中心和其他设备。</div>
           </div>
         </div>
         <div className="row chat-profile-actions">

@@ -1,0 +1,4 @@
+module CrossAgentsLinkFFI {
+    header "crossagents_link_ffi.h"
+    export *
+}

@@ -14,4 +14,9 @@ output?: string,
 /**
  * What it did, once the agent reports it.
  */
-detail?: ToolDetail, } | { "type": "permission", kind: string, title: string, decision: PermissionDecision, } | { "type": "steer", message_id: MessageId, text: string, attachments?: Array<Attachment>, read: boolean, } | { "type": "warning", message: string, } | { "type": "error", message: string, };
+detail?: ToolDetail, 
+/**
+ * Present (`Some(true)`) on `slim=true` transcripts when heavy `output`/`detail` were
+ * omitted and can be loaded lazily via `GET /v1/agents/{key}/tools/{tool_call_id}`.
+ */
+has_detail?: boolean, } | { "type": "permission", kind: string, title: string, decision: PermissionDecision, } | { "type": "steer", message_id: MessageId, text: string, attachments?: Array<Attachment>, read: boolean, } | { "type": "warning", message: string, } | { "type": "error", message: string, };

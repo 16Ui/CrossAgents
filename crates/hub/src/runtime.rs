@@ -510,6 +510,16 @@ pub struct Runtime {
     generation: AtomicU64,
     /// Where each session's CLI version is recorded as working or broken.
     cli_runs: Option<Arc<crate::cli_runs::CliRuns>>,
+    /// Connected remote execution nodes (`crossagents node run`).
+    remote_nodes: Option<Arc<crate::remote_nodes::RemoteNodes>>,
+}
+
+/// Whether `agent` executes on a remote node rather than the hub's built-in local node.
+pub fn is_remote_agent(agent: &Agent) -> bool {
+    matches!(
+        agent.node.as_deref().map(str::trim),
+        Some(n) if !n.is_empty() && !n.eq_ignore_ascii_case(crate::builtin_node::LOCAL)
+    )
 }
 
 /// Messages to an agent's event forwarder, kept in order with the session's own events.
@@ -584,7 +594,65 @@ impl Runtime {
             clients: Mutex::default(),
             generation: AtomicU64::new(0),
             cli_runs: None,
+            remote_nodes: None,
         }
+    }
+
+    /// Attaches the remote node registry so agents with `agent.node` run on their target node.
+    pub fn with_remote_nodes(mut self, nodes: Arc<crate::remote_nodes::RemoteNodes>) -> Self {
+        self.remote_nodes = Some(nodes);
+        self
+    }
+
+    /// Resolves the [`crossagents_core::Driver`] for `agent` (local built-in node or remote node).
+    async fn resolve_driver(
+        &self,
+        agent: &Agent,
+    ) -> Result<crossagents_plugins::Resolved, CoreError> {
+        if let Some(node) = agent
+            .node
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case(crate::builtin_node::LOCAL))
+        {
+            let nodes = self.remote_nodes.as_ref().ok_or_else(|| {
+                CoreError::Unsupported(format!(
+                    "{} runs on node {node:?}, and remote nodes are not configured",
+                    agent.name
+                ))
+            })?;
+            let driver = nodes
+                .driver(node, &agent.plugin, agent.driver.as_deref())
+                .await?;
+            return Ok(crossagents_plugins::Resolved {
+                driver,
+                warning: None,
+            });
+        }
+        self.plugins.driver(&agent.plugin, agent.driver.as_deref())
+    }
+
+    /// Returns the driver kind for `agent`, resolving remote nodes when needed.
+    pub async fn driver_kind(&self, agent: &Agent) -> Option<crossagents_core::DriverKind> {
+        if is_remote_agent(agent) {
+            if let Ok(resolved) = self.resolve_driver(agent).await {
+                return Some(resolved.driver.kind());
+            }
+            return agent
+                .driver
+                .as_deref()
+                .and_then(|d| d.parse().ok())
+                .or_else(|| {
+                    self.plugins
+                        .driver(&agent.plugin, agent.driver.as_deref())
+                        .ok()
+                        .map(|r| r.driver.kind())
+                });
+        }
+        self.plugins
+            .driver(&agent.plugin, agent.driver.as_deref())
+            .ok()
+            .map(|r| r.driver.kind())
     }
 
     /// Records what each session's CLI version did (`crate::cli_runs`).
@@ -596,6 +664,9 @@ impl Runtime {
     /// A witness for a session of `agent`, when the runtime records CLI runs and the CLI
     /// it launches reports where it is and its version.
     async fn witness(&self, agent: &Agent) -> Option<crate::cli_runs::Witness> {
+        if is_remote_agent(agent) {
+            return None;
+        }
         let runs = self.cli_runs.clone()?;
         let resolved = self
             .plugins
@@ -683,6 +754,7 @@ impl Runtime {
                 AgentStatus::Idle | AgentStatus::Running | AgentStatus::Starting
             );
             let adopt = was_live
+                && !is_remote_agent(&agent)
                 && !discovery.live.is_empty()
                 && agent.plugin != EXTERNAL_PLUGIN
                 && agent.archived_at.is_none();
@@ -823,8 +895,7 @@ impl Runtime {
     /// Takes over the agent's process left running by the previous hub; `false` when there
     /// is none to take over.
     async fn adopt(&self, agent: &Agent, running: Option<MessageId>) -> Result<bool, CoreError> {
-        crate::builtin_node::check_node(agent)?;
-        let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
+        let Ok(resolved) = self.resolve_driver(agent).await else {
             return Ok(false);
         };
         let Some(session_id) = self.store().last_session_id(agent.id).await? else {
@@ -859,7 +930,9 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
+        let diff_dir = (!is_remote_agent(agent)
+            && !resolved.driver.capabilities().structured_diff)
+            .then(|| agent.cwd.clone());
         self.install(
             agent.id,
             Arc::from(session),
@@ -982,12 +1055,11 @@ impl Runtime {
     /// declaration of the files it takes (ACP `promptCapabilities`) overrides the
     /// driver's static answer.
     pub async fn capabilities(&self, agent: &Agent) -> Option<Capabilities> {
-        let resolved = self
-            .plugins
-            .driver(&agent.plugin, agent.driver.as_deref())
-            .ok()?;
+        let resolved = self.resolve_driver(agent).await.ok()?;
         let mut capabilities = resolved.driver.capabilities();
-        if let Some(move_cwd) = self.plugins.config(&agent.plugin).and_then(|c| c.move_cwd) {
+        if !is_remote_agent(agent)
+            && let Some(move_cwd) = self.plugins.config(&agent.plugin).and_then(|c| c.move_cwd)
+        {
             capabilities.move_cwd = move_cwd;
         }
         let declared = self
@@ -1024,7 +1096,7 @@ impl Runtime {
         if declared.is_some() {
             return Ok(declared);
         }
-        let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
+        let Ok(resolved) = self.resolve_driver(agent).await else {
             return Ok(None);
         };
         if let Some(support) = resolved.driver.capabilities().attachments {
@@ -1084,9 +1156,8 @@ impl Runtime {
     /// to work with its conversation (docs/tasks/S1.md §3.1).
     async fn open(&self, agent: &Agent, carry: bool) -> Result<(), CoreError> {
         crate::project_quota::check(self.home.as_deref(), agent)?;
-        crate::builtin_node::check_node(agent)?;
         let agent = agent.clone();
-        let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
+        let resolved = match self.resolve_driver(&agent).await {
             Ok(resolved) => resolved,
             Err(CoreError::NotFound { .. }) => {
                 return Err(CoreError::Agent(format!(
@@ -1205,7 +1276,9 @@ impl Runtime {
         }
 
         // Drivers that do not report what a turn changed get it worked out by the hub.
-        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
+        let diff_dir = (!is_remote_agent(&agent)
+            && !resolved.driver.capabilities().structured_diff)
+            .then(|| agent.cwd.clone());
         self.install(
             agent.id,
             session,
@@ -3001,6 +3074,20 @@ impl Runtime {
     ) -> Result<crossagents_api_types::ResumeCommandResponse, CoreError> {
         use crate::resume;
         let agent = self.store().get_agent(key).await?;
+        if is_remote_agent(&agent) {
+            let session_id = self.store().last_session_id(agent.id).await?;
+            return Ok(crossagents_api_types::ResumeCommandResponse {
+                command: None,
+                unavailable: Some(
+                    "该会话运行在远程节点上，暂不支持在中心生成本机终端恢复命令".into(),
+                ),
+                session_id,
+                cwd: agent.cwd.display().to_string(),
+                shell: String::new(),
+                env: Vec::new(),
+                notes: Vec::new(),
+            });
+        }
         let external = agent.plugin == EXTERNAL_PLUGIN;
         let resolved = if external {
             None

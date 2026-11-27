@@ -57,10 +57,15 @@ impl DriverSource for SingleDriverSource {
     }
 }
 
+/// Optional hook called on every inbound [`SessionSpec`] before launching a local driver
+/// (e.g. rewriting the hub's `crossagents mcp` binary & URL for a remote execution node).
+pub type SpecRewriter = Arc<dyn Fn(&mut SessionSpec) + Send + Sync>;
+
 /// A node: drivers by name, the sessions it runs, and the frames the hub has not acked.
 pub struct NodeService {
     source: Arc<dyn DriverSource>,
     register: RegisterInfo,
+    spec_rewriter: Option<SpecRewriter>,
 }
 
 impl NodeService {
@@ -68,12 +73,19 @@ impl NodeService {
         Self {
             source,
             register: RegisterInfo::local(),
+            spec_rewriter: None,
         }
     }
 
     /// What `Register` reports (B1.4 fills `plugins` in; B1.1 sends an empty list).
     pub fn with_register(mut self, register: RegisterInfo) -> Self {
         self.register = register;
+        self
+    }
+
+    /// Rewrites each [`SessionSpec`] on the node before invoking a driver.
+    pub fn with_spec_rewriter(mut self, rewriter: SpecRewriter) -> Self {
+        self.spec_rewriter = Some(rewriter);
         self
     }
 
@@ -87,6 +99,7 @@ impl NodeService {
             out: out_tx,
             next_handle: AtomicU64::new(0),
             next_ask: AtomicU64::new(0),
+            spec_rewriter: self.spec_rewriter.clone(),
         });
         let (in_tx, mut in_rx) = mpsc::unbounded_channel::<Inbound>();
         let mut frames: BTreeMap<u64, ToHub> = BTreeMap::new();
@@ -177,6 +190,7 @@ struct Shared {
     out: mpsc::UnboundedSender<Outgoing>,
     next_handle: AtomicU64,
     next_ask: AtomicU64,
+    spec_rewriter: Option<SpecRewriter>,
 }
 
 impl Shared {
@@ -589,7 +603,7 @@ fn make_spec(
             events: events.clone(),
         }) as Arc<dyn PermissionHandler>
     });
-    let spec = SessionSpec {
+    let mut spec = SessionSpec {
         agent: wire.agent.into(),
         mcp_servers: wire.mcp_servers.into_iter().map(Into::into).collect(),
         permission: wire.permission.into(),
@@ -599,6 +613,9 @@ fn make_spec(
         env: wire.env,
         events,
     };
+    if let Some(rewrite) = &shared.spec_rewriter {
+        rewrite(&mut spec);
+    }
     (spec, receiver)
 }
 
@@ -838,6 +855,7 @@ mod tests {
             out,
             next_handle: AtomicU64::new(0),
             next_ask: AtomicU64::new(0),
+            spec_rewriter: None,
         });
         let (events, mut emitted) = mpsc::unbounded_channel();
         let handler = AskHandler {

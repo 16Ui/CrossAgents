@@ -51,6 +51,13 @@ pub struct ListDevicesResponse {
     pub devices: Vec<Device>,
 }
 
+/// `POST /v1/devices/{id}/level` (admin): promote or demote an active device's permission level.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetDeviceLevelRequest {
+    pub level: DeviceLevel,
+}
+
 /// `GET /v1/link`: the hub's built-in hole-punching entrance (docs/MULTI-NODE.md §14「内置打洞」).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -104,13 +111,26 @@ pub struct SetLinkRequest {
     pub relay: Option<String>,
 }
 
+/// `POST /v1/link/invites` (admin): optional parameters for a one-time pairing code.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateLinkInviteRequest {
+    /// Device level granted when this pairing code is redeemed (defaults to `write`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub level: Option<DeviceLevel>,
+}
+
 /// `POST /v1/link/invites` (admin): a one-time pairing code. Whoever has it can pair one
-/// client device (write level) until it expires; it is shown only in this response.
+/// client device until it expires; it is shown only in this response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct LinkInvite {
     pub code: String,
     pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub level: Option<DeviceLevel>,
 }
 
 pub const API_VERSION: &str = "v2";
@@ -209,6 +229,10 @@ pub struct CreateAgentRequest {
     #[serde(default)]
     #[ts(optional)]
     pub worktree: Option<bool>,
+    /// Target execution node id, name, or hostname (`None` or `"local"` runs on the hub).
+    #[serde(default)]
+    #[ts(optional)]
+    pub node: Option<String>,
 }
 
 /// How many pictures the avatar gallery holds, and how many one upload may add.
@@ -539,6 +563,14 @@ pub struct Transcript {
     /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
     #[ts(type = "number")]
     pub last_seq: u64,
+    /// Total turns in the full conversation (populated when `limit` / `before` / `slim` is used).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub total_turns: Option<usize>,
+    /// True when older turns exist before `turns[0]` (populated on paginated queries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub has_more: Option<bool>,
 }
 
 /// How an agent's process ended (`agent.exited`); either part is missing when the driver
@@ -706,6 +738,20 @@ pub struct TurnDiffResponse {
     pub stat: TurnDiffStat,
 }
 
+/// `GET /v1/agents/{key}/tools/{tool_call_id}`: full output & detail of a single tool call
+/// fetched lazily after loading a `slim=true` transcript.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ToolCallDetailResponse {
+    pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub detail: Option<Box<crossagents_core::ToolDetail>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -727,6 +773,11 @@ pub enum TranscriptItem {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         detail: Option<Box<crossagents_core::ToolDetail>>,
+        /// Present (`Some(true)`) on `slim=true` transcripts when heavy `output`/`detail` were
+        /// omitted and can be loaded lazily via `GET /v1/agents/{key}/tools/{tool_call_id}`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        has_detail: Option<bool>,
     },
     /// Asked before acting; `decision` is what the permission policy answered.
     Permission {
@@ -3486,6 +3537,30 @@ pub struct BrowserResultRequest {
 // ---------------------------------------------------------------------------------------
 // Remote nodes (cross-platform remote execution & file operations)
 
+fn default_true() -> bool {
+    true
+}
+
+/// Summary of one CLI plugin reported by a connected node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodePluginInfo {
+    pub name: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub driver: Option<String>,
+    #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub efforts: Vec<String>,
+    #[serde(default)]
+    pub efforts_by_model: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 /// One machine connected to the hub (either the built-in `"local"` machine or a remote
 /// `crossagents node run` agent).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -3502,10 +3577,20 @@ pub struct RemoteNodeInfo {
     pub shell: String,
     /// Default working directory on this node.
     pub default_cwd: String,
+    /// Directory where standalone chats live on this node, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub chats_dir: Option<String>,
     pub version: String,
     pub connected_at: DateTime<Utc>,
     /// True for the hub's own machine.
     pub local: bool,
+    /// Whether the node currently has an active connection to the hub.
+    #[serde(default = "default_true")]
+    pub online: bool,
+    /// Plugins reported by this node.
+    #[serde(default)]
+    pub plugins: Vec<NodePluginInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -3616,6 +3701,29 @@ pub struct NodeFileEntry {
 pub struct NodeListFilesResponse {
     pub path: String,
     pub entries: Vec<NodeFileEntry>,
+    pub truncated: bool,
+}
+
+/// One subdirectory returned by `GET /v1/nodes/{node}/dirs`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeDirEntry {
+    pub name: String,
+    pub path: String,
+}
+
+/// `GET /v1/nodes/{node}/dirs` (read): browse folders on either the hub machine (`local`) or a
+/// connected remote execution node, so any GUI can pick a workspace folder without typing paths.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NodeDirsResponse {
+    pub node: String,
+    pub os: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<String>,
+    pub dirs: Vec<NodeDirEntry>,
     pub truncated: bool,
 }
 
